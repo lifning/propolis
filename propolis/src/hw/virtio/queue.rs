@@ -10,6 +10,7 @@ use super::VirtioIntr;
 use crate::common::*;
 use crate::dispatch::DispCtx;
 use crate::vmm::MemCtx;
+use crate::propolis;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -205,7 +206,7 @@ impl VirtQueue {
         let mut count = 0;
         let mut len = 0;
         chain.idx = Some(id);
-        probe_virtio_vq_pop!(|| (self as *const VirtQueue as u64, id));
+        propolis::virtio_vq_pop!(|| (self as *const VirtQueue as u64, id));
 
         // non-indirect descriptor(s)
         while !flags.contains(DescFlag::INDIRECT) {
@@ -277,7 +278,7 @@ impl VirtQueue {
         let id = mem::replace(&mut chain.idx, None).unwrap();
         // XXX: for now, just go off of the write stats
         let len = chain.write_stat.bytes - chain.write_stat.bytes_remain;
-        probe_virtio_vq_push!(|| (self as *const VirtQueue as u64, id, len));
+        propolis::virtio_vq_push!(|| (self as *const VirtQueue as u64, id, len));
         used.write_used(id, len, self.size, mem);
         if !used.suppress_intr(mem) {
             if let Some(i) = used.interrupt.as_ref() {

@@ -10,6 +10,7 @@ use crate::dispatch::DispCtx;
 use crate::hw::pci;
 use crate::intr_pins::IntrPin;
 use crate::util::regmap::RegMap;
+use crate::propolis;
 
 use lazy_static::lazy_static;
 
@@ -378,7 +379,7 @@ impl PciVirtioState {
         }
     }
     fn queue_notify(&self, dev: &dyn VirtioDevice, queue: u16, ctx: &DispCtx) {
-        probe_virtio_vq_notify!(|| (
+        propolis::virtio_vq_notify!(|| (
             dev as *const dyn VirtioDevice as *const c_void as u64,
             queue
         ));

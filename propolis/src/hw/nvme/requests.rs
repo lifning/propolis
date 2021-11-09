@@ -2,6 +2,7 @@ use crate::{
     block::{self, Operation, Request},
     dispatch::DispCtx,
     hw::nvme::{bits, cmds::Completion},
+    propolis,
 };
 
 use super::{
@@ -82,7 +83,7 @@ fn read_op(
     cqe_permit: CompQueueEntryPermit,
     ctx: &DispCtx,
 ) -> Request {
-    probe_nvme_read_enqueue!(|| (cid, cmd.slba, cmd.nlb));
+    propolis::nvme_read_enqueue!(|| (cid, cmd.slba, cmd.nlb));
     let off = state.nlb_to_size(cmd.slba as usize);
     let size = state.nlb_to_size(cmd.nlb as usize);
     let bufs = cmd.data(size as u64, ctx.mctx.memctx()).collect();
@@ -102,7 +103,7 @@ fn write_op(
     cqe_permit: CompQueueEntryPermit,
     ctx: &DispCtx,
 ) -> Request {
-    probe_nvme_write_enqueue!(|| (cid, cmd.slba, cmd.nlb));
+    propolis::nvme_write_enqueue!(|| (cid, cmd.slba, cmd.nlb));
     let off = state.nlb_to_size(cmd.slba as usize);
     let size = state.nlb_to_size(cmd.nlb as usize);
     let bufs = cmd.data(size as u64, ctx.mctx.memctx()).collect();
@@ -148,10 +149,10 @@ fn complete_block_req(
 
     match op {
         Operation::Read(..) => {
-            probe_nvme_read_complete!(|| (cid));
+            propolis::nvme_read_complete!(|| (cid));
         }
         Operation::Write(..) => {
-            probe_nvme_write_complete!(|| (cid));
+            propolis::nvme_write_complete!(|| (cid));
         }
         _ => {}
     }

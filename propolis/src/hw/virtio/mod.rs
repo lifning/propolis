@@ -7,6 +7,7 @@ pub mod block;
 pub mod pci;
 mod queue;
 pub mod viona;
+pub mod p9fs;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;

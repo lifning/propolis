@@ -5,7 +5,7 @@
 #![cfg_attr(test, feature(assert_matches))]
 
 // Define probe macros prior to module imports below.
-#[usdt::provider(format = "probe_{probe}")]
+#[usdt::provider]
 mod propolis {
     fn pio_in(port: u16, bytes: u8, value: u32, was_handled: u8) {}
     fn pio_out(port: u16, bytes: u8, value: u32, was_handled: u8) {}
@@ -61,9 +61,9 @@ pub fn vcpu_run_loop(mut vcpu: VcpuHdl, sctx: &mut SyncCtx) {
         let ctx = sctx.dispctx();
         let mctx = &ctx.mctx;
 
-        probe_vm_entry!(|| (vcpu.cpuid() as u32));
+        propolis::vm_entry!(|| (vcpu.cpuid() as u32));
         let exit = vcpu.run(&next_entry).unwrap();
-        probe_vm_exit!(|| (
+        propolis::vm_exit!(|| (
             vcpu.cpuid() as u32,
             exit.rip,
             exit.kind.code() as u32

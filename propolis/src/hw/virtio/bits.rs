@@ -1,5 +1,6 @@
 pub const VIRTIO_DEV_NET: u16 = 0x1000;
 pub const VIRTIO_DEV_BLOCK: u16 = 0x1001;
+pub const VIRTIO_DEV_9P: u16 = 0x1009;
 
 // Legacy interface feature bits
 pub const VIRTIO_F_NOTIFY_ON_EMPTY: usize = 1 << 24;

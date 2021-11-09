@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::common::*;
 use crate::dispatch::DispCtx;
 use crate::util::aspace::ASpace;
+use crate::propolis;
 pub use crate::util::aspace::{Error, Result};
 
 use byteorder::{ByteOrder, LE};
@@ -47,7 +48,7 @@ impl PioBus {
             slog::info!(ctx.log, "unhandled PIO";
                 "op" => "out", "port" => port, "bytes" => bytes);
         }
-        probe_pio_out!(|| (port, bytes, val, handled as u8));
+        propolis::pio_out!(|| (port, bytes, val, handled as u8));
     }
 
     pub fn handle_in(&self, port: u16, bytes: u8, ctx: &DispCtx) -> u32 {
@@ -68,7 +69,7 @@ impl PioBus {
         }
 
         let val = LE::read_u32(&buf);
-        probe_pio_in!(|| (port, bytes, val, handled as u8));
+        propolis::pio_in!(|| (port, bytes, val, handled as u8));
 
         val
     }
