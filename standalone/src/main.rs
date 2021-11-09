@@ -195,6 +195,7 @@ fn main() {
         inv.register(&debug_device, "debug".to_string(), None)
             .map_err(|e| -> std::io::Error { e.into() })?;
 
+
         for (name, dev) in config.devs() {
             let driver = &dev.driver as &str;
             let bdf = if driver.starts_with("pci-") {
@@ -252,6 +253,27 @@ fn main() {
                     backend.attach(nvme.clone(), disp);
 
                     chipset.pci_attach(bdf.unwrap(), nvme);
+                }
+                "pci-virtio-9p" => {
+                    let source = dev.options.get("source")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .into();
+
+                    let target = dev.options.get("target")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .into();
+
+                    let vio9p = hw::virtio::PciVirtio9pfs::new(
+                        source, target, 0x40,
+                    );
+                    inv.register(&vio9p, format!("vio9p-{}", name), None)
+                        .map_err(|e| -> std::io::Error { e.into() })?;
+
+                    chipset.pci_attach(bdf.unwrap(), vio9p);
                 }
                 _ => {
                     slog::error!(log, "unrecognized driver"; "name" => name);
