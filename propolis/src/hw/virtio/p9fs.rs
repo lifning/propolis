@@ -1,5 +1,6 @@
 use std::num::NonZeroU16;
 use std::sync::Arc;
+use std::convert::TryInto;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
@@ -42,13 +43,17 @@ impl PciVirtio9pfs {
 
     pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx)
     -> Option<Msg> {
+        println!("handling request");
+
         let mem = &ctx.mctx.memctx();
 
         let mut chain = Chain::with_capacity(1);
         let clen = vq.pop_avail(&mut chain, mem)? as usize;
 
         //TODO better as uninitialized?
-        let mut data: Vec<u8> = vec![0;clen];
+        //TODO shouldn't clen be 8192? comes in as 16384.... hardcode 8192 for
+        //now
+        let mut data: Vec<u8> = vec![0;8192];
         let buf = data.as_mut_slice();
         
         // TODO copy pasta from tail end of Chain::read function. Seemingly
@@ -66,12 +71,17 @@ impl PciVirtio9pfs {
             }
         });
 
+        /*
         if total != clen {
             //TODO error msg
+            println!("{} != {}", total, clen);
             return None
         }
+        */
 
-        let mut rdr = std::io::Cursor::new(data);
+        let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+
+        let mut rdr = std::io::Cursor::new(&data[4..4+len]);
         match read_msg(&mut rdr) {
             Ok(msg) => {
                 println!("ok: ← {:#?}", msg);
@@ -154,7 +164,7 @@ lazy_static! {
 mod bits {
     use std::mem::size_of;
 
-    // features 
+    // features
     pub const VIRTIO_9P_F_MOUNT_TAG: u32 = 0x1;
 
     pub const VIRTIO_9P_MAX_TAG_SIZE: usize = 256;
