@@ -29,7 +29,7 @@ impl PciVirtio9pfs {
             NonZeroU16::new(queue_size).unwrap(),
             NonZeroU16::new(1).unwrap(),
         );
-        let msix_count = Some(1); //guess
+        let msix_count = Some(2); //guess
         let (virtio_state, pci_state) = PciVirtioState::create(
             queues,
             msix_count,
@@ -40,7 +40,8 @@ impl PciVirtio9pfs {
         Arc::new(Self{virtio_state, pci_state, source, target})
     }
 
-    pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) -> Option<Msg> {
+    pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx)
+    -> Option<Msg> {
         let mem = &ctx.mctx.memctx();
 
         let mut chain = Chain::with_capacity(1);
@@ -91,11 +92,18 @@ impl VirtioDevice for PciVirtio9pfs {
         P9FS_DEV_REGS.process(&mut rwo, |id, rwo| match rwo {
             RWOp::Read(ro) => {
                 match id {
-                    BlockReg::TagLen => {
+                    P9fsReg::TagLen => {
+                        println!("read taglen");
                         ro.write_u16(self.target.len() as u16);
                     }
-                    BlockReg::Tag => {
-                        ro.write_bytes(self.target.as_bytes());
+                    P9fsReg::Tag => {
+                        println!("read tag");
+                        let mut bs = [0;256];
+                        for (i, x) in self.target.chars().enumerate() {
+                            bs[i] = x as u8;
+                        }
+                        ro.write_bytes(&bs);
+                        ro.fill(0);
                     }
                 }
             }
@@ -103,7 +111,7 @@ impl VirtioDevice for PciVirtio9pfs {
         })
     }
 
-    fn get_features(&self) -> u32 { 0 }
+    fn get_features(&self) -> u32 { VIRTIO_9P_F_MOUNT_TAG }
 
     fn set_features(&self, _feat: u32) { }
 
@@ -128,27 +136,26 @@ impl PciVirtio for PciVirtio9pfs{
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum BlockReg {
+enum P9fsReg {
     TagLen,
     Tag,
 }
 
 lazy_static! {
-    static ref P9FS_DEV_REGS: RegMap<BlockReg> = {
+    static ref P9FS_DEV_REGS: RegMap<P9fsReg> = {
         let layout = [
-            (BlockReg::TagLen, 16),
-            (BlockReg::Tag, 256),
+            (P9fsReg::TagLen, 2),
+            (P9fsReg::Tag, 256),
         ];
-        RegMap::create_packed(
-            VIRTIO_9P_CFG_SIZE,
-            &layout,
-            None, //TODO
-        )
+        RegMap::create_packed(VIRTIO_9P_CFG_SIZE, &layout, None)
     };
 }
 
 mod bits {
     use std::mem::size_of;
+
+    // features 
+    pub const VIRTIO_9P_F_MOUNT_TAG: u32 = 0x1;
 
     pub const VIRTIO_9P_MAX_TAG_SIZE: usize = 256;
     pub const VIRTIO_9P_CFG_SIZE: usize = VIRTIO_9P_MAX_TAG_SIZE + size_of::<u16>();
