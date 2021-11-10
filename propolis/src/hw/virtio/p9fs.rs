@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::mem::size_of;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
@@ -20,20 +21,29 @@ use super::VirtioDevice;
 use lazy_static::lazy_static;
 use num_enum::TryFromPrimitive;
 use p9ds::proto::{
+    self,
     MessageType,
     Tattach, Rattach,
     Twalk, Rwalk,
+    Tlopen, Rlopen,
+    Treaddir, Rreaddir,
     Rlerror,
     Version,
     Qid, QidType,
+    Dirent,
 };
 use libc::{
     ENOENT,
-    ENOTDIR,
     EEXIST,
     ENOLCK,
     ENOTSUP,
+    ERANGE,
+    EILSEQ,
+
+    DT_DIR,
+    DT_REG,
 };
+use ipf::WireSize;
 
 pub struct PciVirtio9pfs {
     virtio_state: PciVirtioState,
@@ -43,6 +53,7 @@ pub struct PciVirtio9pfs {
     target: String,
 
     fileserver: Mutex::<Box::<Fileserver>>, 
+    msize: u32,
 }
 
 impl PciVirtio9pfs {
@@ -61,7 +72,15 @@ impl PciVirtio9pfs {
             VIRTIO_9P_CFG_SIZE,
         );
         let fileserver = Mutex::new(Box::new(Fileserver{fids: HashMap::new()}));
-        Arc::new(Self{virtio_state, pci_state, source, target, fileserver})
+        let msize = 8192; //default
+        Arc::new(Self{
+            virtio_state,
+            pci_state,
+            source,
+            target,
+            fileserver,
+            msize,
+        })
     }
 
     pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
@@ -181,8 +200,12 @@ impl PciVirtio9pfs {
 
         // grab inode number for qid uniqe file id
         let qpath = match fs::metadata(&self.source) {
-            Err(_) => {
-                return self.write_error(ENOTDIR as u32, chain, mem);
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
             }
             Ok(m) => m.ino()
         };
@@ -286,14 +309,171 @@ impl PciVirtio9pfs {
 
     }
 
-    fn handle_open(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
-        //TODO
-        self.write_error(ENOTSUP as u32, chain, mem);
+    fn handle_open(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Tlopen = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+
+        match self.fileserver.lock() {
+            Ok(fs) => {
+
+                // check to see if fid exists
+                let pathbuf = match fs.fids.get(&msg.fid) {
+                    Some(p) => p,
+                    None => {
+                        return self.write_error(ENOENT as u32, chain, mem); 
+                    }
+                };
+
+                // check that fid path is a thing
+                let (ino, qt) = match fs::metadata(&pathbuf) {
+                    Err(e) => {
+                        let ecode = match e.raw_os_error() {
+                            Some(ecode) => ecode,
+                            None => 0,
+                        };
+                        return self.write_error(ecode as u32, chain, mem);
+                    }
+                    Ok(m) => { 
+                        let qt = if m.is_dir() {
+                            QidType::Dir
+                        } else {
+                            QidType::File
+                        };
+                        (m.ino() , qt)
+                    }
+                };
+
+                let response = Rlopen::new(Qid{
+                    typ: qt,
+                    version: 0,
+                    path: ino,
+                }, 0);
+
+                let mut out = ipf::to_bytes_le(&response).unwrap();
+                let buf = out.as_mut_slice();
+                self.write_buf(buf, chain, mem);
+
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        }
     }
 
-    fn handle_readdir(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
-        //TODO
-        self.write_error(ENOTSUP as u32, chain, mem);
+    fn handle_readdir(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Treaddir = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+
+        // get the path for the requested fid
+        let pathbuf = match self.fileserver.lock() {
+            Ok(fs) => {
+                match fs.fids.get(&msg.fid) {
+                    Some(p) => p.clone(),
+                    None => {
+                        return self.write_error(ENOENT as u32, chain, mem); 
+                    }
+                }
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        };
+
+        // read the directory at the provided path
+        let dir = match fs::read_dir(&pathbuf) {
+            Ok(r) => match r.collect::<Result<Vec::<fs::DirEntry>, _>>() {
+                Ok(d) => d,
+                Err(e) => {
+                    let ecode = match e.raw_os_error() {
+                        Some(ecode) => ecode,
+                        None => 0,
+                    };
+                    return self.write_error(ecode as u32, chain, mem);
+                }
+            }
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
+        };
+
+        println!("{} dir entries under {}", 
+            dir.len(), pathbuf.as_path().display());
+
+        // bail with out of range error of offset is greater than entries
+        if dir.len() as u64 <= msg.offset {
+            return self.write_error(ERANGE as u32, chain, mem);
+        }
+
+        let mut space_left = self.msize as usize
+            - size_of::<u32>()          // Rreaddir.size
+            - size_of::<MessageType>()  // Rreaddir.typ
+            - size_of::<u16>();         // Rreaddir.tag
+
+        let mut entries: Vec<proto::Dirent> = Vec::new();
+        //TODO sort
+
+        let mut offset = 0;
+        for de in &dir[msg.offset as usize..] {
+
+            let metadata = match de.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    let ecode = match e.raw_os_error() {
+                        Some(ecode) => ecode,
+                        None => 0,
+                    };
+                    return self.write_error(ecode as u32, chain, mem);
+                }
+            };
+
+            let (typ, ftyp) = if metadata.is_dir() {
+                (QidType::Dir, DT_DIR)
+            } else {
+                (QidType::File, DT_REG)
+            };
+
+            let qid = Qid{
+                typ,
+                version: 0,
+                path: metadata.ino(),
+            };
+
+            let name = match de.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => {
+                    // getting a bit esoteric with our error codes here...
+                    return self.write_error(EILSEQ as u32, chain, mem);
+                }
+            };
+
+            let dirent = Dirent{
+                qid,
+                offset,
+                typ: ftyp,
+                name,
+            };
+
+            if space_left <= dirent.wire_size() {
+                break;
+            }
+
+            space_left -= dirent.wire_size();
+            entries.push(dirent);
+            offset += 1;
+        }
+
+        let response = Rreaddir::new(entries);
+        println!("→ {:#?}", &response);
+        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+
     }
 
     fn handle_read(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
