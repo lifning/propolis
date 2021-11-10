@@ -1,11 +1,16 @@
 use std::num::NonZeroU16;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::convert::TryInto;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
 use crate::hw::pci;
 use crate::util::regmap::RegMap;
+use crate::vmm::MemCtx;
 
 use super::bits::*;
 use super::pci::{PciVirtio, PciVirtioState};
@@ -14,8 +19,21 @@ use super::VirtioDevice;
 
 use lazy_static::lazy_static;
 use num_enum::TryFromPrimitive;
-use rs9p::{Msg, serialize::read_msg}; //XXX
-use p9ds::proto::{self, MessageType};
+use p9ds::proto::{
+    MessageType,
+    Tattach, Rattach,
+    Twalk, Rwalk,
+    Rlerror,
+    Version,
+    Qid, QidType,
+};
+use libc::{
+    ENOENT,
+    ENOTDIR,
+    EEXIST,
+    ENOLCK,
+    ENOTSUP,
+};
 
 pub struct PciVirtio9pfs {
     virtio_state: PciVirtioState,
@@ -23,6 +41,8 @@ pub struct PciVirtio9pfs {
 
     source: String,
     target: String,
+
+    fileserver: Mutex::<Box::<Fileserver>>, 
 }
 
 impl PciVirtio9pfs {
@@ -40,17 +60,17 @@ impl PciVirtio9pfs {
             pci::bits::CLASS_STORAGE,
             VIRTIO_9P_CFG_SIZE,
         );
-        Arc::new(Self{virtio_state, pci_state, source, target})
+        let fileserver = Mutex::new(Box::new(Fileserver{fids: HashMap::new()}));
+        Arc::new(Self{virtio_state, pci_state, source, target, fileserver})
     }
 
-    pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx)
-    -> Option<Msg> {
+    pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
         println!("handling request");
 
         let mem = &ctx.mctx.memctx();
 
         let mut chain = Chain::with_capacity(1);
-        let clen = vq.pop_avail(&mut chain, mem)? as usize;
+        let _clen = vq.pop_avail(&mut chain, mem).unwrap() as usize;
 
         //TODO better as uninitialized?
         //TODO shouldn't clen be 8192? comes in as 16384.... hardcode 8192 for
@@ -62,7 +82,7 @@ impl PciVirtio9pfs {
         // cannot use Chain::read as-is because it expects a statically sized
         // type.
         let mut done = 0;
-        let total = chain.for_remaining_type(true, |addr, len| {
+        let _total = chain.for_remaining_type(true, |addr, len| {
             let remain = &mut buf[done..];
             if let Some(copied) = mem.read_into(addr, remain, len) {
                 let need_more = copied != remain.len();
@@ -85,46 +105,200 @@ impl PciVirtio9pfs {
         let typ = MessageType::try_from_primitive(buf[4]).unwrap();
 
         match typ {
-            MessageType::Tversion => { 
-                let mut msg: proto::Version = ipf::from_bytes_le(&data[..len]).unwrap();
-                msg.typ = MessageType::Rversion;
-                let mut out = ipf::to_bytes_le(&msg).unwrap();
-                let buf = out.as_mut_slice();
 
-                // more copy pasta from Chain::write b/c like Chain:read a
-                // statically sized type is expected.
-                let mut done = 0;
-                let total = chain.for_remaining_type(false, |addr, len| {
-                    let remain = &buf[done..];
-                    if let Some(copied) = mem.write_from(addr, remain, len) {
-                        let need_more = copied != remain.len();
+            MessageType::Tversion =>
+                self.handle_version(&data[..len], &mut chain, &mem),
 
-                        done += copied;
-                        (copied, need_more)
-                    } else {
-                        // Copy failed, so do not attempt anything else
-                        (0, false)
-                    }
-                });
+            MessageType::Tattach =>
+                self.handle_attach(&data[..len], &mut chain, &mem),
 
-                vq.push_used(&mut chain, mem, ctx);
+            MessageType::Twalk =>
+                self.handle_walk(&data[..len], &mut chain, &mem),
 
+            MessageType::Tlopen =>
+                self.handle_open(&data[..len], &mut chain, &mem),
+
+            MessageType::Treaddir =>
+                self.handle_readdir(&data[..len], &mut chain, &mem),
+
+            MessageType::Tread =>
+                self.handle_read(&data[..len], &mut chain, &mem),
+            
+            //TODO
+            _ => {
+                self.write_error(ENOTSUP as u32, &mut chain, &mem);
             }
-            _ => {}
         };
 
-        let mut rdr = std::io::Cursor::new(&data[4..4+len]);
-        match read_msg(&mut rdr) {
-            Ok(msg) => {
-                println!("ok: ← {:#?}", msg);
-                Some(msg)
+        vq.push_used(&mut chain, mem, ctx);
+    }
+
+    fn write_buf(&self, buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        // more copy pasta from Chain::write b/c like Chain:read a
+        // statically sized type is expected.
+        let mut done = 0;
+        let _total = chain.for_remaining_type(false, |addr, len| {
+            let remain = &buf[done..];
+            if let Some(copied) = mem.write_from(addr, remain, len) {
+                let need_more = copied != remain.len();
+
+                done += copied;
+                (copied, need_more)
+            } else {
+                // Copy failed, so do not attempt anything else
+                (0, false)
+            }
+        });
+
+    }
+
+    fn write_error(&self, ecode: u32, chain: &mut Chain, mem: &MemCtx) {
+        let msg = Rlerror::new(ecode);
+        let mut out = ipf::to_bytes_le(&msg).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+    }
+
+    fn handle_version(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        let mut msg: Version = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+        msg.typ = MessageType::Rversion;
+        let mut out = ipf::to_bytes_le(&msg).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+    }
+
+    fn handle_attach(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        //NOTE: 
+        //  - multiple file trees not supported, aname is ignored
+        //  - authentication not supported afid is ignored
+        //  - users not tracked, uname is ignored
+
+        // deserialize message
+        let msg: Tattach = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+
+        // grab inode number for qid uniqe file id
+        let qpath = match fs::metadata(&self.source) {
+            Err(_) => {
+                return self.write_error(ENOTDIR as u32, chain, mem);
+            }
+            Ok(m) => m.ino()
+        };
+
+        match self.fileserver.lock() {
+            Ok(mut fs) => {
+                // check to see if fid is in use
+                match fs.fids.get(&msg.fid) {
+                    Some(_) => {
+                        return self.write_error(EEXIST as u32, chain, mem);
+                    }
+                    None => {}
+                };
+                // create fid entry
+                fs.fids.insert(msg.fid, PathBuf::from(self.source.clone()));
             }
             Err(_) => {
-                //TODO error msg
-                println!("err: ← {:?}", rdr.get_ref());
-                None
+                return self.write_error(ENOLCK as u32, chain, mem);
             }
         }
+
+        // send response
+        let response = Rattach::new(Qid{
+            typ: QidType::Dir,
+            version: 0,
+            path: qpath,
+        });
+        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+
+    }
+
+    fn handle_walk(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Twalk = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+
+        match self.fileserver.lock() {
+            Ok(mut fs) => {
+
+                // check to see if fid exists
+                let pathbuf = match fs.fids.get(&msg.fid) {
+                    Some(p) => p,
+                    None => {
+                        return self.write_error(ENOENT as u32, chain, mem); 
+                    }
+                };
+
+                // create new sub path from referenced fid path and wname
+                // elements
+                let mut newpath = pathbuf.clone();
+                for n in msg.wname {
+                    newpath.push(n.value);
+                }
+
+                // check that new path is a thing
+                let (ino, qt) = match fs::metadata(&newpath) {
+                    Err(e) => {
+                        let ecode = match e.raw_os_error() {
+                            Some(ecode) => ecode,
+                            None => 0,
+                        };
+                        return self.write_error(ecode as u32, chain, mem);
+                    }
+                    Ok(m) => { 
+                        let qt = if m.is_dir() {
+                            QidType::Dir
+                        } else {
+                            QidType::File
+                        };
+                        (m.ino() , qt)
+                    }
+                };
+
+                // check to see if newfid is in use
+                match fs.fids.get(&msg.newfid) {
+                    Some(_) => {
+                        return self.write_error(EEXIST as u32, chain, mem);
+                    }
+                    None => {}
+                };
+
+                // create newfid entry
+                fs.fids.insert(msg.newfid, newpath);
+
+                let response = Rwalk::new(vec![Qid{
+                    typ: qt,
+                    version: 0,
+                    path: ino,
+                }]);
+                let mut out = ipf::to_bytes_le(&response).unwrap();
+                let buf = out.as_mut_slice();
+                self.write_buf(buf, chain, mem);
+
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        }
+
+    }
+
+    fn handle_open(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        //TODO
+        self.write_error(ENOTSUP as u32, chain, mem);
+    }
+
+    fn handle_readdir(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        //TODO
+        self.write_error(ENOTSUP as u32, chain, mem);
+    }
+
+    fn handle_read(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        //TODO
+        self.write_error(ENOTSUP as u32, chain, mem);
     }
 
 }
@@ -193,6 +367,11 @@ lazy_static! {
     };
 }
 
+struct Fileserver {
+    fids: HashMap::<u32, PathBuf>,
+}
+
+
 mod bits {
     use std::mem::size_of;
 
@@ -200,6 +379,7 @@ mod bits {
     pub const VIRTIO_9P_F_MOUNT_TAG: u32 = 0x1;
 
     pub const VIRTIO_9P_MAX_TAG_SIZE: usize = 256;
-    pub const VIRTIO_9P_CFG_SIZE: usize = VIRTIO_9P_MAX_TAG_SIZE + size_of::<u16>();
+    pub const VIRTIO_9P_CFG_SIZE: usize =
+        VIRTIO_9P_MAX_TAG_SIZE + size_of::<u16>();
 }
 use bits::*;
