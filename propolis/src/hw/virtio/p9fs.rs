@@ -13,7 +13,9 @@ use super::queue::{Chain, VirtQueue, VirtQueues};
 use super::VirtioDevice;
 
 use lazy_static::lazy_static;
-use rs9p::{Msg, serialize::read_msg};
+use num_enum::TryFromPrimitive;
+use rs9p::{Msg, serialize::read_msg}; //XXX
+use p9ds::proto::{self, MessageType};
 
 pub struct PciVirtio9pfs {
     virtio_state: PciVirtioState,
@@ -80,6 +82,36 @@ impl PciVirtio9pfs {
         */
 
         let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        let typ = MessageType::try_from_primitive(buf[4]).unwrap();
+
+        match typ {
+            MessageType::Tversion => { 
+                let mut msg: proto::Version = ipf::from_bytes_le(&data[..len]).unwrap();
+                msg.typ = MessageType::Rversion;
+                let mut out = ipf::to_bytes_le(&msg).unwrap();
+                let buf = out.as_mut_slice();
+
+                // more copy pasta from Chain::write b/c like Chain:read a
+                // statically sized type is expected.
+                let mut done = 0;
+                let total = chain.for_remaining_type(false, |addr, len| {
+                    let remain = &buf[done..];
+                    if let Some(copied) = mem.write_from(addr, remain, len) {
+                        let need_more = copied != remain.len();
+
+                        done += copied;
+                        (copied, need_more)
+                    } else {
+                        // Copy failed, so do not attempt anything else
+                        (0, false)
+                    }
+                });
+
+                vq.push_used(&mut chain, mem, ctx);
+
+            }
+            _ => {}
+        };
 
         let mut rdr = std::io::Cursor::new(&data[4..4+len]);
         match read_msg(&mut rdr) {
