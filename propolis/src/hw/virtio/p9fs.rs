@@ -27,6 +27,7 @@ use p9ds::proto::{
     Twalk, Rwalk,
     Tlopen, Rlopen,
     Treaddir, Rreaddir,
+    Tread, Rread,
     Rlerror,
     Version,
     Qid, QidType,
@@ -382,7 +383,7 @@ impl PciVirtio9pfs {
         };
 
         // read the directory at the provided path
-        let dir = match fs::read_dir(&pathbuf) {
+        let mut dir = match fs::read_dir(&pathbuf) {
             Ok(r) => match r.collect::<Result<Vec::<fs::DirEntry>, _>>() {
                 Ok(d) => d,
                 Err(e) => {
@@ -405,18 +406,21 @@ impl PciVirtio9pfs {
         println!("{} dir entries under {}", 
             dir.len(), pathbuf.as_path().display());
 
-        // bail with out of range error of offset is greater than entries
+        // bail with out of range error if offset is greater than entries
         if dir.len() as u64 <= msg.offset {
             return self.write_error(ERANGE as u32, chain, mem);
         }
 
+        // need to sort to ensure consistent offsets
+        dir.sort_by(|a, b| a.path().cmp(&b.path()));
+
         let mut space_left = self.msize as usize
             - size_of::<u32>()          // Rreaddir.size
             - size_of::<MessageType>()  // Rreaddir.typ
-            - size_of::<u16>();         // Rreaddir.tag
+            - size_of::<u16>()          // Rreaddir.tag
+            - size_of::<u32>();         // Rreaddir.data.len
 
         let mut entries: Vec<proto::Dirent> = Vec::new();
-        //TODO sort
 
         let mut offset = 0;
         for de in &dir[msg.offset as usize..] {
@@ -476,9 +480,64 @@ impl PciVirtio9pfs {
 
     }
 
-    fn handle_read(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
-        //TODO
-        self.write_error(ENOTSUP as u32, chain, mem);
+    fn handle_read(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Tread = ipf::from_bytes_le(&msg_buf).unwrap();
+        println!("← {:#?}", msg);
+
+        // get the path for the requested fid
+        let pathbuf = match self.fileserver.lock() {
+            Ok(fs) => {
+                match fs.fids.get(&msg.fid) {
+                    Some(p) => p.clone(),
+                    None => {
+                        return self.write_error(ENOENT as u32, chain, mem); 
+                    }
+                }
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        };
+
+        // read the file at the provided path
+        let content = match fs::read(pathbuf) {
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
+            Ok(b) => b,
+        };
+
+        // bail with empty response if offset is greater file size
+        if content.len() as u64 <= msg.offset {
+            let response = Rread::new(Vec::new());
+            let mut out = ipf::to_bytes_le(&response).unwrap();
+            let buf = out.as_mut_slice();
+            return self.write_buf(buf, chain, mem);
+        }
+
+        let space_left = self.msize as usize
+            - size_of::<u32>()          // Rread.size
+            - size_of::<MessageType>()  // Rread.typ
+            - size_of::<u16>()          // Rread.tag
+            - size_of::<u32>();         // Rread.data.len
+
+        let off = msg.offset as usize;
+        let data = if (content.len() - off) < space_left {
+            &content[off..]
+        } else {
+            &content[off..off+space_left]
+        };
+
+        let response = Rread::new(Vec::from(data));
+        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+
     }
 
 }
