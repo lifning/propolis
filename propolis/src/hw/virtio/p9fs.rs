@@ -35,7 +35,6 @@ use p9ds::proto::{
 };
 use libc::{
     ENOENT,
-    EEXIST,
     ENOLCK,
     ENOTSUP,
     ERANGE,
@@ -216,12 +215,18 @@ impl PciVirtio9pfs {
                 // check to see if fid is in use
                 match fs.fids.get(&msg.fid) {
                     Some(_) => {
-                        return self.write_error(EEXIST as u32, chain, mem);
+                        // The spec says to throw an error here, but in an
+                        // effort to support clients who don't explicitly cluck
+                        // fids, and considering the fact that we do not support
+                        // multiple fs trees, just carry on
+                        //return self.write_error(EEXIST as u32, chain, mem);
                     }
-                    None => {}
+                    None => {
+                        // create fid entry
+                        fs.fids.insert(
+                            msg.fid, PathBuf::from(self.source.clone()));
+                    }
                 };
-                // create fid entry
-                fs.fids.insert(msg.fid, PathBuf::from(self.source.clone()));
             }
             Err(_) => {
                 return self.write_error(ENOLCK as u32, chain, mem);
@@ -285,7 +290,11 @@ impl PciVirtio9pfs {
                 // check to see if newfid is in use
                 match fs.fids.get(&msg.newfid) {
                     Some(_) => {
-                        return self.write_error(EEXIST as u32, chain, mem);
+                        // The spec says to throw an error here, but in an
+                        // effort to support clients who don't explicitly cluck
+                        // fids, and considering the fact that we do not support
+                        // multiple fs trees, just carry on
+                        //return self.write_error(EEXIST as u32, chain, mem);
                     }
                     None => {}
                 };
