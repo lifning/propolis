@@ -334,6 +334,31 @@ async fn instance_ensure(
                             })?;
                         init.initialize_vnic(&chipset, name, bdf)?;
                     }
+                    "pci-virtio-9p" => {
+                        let source = dev.get_string("source").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse p9 mount source",
+                            )
+                        })?;
+
+                        let target = dev.get_string("target").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse p9 mount target",
+                            )
+                        })?;
+
+                        let bdf: pci::Bdf = dev.get("pci-path").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse vnic PCI",
+                            )
+                        })?;
+
+                        init.initialize_9pfs(&chipset, source, target, bdf)?;
+
+                    }
                     _ => {
                         return Err(Error::new(
                             ErrorKind::InvalidData,

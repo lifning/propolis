@@ -234,6 +234,24 @@ impl<'a> MachineInitializer<'a> {
         Ok(())
     }
 
+    pub fn initialize_9pfs(
+        &self,
+        chipset: &RegisteredChipset,
+        source: &str,
+        target: &str,
+        bdf: pci::Bdf,
+    ) -> Result<(), Error> {
+        let vio9p = virtio::PciVirtio9pfs::new(
+            source.into(), target.into(), 0x40,
+        );
+        self
+            .inv.register(&vio9p, format!("vio9p-{}", bdf), None)
+            .map_err(|e| -> std::io::Error { e.into() })?;
+
+        chipset.device().pci_attach(bdf, vio9p);
+        Ok(())
+    }
+
     pub fn initialize_fwcfg(
         &self,
         chipset: &RegisteredChipset,

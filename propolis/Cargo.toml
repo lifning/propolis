@@ -26,8 +26,8 @@ anyhow = "1"
 slog = "2.7"
 serde = { version = "1" }
 rust-9p = { git = "https://github.com/pfpacket/rust-9p" }
-p9ds = { path = "/home/ry/p9kp/lib" }
-ipf = { git = "ssh://git@github.com/oxidecomputer/ipf" }
+p9ds = { path = "/home/ry/src/p9kp/lib" }
+ipf = { path = "/home/ry/src/ipf" }
 
 [dev-dependencies]
 crossbeam-channel = "0.5"
