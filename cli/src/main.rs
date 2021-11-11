@@ -207,8 +207,8 @@ async fn serial(
         tokio::select! {
             c = stdin.read_u8() => {
                 match c? {
-                    // Exit on Ctrl-C
-                    b'\x03' => break,
+                    // Exit on Ctrl-Q
+                    b'\x11' => break,
                     c => ws.send(Message::binary(vec![c])).await?,
                 }
             }
