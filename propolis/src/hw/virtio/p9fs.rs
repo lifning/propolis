@@ -416,7 +416,7 @@ impl PciVirtio9pfs {
             dir.len(), pathbuf.as_path().display());
 
         // bail with out of range error if offset is greater than entries
-        if dir.len() as u64 <= msg.offset {
+        if (dir.len() as u64) < msg.offset {
             return self.write_error(ERANGE as u32, chain, mem);
         }
 
