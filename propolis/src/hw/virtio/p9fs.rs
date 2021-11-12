@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::mem::size_of;
+use std::io::{Read, Seek};
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
@@ -84,7 +85,7 @@ impl PciVirtio9pfs {
     }
 
     pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
-        println!("handling request");
+        //println!("handling request");
 
         let mem = &ctx.mctx.memctx();
 
@@ -181,7 +182,7 @@ impl PciVirtio9pfs {
 
     fn handle_version(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
         let mut msg: Version = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
         msg.typ = MessageType::Rversion;
         let mut out = ipf::to_bytes_le(&msg).unwrap();
         let buf = out.as_mut_slice();
@@ -196,7 +197,7 @@ impl PciVirtio9pfs {
 
         // deserialize message
         let msg: Tattach = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
 
         // grab inode number for qid uniqe file id
         let qpath = match fs::metadata(&self.source) {
@@ -248,7 +249,7 @@ impl PciVirtio9pfs {
     fn handle_walk(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
         let msg: Twalk = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
 
         match self.fileserver.lock() {
             Ok(mut fs) => {
@@ -322,7 +323,7 @@ impl PciVirtio9pfs {
     fn handle_open(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
         let msg: Tlopen = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
 
         match self.fileserver.lock() {
             Ok(fs) => {
@@ -374,7 +375,7 @@ impl PciVirtio9pfs {
     fn handle_readdir(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
         let msg: Treaddir = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
 
         // get the path for the requested fid
         let pathbuf = match self.fileserver.lock() {
@@ -412,8 +413,8 @@ impl PciVirtio9pfs {
             }
         };
 
-        println!("{} dir entries under {}", 
-            dir.len(), pathbuf.as_path().display());
+        //println!("{} dir entries under {}", 
+        //    dir.len(), pathbuf.as_path().display());
 
         // bail with out of range error if offset is greater than entries
         if (dir.len() as u64) < msg.offset {
@@ -482,7 +483,7 @@ impl PciVirtio9pfs {
         }
 
         let response = Rreaddir::new(entries);
-        println!("→ {:#?}", &response);
+        //println!("→ {:#?}", &response);
         let mut out = ipf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
@@ -492,7 +493,7 @@ impl PciVirtio9pfs {
     fn handle_read(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
         let msg: Tread = ipf::from_bytes_le(&msg_buf).unwrap();
-        println!("← {:#?}", msg);
+        //println!("← {:#?}", msg);
 
         // get the path for the requested fid
         let pathbuf = match self.fileserver.lock() {
@@ -510,7 +511,8 @@ impl PciVirtio9pfs {
         };
 
         // read the file at the provided path
-        let content = match fs::read(pathbuf) {
+        let mut file = match fs::OpenOptions::new().read(true).open(pathbuf) {
+            Ok(f) => f,
             Err(e) => {
                 let ecode = match e.raw_os_error() {
                     Some(ecode) => ecode,
@@ -518,15 +520,35 @@ impl PciVirtio9pfs {
                 };
                 return self.write_error(ecode as u32, chain, mem);
             }
-            Ok(b) => b,
+        };
+        let metadata = match file.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
         };
 
-        // bail with empty response if offset is greater file size
-        if content.len() as u64 <= msg.offset {
+        // bail with empty response if offset is greater than file size
+        if metadata.len() < msg.offset {
             let response = Rread::new(Vec::new());
             let mut out = ipf::to_bytes_le(&response).unwrap();
             let buf = out.as_mut_slice();
             return self.write_buf(buf, chain, mem);
+        }
+
+        match file.seek(std::io::SeekFrom::Start(msg.offset)){
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
+            Ok(_) => {},
         }
 
         let space_left = self.msize as usize
@@ -535,14 +557,25 @@ impl PciVirtio9pfs {
             - size_of::<u16>()          // Rread.tag
             - size_of::<u32>();         // Rread.data.len
 
-        let off = msg.offset as usize;
-        let data = if (content.len() - off) < space_left {
-            &content[off..]
-        } else {
-            &content[off..off+space_left]
-        };
+        let buflen = std::cmp::min(
+            space_left,
+            (metadata.len() - msg.offset) as usize,
+        ) as usize;
 
-        let response = Rread::new(Vec::from(data));
+        let mut content: Vec<u8> = vec![0;buflen];
+
+        match file.read_exact(content.as_mut_slice()) {
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
+            Ok(()) => {},
+        }
+
+        let response = Rread::new(content);
         let mut out = ipf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
@@ -557,11 +590,11 @@ impl VirtioDevice for PciVirtio9pfs {
             RWOp::Read(ro) => {
                 match id {
                     P9fsReg::TagLen => {
-                        println!("read taglen");
+                        //println!("read taglen");
                         ro.write_u16(self.target.len() as u16);
                     }
                     P9fsReg::Tag => {
-                        println!("read tag");
+                        //println!("read tag");
                         let mut bs = [0;256];
                         for (i, x) in self.target.chars().enumerate() {
                             bs[i] = x as u8;
