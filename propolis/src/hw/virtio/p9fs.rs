@@ -45,7 +45,7 @@ use libc::{
     DT_DIR,
     DT_REG,
 };
-use ipf::WireSize;
+use ispf::WireSize;
 
 pub struct PciVirtio9pfs {
     virtio_state: PciVirtioState,
@@ -176,16 +176,16 @@ impl PciVirtio9pfs {
 
     fn write_error(&self, ecode: u32, chain: &mut Chain, mem: &MemCtx) {
         let msg = Rlerror::new(ecode);
-        let mut out = ipf::to_bytes_le(&msg).unwrap();
+        let mut out = ispf::to_bytes_le(&msg).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
     }
 
     fn handle_version(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
-        let mut msg: Version = ipf::from_bytes_le(&msg_buf).unwrap();
+        let mut msg: Version = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
         msg.typ = MessageType::Rversion;
-        let mut out = ipf::to_bytes_le(&msg).unwrap();
+        let mut out = ispf::to_bytes_le(&msg).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
     }
@@ -197,7 +197,7 @@ impl PciVirtio9pfs {
         //  - users not tracked, uname is ignored
 
         // deserialize message
-        let msg: Tattach = ipf::from_bytes_le(&msg_buf).unwrap();
+        let msg: Tattach = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
 
         // grab inode number for qid uniqe file id
@@ -244,7 +244,7 @@ impl PciVirtio9pfs {
             version: 0,
             path: qpath,
         });
-        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let mut out = ispf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
 
@@ -252,7 +252,7 @@ impl PciVirtio9pfs {
 
     fn handle_walk(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
-        let msg: Twalk = ipf::from_bytes_le(&msg_buf).unwrap();
+        let msg: Twalk = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
 
         match self.fileserver.lock() {
@@ -315,7 +315,7 @@ impl PciVirtio9pfs {
                     version: 0,
                     path: ino,
                 }]);
-                let mut out = ipf::to_bytes_le(&response).unwrap();
+                let mut out = ispf::to_bytes_le(&response).unwrap();
                 let buf = out.as_mut_slice();
                 self.write_buf(buf, chain, mem);
 
@@ -329,7 +329,7 @@ impl PciVirtio9pfs {
 
     fn handle_open(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
-        let msg: Tlopen = ipf::from_bytes_le(&msg_buf).unwrap();
+        let msg: Tlopen = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
 
         match self.fileserver.lock() {
@@ -383,7 +383,7 @@ impl PciVirtio9pfs {
                     path: ino,
                 }, 0);
 
-                let mut out = ipf::to_bytes_le(&response).unwrap();
+                let mut out = ispf::to_bytes_le(&response).unwrap();
                 let buf = out.as_mut_slice();
                 self.write_buf(buf, chain, mem);
 
@@ -396,7 +396,7 @@ impl PciVirtio9pfs {
 
     fn handle_readdir(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
-        let msg: Treaddir = ipf::from_bytes_le(&msg_buf).unwrap();
+        let msg: Treaddir = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
 
         // get the path for the requested fid
@@ -506,7 +506,7 @@ impl PciVirtio9pfs {
 
         let response = Rreaddir::new(entries);
         //println!("→ {:#?}", &response);
-        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let mut out = ispf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
 
@@ -541,7 +541,7 @@ impl PciVirtio9pfs {
         // bail with empty response if offset is greater than file size
         if metadata.len() < msg.offset {
             let response = Rread::new(Vec::new());
-            let mut out = ipf::to_bytes_le(&response).unwrap();
+            let mut out = ispf::to_bytes_le(&response).unwrap();
             let buf = out.as_mut_slice();
             return self.write_buf(buf, chain, mem);
         }
@@ -582,7 +582,7 @@ impl PciVirtio9pfs {
         }
 
         let response = Rread::new(content);
-        let mut out = ipf::to_bytes_le(&response).unwrap();
+        let mut out = ispf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
 
@@ -590,7 +590,7 @@ impl PciVirtio9pfs {
 
     fn handle_read(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
-        let msg: Tread = ipf::from_bytes_le(&msg_buf).unwrap();
+        let msg: Tread = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
 
         // get  the requested fid

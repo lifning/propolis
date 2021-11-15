@@ -25,9 +25,8 @@ crucible = { git = "https://github.com/oxidecomputer/crucible", rev = "022cc62d"
 anyhow = "1"
 slog = "2.7"
 serde = { version = "1" }
-rust-9p = { git = "https://github.com/pfpacket/rust-9p" }
-p9ds = { path = "/home/ry/src/p9kp/lib" }
-ipf = { path = "/home/ry/src/ipf" }
+p9ds = { git = "ssh://git@github.com/oxidecomputer/p9fs" }
+ispf = { git = "ssh://git@github.com/oxidecomputer/ispf" }
 
 [dev-dependencies]
 crossbeam-channel = "0.5"
