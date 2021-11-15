@@ -40,6 +40,7 @@ use libc::{
     ENOTSUP,
     ERANGE,
     EILSEQ,
+    EINVAL,
 
     DT_DIR,
     DT_REG,
@@ -225,7 +226,10 @@ impl PciVirtio9pfs {
                     None => {
                         // create fid entry
                         fs.fids.insert(
-                            msg.fid, PathBuf::from(self.source.clone()));
+                            msg.fid, Fid{
+                                pathbuf: PathBuf::from(self.source.clone()),
+                                file: None,
+                            });
                     }
                 };
             }
@@ -255,7 +259,7 @@ impl PciVirtio9pfs {
             Ok(mut fs) => {
 
                 // check to see if fid exists
-                let pathbuf = match fs.fids.get(&msg.fid) {
+                let fid = match fs.fids.get(&msg.fid) {
                     Some(p) => p,
                     None => {
                         return self.write_error(ENOENT as u32, chain, mem); 
@@ -264,7 +268,7 @@ impl PciVirtio9pfs {
 
                 // create new sub path from referenced fid path and wname
                 // elements
-                let mut newpath = pathbuf.clone();
+                let mut newpath = fid.pathbuf.clone();
                 for n in msg.wname {
                     newpath.push(n.value);
                 }
@@ -301,7 +305,10 @@ impl PciVirtio9pfs {
                 };
 
                 // create newfid entry
-                fs.fids.insert(msg.newfid, newpath);
+                fs.fids.insert(msg.newfid, Fid{
+                    pathbuf: newpath,
+                    file: None,
+                });
 
                 let response = Rwalk::new(vec![Qid{
                     typ: qt,
@@ -326,10 +333,10 @@ impl PciVirtio9pfs {
         //println!("← {:#?}", msg);
 
         match self.fileserver.lock() {
-            Ok(fs) => {
+            Ok(mut fs) => {
 
                 // check to see if fid exists
-                let pathbuf = match fs.fids.get(&msg.fid) {
+                let fid = match fs.fids.get_mut(&msg.fid) {
                     Some(p) => p,
                     None => {
                         return self.write_error(ENOENT as u32, chain, mem); 
@@ -337,7 +344,7 @@ impl PciVirtio9pfs {
                 };
 
                 // check that fid path is a thing
-                let (ino, qt) = match fs::metadata(&pathbuf) {
+                let (ino, qt) = match fs::metadata(&fid.pathbuf) {
                     Err(e) => {
                         let ecode = match e.raw_os_error() {
                             Some(ecode) => ecode,
@@ -354,6 +361,21 @@ impl PciVirtio9pfs {
                         (m.ino() , qt)
                     }
                 };
+
+                // open the file
+                fid.file = Some(
+                    match fs::OpenOptions::new()
+                    .read(true)
+                    .open(fid.pathbuf.clone()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let ecode = match e.raw_os_error() {
+                                Some(ecode) => ecode,
+                                None => 0,
+                            };
+                            return self.write_error(ecode as u32, chain, mem);
+                        }
+                    });
 
                 let response = Rlopen::new(Qid{
                     typ: qt,
@@ -381,7 +403,7 @@ impl PciVirtio9pfs {
         let pathbuf = match self.fileserver.lock() {
             Ok(fs) => {
                 match fs.fids.get(&msg.fid) {
-                    Some(p) => p.clone(),
+                    Some(f) => f.pathbuf.clone(),
                     None => {
                         return self.write_error(ENOENT as u32, chain, mem); 
                     }
@@ -490,35 +512,19 @@ impl PciVirtio9pfs {
 
     }
 
-    fn handle_read(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+    fn do_read(
+        &self,
+        msg: &Tread,
+        fid: &mut Fid,
+        chain: &mut Chain,
+        mem: &MemCtx,
+    ) {
 
-        let msg: Tread = ipf::from_bytes_le(&msg_buf).unwrap();
-        //println!("← {:#?}", msg);
-
-        // get the path for the requested fid
-        let pathbuf = match self.fileserver.lock() {
-            Ok(fs) => {
-                match fs.fids.get(&msg.fid) {
-                    Some(p) => p.clone(),
-                    None => {
-                        return self.write_error(ENOENT as u32, chain, mem); 
-                    }
-                }
-            }
-            Err(_) => {
-                return self.write_error(ENOLCK as u32, chain, mem);
-            }
-        };
-
-        // read the file at the provided path
-        let mut file = match fs::OpenOptions::new().read(true).open(pathbuf) {
-            Ok(f) => f,
-            Err(e) => {
-                let ecode = match e.raw_os_error() {
-                    Some(ecode) => ecode,
-                    None => 0,
-                };
-                return self.write_error(ecode as u32, chain, mem);
+        let mut file = match fid.file {
+            Some(ref f) => f,
+            None => {
+                // the file is not open
+                return self.write_error(EINVAL as u32, chain, mem);
             }
         };
         let metadata = match file.metadata() {
@@ -580,6 +586,29 @@ impl PciVirtio9pfs {
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
 
+    }
+
+    fn handle_read(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Tread = ipf::from_bytes_le(&msg_buf).unwrap();
+        //println!("← {:#?}", msg);
+
+        // get  the requested fid
+        match self.fileserver.lock() {
+            Ok(ref mut fs) => {
+                match fs.fids.get_mut(&msg.fid) {
+                    Some(ref mut fid) => {
+                        self.do_read(&msg, fid, chain, mem)
+                    }
+                    None => {
+                        return self.write_error(ENOENT as u32, chain, mem);
+                    }
+                }
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        };
     }
 
 }
@@ -648,8 +677,13 @@ lazy_static! {
     };
 }
 
+struct Fid {
+    pathbuf: PathBuf,
+    file: Option<fs::File>,
+}
+
 struct Fileserver {
-    fids: HashMap::<u32, PathBuf>,
+    fids: HashMap::<u32,Fid>,
 }
 
 
