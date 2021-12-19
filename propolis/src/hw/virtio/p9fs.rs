@@ -7,6 +7,8 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::mem::size_of;
 use std::io::{Read, Seek};
+//use std::os::illumos::fs::MetadataExt;
+use std::os::unix::ffi::OsStrExt;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
@@ -24,7 +26,10 @@ use num_enum::TryFromPrimitive;
 use p9ds::proto::{
     self,
     MessageType,
+    Rclunk,
+    Tgetattr, Rgetattr,
     Tattach, Rattach,
+    Tstatfs, Rstatfs,
     Twalk, Rwalk,
     Tlopen, Rlopen,
     Treaddir, Rreaddir,
@@ -33,6 +38,7 @@ use p9ds::proto::{
     Version,
     Qid, QidType,
     Dirent,
+    P9_GETATTR_BASIC,
 };
 use libc::{
     ENOENT,
@@ -125,6 +131,8 @@ impl PciVirtio9pfs {
         let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         let typ = MessageType::try_from_primitive(buf[4]).unwrap();
 
+        println!("message: {:?}", typ);
+
         match typ {
 
             MessageType::Tversion =>
@@ -144,6 +152,15 @@ impl PciVirtio9pfs {
 
             MessageType::Tread =>
                 self.handle_read(&data[..len], &mut chain, &mem),
+
+            MessageType::Tclunk =>
+                self.handle_clunk(&data[..len], &mut chain, &mem),
+
+            MessageType::Tgetattr =>
+                self.handle_getattr(&data[..len], &mut chain, &mem),
+
+            MessageType::Tstatfs =>
+                self.handle_statfs(&data[..len], &mut chain, &mem),
             
             //TODO
             _ => {
@@ -185,9 +202,220 @@ impl PciVirtio9pfs {
         let mut msg: Version = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
         msg.typ = MessageType::Rversion;
+        // XXX only support 8192 msize for now
+        msg.msize = 8192;
         let mut out = ispf::to_bytes_le(&msg).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
+    }
+
+    fn handle_clunk(&self, _msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        //TODO something
+        let resp = Rclunk::new();
+        let mut out = ispf::to_bytes_le(&resp).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+    }
+
+    fn handle_getattr(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Tgetattr = ispf::from_bytes_le(&msg_buf).unwrap();
+        match self.fileserver.lock() {
+            Ok(ref mut fs) => {
+                match fs.fids.get_mut(&msg.fid) {
+                    Some(ref mut fid) => {
+                        self.do_getattr(fid, chain, mem)
+                    }
+                    None => {
+                        println!("getattr: fid {} not found", msg.fid);
+                        return self.write_error(ENOENT as u32, chain, mem);
+                    }
+                }
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        }
+        
+    }
+
+    fn handle_statfs(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        let msg: Tstatfs = ispf::from_bytes_le(&msg_buf).unwrap();
+        match self.fileserver.lock() {
+            Ok(ref mut fs) => {
+                match fs.fids.get_mut(&msg.fid) {
+                    Some(ref mut fid) => {
+                        self.do_statfs(fid, chain, mem)
+                    }
+                    None => {
+                        println!("statfs: fid {} not found", msg.fid);
+                        return self.write_error(ENOENT as u32, chain, mem);
+                    }
+                }
+            }
+            Err(_) => {
+                return self.write_error(ENOLCK as u32, chain, mem);
+            }
+        }
+        
+    }
+
+    fn do_statfs(
+        &self,
+        fid: &mut Fid,
+        chain: &mut Chain,
+        mem: &MemCtx,
+    ) {
+
+        let sfs = unsafe {
+            let mut sfs: libc::statvfs = std::mem::zeroed::<libc::statvfs>();
+            libc::statvfs(
+                fid.pathbuf.as_path().as_os_str().as_bytes().as_ptr() as *const i8,
+                &mut sfs,
+            );
+            sfs
+        };
+
+        // fstype: u32
+        let fstype = 0;
+        // bsize: u32
+        let bsize = sfs.f_bsize;
+        // blocks: u64
+        let blocks = sfs.f_blocks;
+        // bfree: u64
+        let bfree = sfs.f_bfree;
+        // bavail: u64
+        let bavail = sfs.f_bavail;
+        // files: u64
+        let files = sfs.f_files;
+        // ffree: u64
+        let ffree = sfs.f_ffree;
+        // fsid: u64
+        let fsid = sfs.f_fsid;
+        // namelen: u32
+        let namelen = sfs.f_namemax;
+
+        let resp = Rstatfs::new(
+            fstype,
+            bsize as u32,
+            blocks,
+            bfree,
+            bavail,
+            files,
+            ffree,
+            fsid,
+            namelen as u32,
+        );
+
+        let mut out = ispf::to_bytes_le(&resp).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+
+    }
+
+    fn do_getattr(
+        &self,
+        fid: &mut Fid,
+        chain: &mut Chain,
+        mem: &MemCtx,
+    ) {
+
+        let metadata = match fs::metadata(&fid.pathbuf) {
+            Ok(m) => m,
+            Err(e) => {
+                let ecode = match e.raw_os_error() {
+                    Some(ecode) => ecode,
+                    None => 0,
+                };
+                return self.write_error(ecode as u32, chain, mem);
+            }
+        };
+
+        // valid: u64,
+        let valid = P9_GETATTR_BASIC;
+        // qid: Qid,
+        let qid = Qid{
+            typ: {
+                if metadata.is_dir() {
+                    QidType::Dir
+                }
+                else if metadata.is_symlink() {
+                    QidType::Link
+                }
+                else {
+                    QidType::File
+                }
+            },
+            version: metadata.mtime() as u32, //todo something better from ufs?
+            path: metadata.ino(),
+        };
+        // mode: u32,
+        let mode = metadata.mode();
+        // uid: u32,
+        //let uid = metadata.uid();
+        let uid = 0; //squash for now
+        // gid: u32,
+        //let gid = metadata.gid();
+        let gid = 0; //squash for now
+        // nlink: u64,
+        let nlink = metadata.nlink();
+        // rdev: u64,
+        let rdev = metadata.rdev();
+        // attrsize: u64,
+        let attrsize = metadata.size();
+        // blksize: u64,
+        let blksize = metadata.blksize();
+        // blocks: u64,
+        let blocks = metadata.blocks();
+        // atime_sec: u64,
+        let atime_sec = metadata.atime();
+        // atime_nsec: u64,
+        let atime_nsec = metadata.atime_nsec();
+        // mtime_sec: u64,
+        let mtime_sec = metadata.mtime();
+        // mtime_nsec: u64,
+        let mtime_nsec = metadata.mtime_nsec();
+        // ctime_sec: u64,
+        let ctime_sec = metadata.ctime();
+        // ctime_nsec: u64,
+        let ctime_nsec = metadata.ctime_nsec();
+        // btime_sec: u64,
+        let btime_sec = 0; // reserved for future use in spec
+        // btime_nsec: u64,
+        let btime_nsec = 0; // reserved for future use in spec
+        // gen: u64,
+        let gen = 0; // reserved for future use in spec
+        // data_version: u64,
+        let data_version = 0; // reserved for future use in spec
+
+        let resp = Rgetattr::new(
+            valid,
+            qid,
+            mode,
+            uid,
+            gid,
+            nlink,
+            rdev,
+            attrsize,
+            blksize,
+            blocks,
+            atime_sec as u64,
+            atime_nsec as u64,
+            mtime_sec as u64,
+            mtime_nsec as u64,
+            ctime_sec as u64,
+            ctime_nsec as u64,
+            btime_sec as u64,
+            btime_nsec as u64,
+            gen,
+            data_version,
+         );
+
+        let mut out = ispf::to_bytes_le(&resp).unwrap();
+        let buf = out.as_mut_slice();
+        self.write_buf(buf, chain, mem);
+
     }
 
     fn handle_attach(&self, msg_buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
@@ -199,6 +427,8 @@ impl PciVirtio9pfs {
         // deserialize message
         let msg: Tattach = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
+        
+        println!("attach: fid={}", msg.fid);
 
         // grab inode number for qid uniqe file id
         let qpath = match fs::metadata(&self.source) {
@@ -217,6 +447,7 @@ impl PciVirtio9pfs {
                 // check to see if fid is in use
                 match fs.fids.get(&msg.fid) {
                     Some(_) => {
+                        println!("attach fid in use");
                         // The spec says to throw an error here, but in an
                         // effort to support clients who don't explicitly cluck
                         // fids, and considering the fact that we do not support
@@ -254,6 +485,7 @@ impl PciVirtio9pfs {
 
         let msg: Twalk = ispf::from_bytes_le(&msg_buf).unwrap();
         //println!("← {:#?}", msg);
+        println!("walk: {} {:?}", msg.fid, msg.wname);
 
         match self.fileserver.lock() {
             Ok(mut fs) => {
@@ -262,6 +494,7 @@ impl PciVirtio9pfs {
                 let fid = match fs.fids.get(&msg.fid) {
                     Some(p) => p,
                     None => {
+                        println!("walk: fid {} not found", msg.fid);
                         return self.write_error(ENOENT as u32, chain, mem); 
                     }
                 };
@@ -280,6 +513,7 @@ impl PciVirtio9pfs {
                             Some(ecode) => ecode,
                             None => 0,
                         };
+                        println!("walk: notathing: {:?}", newpath);
                         return self.write_error(ecode as u32, chain, mem);
                     }
                     Ok(m) => { 
@@ -310,11 +544,14 @@ impl PciVirtio9pfs {
                     file: None,
                 });
 
+                println!("new fid for path: {}", msg.newfid);
+
                 let response = Rwalk::new(vec![Qid{
                     typ: qt,
                     version: 0,
                     path: ino,
                 }]);
+                println!("walk response: {:?}", &response);
                 let mut out = ispf::to_bytes_le(&response).unwrap();
                 let buf = out.as_mut_slice();
                 self.write_buf(buf, chain, mem);
@@ -339,6 +576,7 @@ impl PciVirtio9pfs {
                 let fid = match fs.fids.get_mut(&msg.fid) {
                     Some(p) => p,
                     None => {
+                        println!("open: fid {} not found", msg.fid);
                         return self.write_error(ENOENT as u32, chain, mem); 
                     }
                 };
@@ -350,6 +588,7 @@ impl PciVirtio9pfs {
                             Some(ecode) => ecode,
                             None => 0,
                         };
+                        println!("open: notathing: {:?}", &fid.pathbuf);
                         return self.write_error(ecode as u32, chain, mem);
                     }
                     Ok(m) => { 
@@ -373,6 +612,7 @@ impl PciVirtio9pfs {
                                 Some(ecode) => ecode,
                                 None => 0,
                             };
+                            println!("open: notathing: {:?}", &fid.pathbuf);
                             return self.write_error(ecode as u32, chain, mem);
                         }
                     });
@@ -405,6 +645,7 @@ impl PciVirtio9pfs {
                 match fs.fids.get(&msg.fid) {
                     Some(f) => f.pathbuf.clone(),
                     None => {
+                        println!("readdir: fid {} not found", msg.fid);
                         return self.write_error(ENOENT as u32, chain, mem); 
                     }
                 }
@@ -423,6 +664,7 @@ impl PciVirtio9pfs {
                         Some(ecode) => ecode,
                         None => 0,
                     };
+                    println!("readdir: collect: notathing: {:?}", &pathbuf);
                     return self.write_error(ecode as u32, chain, mem);
                 }
             }
@@ -431,6 +673,7 @@ impl PciVirtio9pfs {
                     Some(ecode) => ecode,
                     None => 0,
                 };
+                println!("readdir: notathing: {:?}", &pathbuf);
                 return self.write_error(ecode as u32, chain, mem);
             }
         };
@@ -464,6 +707,7 @@ impl PciVirtio9pfs {
                         Some(ecode) => ecode,
                         None => 0,
                     };
+                    println!("readdir: metadata: notathing: {:?}", &de.path());
                     return self.write_error(ecode as u32, chain, mem);
                 }
             };
@@ -534,6 +778,7 @@ impl PciVirtio9pfs {
                     Some(ecode) => ecode,
                     None => 0,
                 };
+                println!("read: metadata: notathing: {:?}", &fid.pathbuf);
                 return self.write_error(ecode as u32, chain, mem);
             }
         };
@@ -552,6 +797,7 @@ impl PciVirtio9pfs {
                     Some(ecode) => ecode,
                     None => 0,
                 };
+                println!("read: seek: {:?}", &fid.pathbuf);
                 return self.write_error(ecode as u32, chain, mem);
             }
             Ok(_) => {},
@@ -576,6 +822,7 @@ impl PciVirtio9pfs {
                     Some(ecode) => ecode,
                     None => 0,
                 };
+                println!("read: exact: {:?}", &fid.pathbuf);
                 return self.write_error(ecode as u32, chain, mem);
             }
             Ok(()) => {},
@@ -601,6 +848,7 @@ impl PciVirtio9pfs {
                         self.do_read(&msg, fid, chain, mem)
                     }
                     None => {
+                        println!("read: fid {} not found", msg.fid);
                         return self.write_error(ENOENT as u32, chain, mem);
                     }
                 }
@@ -617,6 +865,7 @@ impl VirtioDevice for PciVirtio9pfs {
     fn cfg_rw(&self, mut rwo: RWOp) {
         P9FS_DEV_REGS.process(&mut rwo, |id, rwo| match rwo {
             RWOp::Read(ro) => {
+                crate::propolis::p9fs_cfg_read!(||());
                 match id {
                     P9fsReg::TagLen => {
                         //println!("read taglen");
