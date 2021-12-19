@@ -176,11 +176,19 @@ impl PciVirtioState {
         dev_class: u8,
         cfg_sz: usize,
     ) -> (Self, pci::DeviceState) {
+        // The dev_id for the 9p transport is 0x1009, and the sub_device_id for
+        // a virtio 9p serial device is 0x9 (in linux at least, see the
+        // VIRTIO_ID_9P constant), so the dev_id - 0xfff does not work in this
+        // special case :/.
+        let sub_device_id = match dev_id {
+            crate::hw::virtio::bits::VIRTIO_DEV_9P => 0x9,
+            _ => dev_id - 0xfff,
+        };
         let mut builder = pci::Builder::new(pci::Ident {
             vendor_id: VIRTIO_VENDOR,
             device_id: dev_id,
             sub_vendor_id: VIRTIO_VENDOR,
-            sub_device_id: dev_id - 0xfff,
+            sub_device_id,
             class: dev_class,
             ..Default::default()
         })
