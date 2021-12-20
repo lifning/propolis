@@ -80,7 +80,7 @@ impl PciVirtio9pfs {
             VIRTIO_9P_CFG_SIZE,
         );
         let fileserver = Mutex::new(Box::new(Fileserver{fids: HashMap::new()}));
-        let msize = 8192; //default
+        let msize = 8100; //default, 8192 plus breathing room for headers
         Arc::new(Self{
             virtio_state,
             pci_state,
