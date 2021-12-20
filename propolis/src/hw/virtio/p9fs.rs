@@ -499,32 +499,40 @@ impl PciVirtio9pfs {
                     }
                 };
 
-                // create new sub path from referenced fid path and wname
-                // elements
+                let mut qids = Vec::new();
                 let mut newpath = fid.pathbuf.clone();
-                for n in msg.wname {
-                    newpath.push(n.value);
-                }
+                if msg.wname.len() > 0 {
+                    // create new sub path from referenced fid path and wname
+                    // elements
+                    for n in msg.wname {
+                        newpath.push(n.value);
+                    }
 
-                // check that new path is a thing
-                let (ino, qt) = match fs::metadata(&newpath) {
-                    Err(e) => {
-                        let ecode = match e.raw_os_error() {
-                            Some(ecode) => ecode,
-                            None => 0,
-                        };
-                        println!("walk: notathing: {:?}", newpath);
-                        return self.write_error(ecode as u32, chain, mem);
-                    }
-                    Ok(m) => { 
-                        let qt = if m.is_dir() {
-                            QidType::Dir
-                        } else {
-                            QidType::File
-                        };
-                        (m.ino() , qt)
-                    }
-                };
+                    // check that new path is a thing
+                    let (ino, qt) = match fs::metadata(&newpath) {
+                        Err(e) => {
+                            let ecode = match e.raw_os_error() {
+                                Some(ecode) => ecode,
+                                None => 0,
+                            };
+                            println!("walk: notathing: {:?}", newpath);
+                            return self.write_error(ecode as u32, chain, mem);
+                        }
+                        Ok(m) => {
+                            let qt = if m.is_dir() {
+                                QidType::Dir
+                            } else {
+                                QidType::File
+                            };
+                            (m.ino() , qt)
+                        }
+                    };
+                    qids.push(Qid{
+                        typ: qt,
+                        version: 0,
+                        path: ino
+                    });
+                }
 
                 // check to see if newfid is in use
                 match fs.fids.get(&msg.newfid) {
@@ -546,11 +554,14 @@ impl PciVirtio9pfs {
 
                 println!("new fid for path: {}", msg.newfid);
 
+                /*
                 let response = Rwalk::new(vec![Qid{
                     typ: qt,
                     version: 0,
                     path: ino,
                 }]);
+                */
+                let response = Rwalk::new(qids);
                 println!("walk response: {:?}", &response);
                 let mut out = ispf::to_bytes_le(&response).unwrap();
                 let buf = out.as_mut_slice();
@@ -678,8 +689,8 @@ impl PciVirtio9pfs {
             }
         };
 
-        //println!("{} dir entries under {}", 
-        //    dir.len(), pathbuf.as_path().display());
+        println!("{} dir entries under {}",
+            dir.len(), pathbuf.as_path().display());
 
         // bail with out of range error if offset is greater than entries
         if (dir.len() as u64) < msg.offset {
@@ -697,7 +708,7 @@ impl PciVirtio9pfs {
 
         let mut entries: Vec<proto::Dirent> = Vec::new();
 
-        let mut offset = 0;
+        let mut offset = 1;
         for de in &dir[msg.offset as usize..] {
 
             let metadata = match de.metadata() {
@@ -748,8 +759,10 @@ impl PciVirtio9pfs {
             offset += 1;
         }
 
+        println!("sending {} entries", entries.len());
+
         let response = Rreaddir::new(entries);
-        //println!("→ {:#?}", &response);
+        println!("RREADDIR → {:#?}", &response);
         let mut out = ispf::to_bytes_le(&response).unwrap();
         let buf = out.as_mut_slice();
         self.write_buf(buf, chain, mem);
