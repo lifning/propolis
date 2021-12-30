@@ -34,6 +34,7 @@ use propolis_client::api;
 
 use crate::config::Config;
 use crate::initializer::{build_instance, MachineInitializer};
+use crate::migrate;
 use crate::serial::Serial;
 
 // TODO(error) Do a pass of HTTP codes (error and ok)
@@ -75,18 +76,19 @@ struct StateChange {
 }
 
 // All context for a single propolis instance.
-struct InstanceContext {
+pub(crate) struct InstanceContext {
     // The instance, which may or may not be instantiated.
-    instance: Arc<Instance>,
-    properties: api::InstanceProperties,
-    serial: Arc<Serial<LpcUart>>,
+    pub instance: Arc<Instance>,
+    pub properties: api::InstanceProperties,
+    serial: Option<Arc<Serial<LpcUart>>>,
     state_watcher: watch::Receiver<StateChange>,
     serial_task: Option<SerialTask>,
 }
 
 /// Contextual information accessible from HTTP callbacks.
 pub struct Context {
-    context: Mutex<Option<InstanceContext>>,
+    pub(crate) context: Mutex<Option<InstanceContext>>,
+    pub(crate) migrate_task: Mutex<Option<migrate::MigrateTask>>,
     config: Config,
     log: Logger,
 }
@@ -94,7 +96,12 @@ pub struct Context {
 impl Context {
     /// Creates a new server context object.
     pub fn new(config: Config, log: Logger) -> Self {
-        Context { context: Mutex::new(None), config, log }
+        Context {
+            context: Mutex::new(None),
+            migrate_task: Mutex::new(None),
+            config,
+            log,
+        }
     }
 }
 
@@ -131,9 +138,10 @@ fn propolis_to_api_state(
 #[derive(Clone, Copy, Debug)]
 enum SlotType {
     NIC,
-    #[allow(dead_code)]
     Disk,
 }
+
+// TODO: Slot ranges as constants, exposed to Omicron?
 
 // This is a somewhat hard-coded translation of a stable "PCI slot" to a BDF.
 //
@@ -175,11 +183,22 @@ async fn instance_ensure(
     let server_context = rqctx.context();
 
     let request = request.into_inner();
-    let (properties, nics) = (request.properties, request.nics);
-    if path_params.into_inner().instance_id != properties.id {
+    let instance_id = path_params.into_inner().instance_id;
+    let (properties, nics, disks) =
+        (request.properties, request.nics, request.disks);
+    if instance_id != properties.id {
         return Err(HttpError::for_internal_error(
             "UUID mismatch (path did not match struct)".to_string(),
         ));
+    }
+
+    for disk in &disks {
+        if disk.address.len() != 3 {
+            return Err(HttpError::for_bad_request(
+                None,
+                "Crucible requires three targets per disk".to_string(),
+            ));
+        }
     }
 
     // Handle requsts to an instance that has already been initialized.
@@ -207,7 +226,9 @@ async fn instance_ensure(
             ));
         }
 
-        return Ok(HttpResponseCreated(api::InstanceEnsureResponse {}));
+        return Ok(HttpResponseCreated(api::InstanceEnsureResponse {
+            migrate: None,
+        }));
     }
 
     const MB: usize = 1024 * 1024;
@@ -230,30 +251,89 @@ async fn instance_ensure(
         vmm_log,
     )
     .map_err(|err| {
-        HttpError::for_internal_error(format!(
-            "Cannot build instance: {}",
-            err.to_string()
-        ))
+        HttpError::for_internal_error(format!("Cannot build instance: {}", err))
     })?;
+
+    let (tx, rx) = watch::channel(StateChange {
+        gen: 0,
+        state: propolis::instance::State::Initialize,
+    });
+
+    instance.on_transition(Box::new(move |next_state, _inv, ctx| {
+        match next_state {
+            propolis::instance::State::Boot => {
+                // Set vCPUs to their proper boot (INIT) state
+                for mut vcpu in ctx.mctx.vcpus() {
+                    vcpu.reboot_state().unwrap();
+                    vcpu.activate().unwrap();
+                    // Set BSP to start up
+                    if vcpu.is_bsp() {
+                        vcpu.set_run_state(bhyve_api::VRS_RUN).unwrap();
+                        vcpu.set_reg(
+                            bhyve_api::vm_reg_name::VM_REG_GUEST_RIP,
+                            0xfff0,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            _ => {}
+        }
+        let last = (*tx.borrow()).clone();
+        let _ = tx.send(StateChange { gen: last.gen + 1, state: next_state });
+    }));
+
+    // Is this part of a migration?
+    if let Some(migrate_request) = request.migrate {
+        // We stop short of the usual intialization routines because this is
+        // a migrate request and so we should try to establish a connection
+        // with the source instance.
+
+        // Save the created Instance in the server's context as-is.
+        // We'll update it as part of the migration process later.
+        *context = Some(InstanceContext {
+            instance,
+            properties,
+            serial: None,
+            state_watcher: rx,
+            serial_task: None,
+        });
+        drop(context);
+
+        let res = migrate::dest_initiate(rqctx, instance_id, migrate_request)
+            .await
+            .map_err(<_ as Into<HttpError>>::into)?;
+        // TODO: This should be HttpResponseAccepted
+        return Ok(HttpResponseCreated(api::InstanceEnsureResponse {
+            migrate: Some(res),
+        }));
+    }
 
     // Initialize (some) of the instance's hardware.
     //
     // This initialization may be refactored to be client-controlled,
     // but it is currently hard-coded for simplicity.
-    let mut com1: Option<Serial<LpcUart>> = None;
+    let mut com1: Option<Arc<Serial<LpcUart>>> = None;
 
     instance
         .initialize(|machine, mctx, disp, inv| {
-            let init = MachineInitializer::new(machine, mctx, disp, inv);
+            let init = MachineInitializer::new(
+                rqctx.log.clone(),
+                machine,
+                mctx,
+                disp,
+                inv,
+            );
             init.initialize_rom(server_context.config.get_bootrom())?;
-            machine.initialize_rtc(lowmem, highmem).unwrap();
+            init.initialize_kernel_devs(lowmem, highmem)?;
             let chipset = init.initialize_chipset()?;
-            com1 = Some(init.initialize_uart(&chipset)?);
+            com1 = Some(Arc::new(init.initialize_uart(&chipset)?));
             init.initialize_ps2(&chipset)?;
             init.initialize_qemu_debug_port()?;
 
             // Attach devices which have been requested from the HTTP interface.
             for nic in &nics {
+                info!(rqctx.log, "Creating NIC: {:#?}", nic);
                 let bdf =
                     slot_to_bdf(nic.slot, SlotType::NIC).map_err(|e| {
                         Error::new(
@@ -262,6 +342,20 @@ async fn instance_ensure(
                         )
                     })?;
                 init.initialize_vnic(&chipset, &nic.name, bdf)?;
+            }
+
+            for disk in &disks {
+                info!(rqctx.log, "Creating Disk: {:#?}", disk);
+                let bdf =
+                    slot_to_bdf(disk.slot, SlotType::Disk).map_err(|e| {
+                        Error::new(
+                            ErrorKind::InvalidData,
+                            format!("Cannot parse disk PCI: {}", e),
+                        )
+                    })?;
+
+                init.initialize_crucible(&chipset, disk, bdf)?;
+                info!(rqctx.log, "Disk {} created successfully", disk.name);
             }
 
             // Attach devices which are hard-coded in the config.
@@ -318,6 +412,56 @@ async fn instance_ensure(
                             &chipset, bdf, backend, creg,
                         )?;
                     }
+                    "pci-nvme" => {
+                        let block_dev_name = dev
+                            .options
+                            .get("block_dev")
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "no block_dev key for {}!",
+                                        devname
+                                    ),
+                                )
+                            })?
+                            .as_str()
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!(
+                                        "as_str() failed for {}'s block_dev!",
+                                        devname
+                                    ),
+                                )
+                            })?;
+
+                        let (backend, creg) = server_context
+                            .config
+                            .create_block_backend(block_dev_name, &disp)
+                            .map_err(|e| {
+                                Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("ParseError: {:?}", e),
+                                )
+                            })?;
+
+                        let bdf: pci::Bdf =
+                            dev.get("pci-path").ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::InvalidData,
+                                    "Cannot parse disk PCI",
+                                )
+                            })?;
+
+                        init.initialize_nvme_block(
+                            &chipset,
+                            bdf,
+                            block_dev_name.to_string(),
+                            backend,
+                            creg,
+                        )?;
+                    }
                     "pci-virtio-viona" => {
                         let name = dev.get_string("vnic").ok_or_else(|| {
                             Error::new(
@@ -368,57 +512,29 @@ async fn instance_ensure(
                 }
             }
 
-            init.initialize_fwcfg(&chipset, properties.vcpus)?;
+            init.initialize_fwcfg(properties.vcpus)?;
             init.initialize_cpus()?;
             Ok(())
         })
         .map_err(|err| {
             HttpError::for_internal_error(format!(
                 "Failed to initialize machine: {}",
-                err.to_string()
+                err
             ))
         })?;
 
-    let (tx, rx) = watch::channel(StateChange {
-        gen: 0,
-        state: propolis::instance::State::Initialize,
-    });
     instance.print();
-
-    instance.on_transition(Box::new(move |next_state, ctx| {
-        match next_state {
-            propolis::instance::State::Boot => {
-                // Set vCPUs to their proper boot (INIT) state
-                for mut vcpu in ctx.mctx.vcpus() {
-                    vcpu.reboot_state().unwrap();
-                    vcpu.activate().unwrap();
-                    // Set BSP to start up
-                    if vcpu.is_bsp() {
-                        vcpu.set_run_state(bhyve_api::VRS_RUN).unwrap();
-                        vcpu.set_reg(
-                            bhyve_api::vm_reg_name::VM_REG_GUEST_RIP,
-                            0xfff0,
-                        )
-                        .unwrap();
-                    }
-                }
-            }
-            _ => {}
-        }
-        let last = (*tx.borrow()).clone();
-        let _ = tx.send(StateChange { gen: last.gen + 1, state: next_state });
-    }));
 
     // Save the newly created instance in the server's context.
     *context = Some(InstanceContext {
         instance,
         properties,
-        serial: Arc::new(com1.unwrap()),
+        serial: com1,
         state_watcher: rx,
         serial_task: None,
     });
 
-    Ok(HttpResponseCreated(api::InstanceEnsureResponse {}))
+    Ok(HttpResponseCreated(api::InstanceEnsureResponse { migrate: None }))
 }
 
 #[endpoint {
@@ -678,6 +794,16 @@ async fn instance_serial(
         ));
     }
 
+    let serial = context
+        .serial
+        .as_ref()
+        .ok_or_else(|| {
+            HttpError::for_internal_error(
+                "Instance present but serial not initialized".to_string(),
+            )
+        })?
+        .clone();
+
     let request = &mut *rqctx.request.lock().await;
 
     if !request
@@ -735,8 +861,7 @@ async fn instance_serial(
 
     let (detach_ch, detach_recv) = oneshot::channel();
 
-    let upgrade_fut = upgrade::on(&mut *request);
-    let serial = context.serial.clone();
+    let upgrade_fut = upgrade::on(request);
     let ws_log = rqctx.log.new(o!());
     let err_log = ws_log.clone();
     let actx = context.instance.disp.async_ctx();
@@ -819,6 +944,43 @@ async fn instance_serial_detach(
     Ok(HttpResponseUpdatedNoContent {})
 }
 
+// This endpoint is meant to only be called during a migration from the destination
+// instance to the source instance as part of the HTTP connection upgrade used to
+// establish the migration link. We don't actually want this exported via OpenAPI
+// clients.
+#[endpoint {
+    method = PUT,
+    path = "/instances/{instance_id}/migrate/start",
+    unpublished = true,
+}]
+async fn instance_migrate_start(
+    rqctx: Arc<RequestContext<Context>>,
+    path_params: Path<api::InstancePathParams>,
+    request: TypedBody<api::InstanceMigrateStartRequest>,
+) -> Result<Response<Body>, HttpError> {
+    let instance_id = path_params.into_inner().instance_id;
+    let migration_id = request.into_inner().migration_id;
+    migrate::source_start(rqctx, instance_id, migration_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[endpoint {
+    method = GET,
+    path = "/instances/{instance_id}/migrate/status"
+}]
+async fn instance_migrate_status(
+    rqctx: Arc<RequestContext<Context>>,
+    _path_params: Path<api::InstancePathParams>,
+    request: TypedBody<api::InstanceMigrateStatusRequest>,
+) -> Result<HttpResponseOk<api::InstanceMigrateStatusResponse>, HttpError> {
+    let migration_id = request.into_inner().migration_id;
+    migrate::migrate_status(rqctx, migration_id)
+        .await
+        .map_err(Into::into)
+        .map(HttpResponseOk)
+}
+
 /// Returns a Dropshot [`ApiDescription`] object to launch a server.
 pub fn api() -> ApiDescription<Context> {
     let mut api = ApiDescription::new();
@@ -829,5 +991,7 @@ pub fn api() -> ApiDescription<Context> {
     api.register(instance_state_put).unwrap();
     api.register(instance_serial).unwrap();
     api.register(instance_serial_detach).unwrap();
+    api.register(instance_migrate_start).unwrap();
+    api.register(instance_migrate_status).unwrap();
     api
 }

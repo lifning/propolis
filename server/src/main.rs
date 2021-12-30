@@ -1,11 +1,16 @@
 // Required for USDT
 #![cfg_attr(feature = "dtrace-probes", feature(asm))]
+#![cfg_attr(
+    all(feature = "dtrace-probes", target_os = "macos"),
+    feature(asm_sym)
+)]
 
 use anyhow::anyhow;
 use dropshot::{
     ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter,
 };
 use propolis::usdt::register_probes;
+use slog::info;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -67,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
 
             let context = server::Context::new(config, log.new(slog::o!()));
+            info!(log, "Starting server...");
             let server = HttpServerStarter::new(
                 &config_dropshot,
                 server::api(),

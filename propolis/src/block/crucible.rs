@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -24,7 +24,6 @@ fn map_crucible_error_to_io(x: CrucibleError) -> std::io::Error {
 pub struct CrucibleBackend {
     guest: Arc<crucible::Guest>,
     block_size: u64,
-    total_size: u64,
     sectors: u64,
     read_only: bool,
 
@@ -34,19 +33,21 @@ pub struct CrucibleBackend {
 impl CrucibleBackend {
     pub fn create(
         disp: &Dispatcher,
-        targets: Vec<SocketAddrV4>,
+        targets: Vec<SocketAddr>,
         read_only: bool,
         key: Option<String>,
+        gen: Option<u64>,
     ) -> Result<Arc<Self>> {
-        CrucibleBackend::_create(disp, targets, read_only, key)
+        CrucibleBackend::_create(disp, targets, read_only, key, gen)
             .map_err(map_crucible_error_to_io)
     }
 
     fn _create(
         disp: &Dispatcher,
-        targets: Vec<SocketAddrV4>,
+        targets: Vec<SocketAddr>,
         read_only: bool,
         key: Option<String>,
+        gen: Option<u64>,
     ) -> anyhow::Result<Arc<Self>, crucible::CrucibleError> {
         // spawn Crucible tasks
         let opts =
@@ -62,7 +63,6 @@ impl CrucibleBackend {
         let mut be = Self {
             guest: guest.clone(),
             block_size: 0,
-            total_size: 0,
             sectors: 0,
             read_only,
             driver: Mutex::new(None),
@@ -76,7 +76,7 @@ impl CrucibleBackend {
         let uuid = tokio::task::block_in_place(|| guest.query_upstairs_uuid())?;
 
         slog::info!(disp.logger(), "Calling activate for {:?}", uuid);
-        tokio::task::block_in_place(|| guest.activate())?;
+        tokio::task::block_in_place(|| guest.activate(gen.unwrap_or(0)))?;
 
         let mut active = false;
         for _ in 0..10 {
@@ -98,10 +98,10 @@ impl CrucibleBackend {
         be.block_size =
             tokio::task::block_in_place(|| guest.query_block_size())?;
 
-        be.total_size =
+        let total_size =
             tokio::task::block_in_place(|| guest.query_total_size())?;
 
-        be.sectors = be.total_size / be.block_size;
+        be.sectors = total_size / be.block_size;
 
         Ok(Arc::new(be))
     }
@@ -127,7 +127,11 @@ impl block::Backend for CrucibleBackend {
     }
 }
 
-impl Entity for CrucibleBackend {}
+impl Entity for CrucibleBackend {
+    fn type_name(&self) -> &'static str {
+        "block-crucible"
+    }
+}
 
 struct SyncDriver {
     cv: Condvar,
@@ -165,10 +169,19 @@ impl SyncDriver {
             if let Some(req) = guard.pop_front() {
                 drop(guard);
                 idled = false;
+                let logger = sctx.log().clone();
                 let ctx = sctx.dispctx();
                 match process_request(self.guest.clone(), &req, &ctx) {
                     Ok(_) => req.complete(block::Result::Success, &ctx),
-                    Err(_) => req.complete(block::Result::Failure, &ctx),
+                    Err(e) => {
+                        slog::error!(
+                            logger,
+                            "{:?} error on req {:?}",
+                            e,
+                            req.op
+                        );
+                        req.complete(block::Result::Failure, &ctx)
+                    }
                 }
             } else {
                 // wait until more requests are available

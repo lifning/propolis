@@ -10,11 +10,13 @@
 use super::mapping::*;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result, Write};
+use std::os::raw::c_void;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::common::PAGE_SIZE;
 use crate::util::sys::ioctl;
 
 /// Creates a new virtual machine with the provided `name`.
@@ -256,6 +258,26 @@ impl VmmHdl {
         guard_space.mapping(size, prot, &self.inner, offset as i64)
     }
 
+    /// Tracks dirty pages in the guest's physical address space.
+    ///
+    /// # Arguments:
+    /// - `start_gpa`: The start of the guest physical address range to track.
+    /// Must be page aligned.
+    /// - `bitmap`: A mutable bitmap of dirty pages, one bit per guest PFN
+    /// relative to `start_gpa`.
+    pub fn track_dirty_pages(
+        &self,
+        start_gpa: u64,
+        bitmap: &mut [u8],
+    ) -> Result<()> {
+        let mut tracker = bhyve_api::vm_dirty_tracker {
+            vdt_start_gpa: start_gpa,
+            vdt_len: bitmap.len() * PAGE_SIZE,
+            vdt_pfns: bitmap.as_mut_ptr() as *mut c_void,
+        };
+        self.ioctl(bhyve_api::VM_TRACK_DIRTY_PAGES, &mut tracker)
+    }
+
     /// Issues a request to update the virtual RTC time.
     pub fn rtc_settime(&self, unix_time: u64) -> Result<()> {
         let mut time: u64 = unix_time;
@@ -265,6 +287,13 @@ impl VmmHdl {
     pub fn rtc_write(&self, offset: u8, value: u8) -> Result<()> {
         let mut data = bhyve_api::vm_rtc_data { offset: offset as i32, value };
         self.ioctl(bhyve_api::VM_RTC_WRITE, &mut data)
+    }
+    /// Reads from the registers within the RTC device.
+    pub fn rtc_read(&self, offset: u8) -> Result<u8> {
+        let mut data =
+            bhyve_api::vm_rtc_data { offset: offset as i32, value: 0 };
+        self.ioctl(bhyve_api::VM_RTC_READ, &mut data)?;
+        Ok(data.value)
     }
 
     /// Asserts the requested IRQ for the virtual interrupt controller.

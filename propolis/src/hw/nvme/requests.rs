@@ -2,7 +2,6 @@ use crate::{
     block::{self, Operation, Request},
     dispatch::DispCtx,
     hw::nvme::{bits, cmds::Completion},
-    propolis,
 };
 
 use super::{
@@ -10,6 +9,15 @@ use super::{
     queue::CompQueueEntryPermit,
     NvmeCtrl, PciNvme,
 };
+
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn nvme_read_enqueue(cid: u16, slba: u64, nlb: u16) {}
+    fn nvme_read_complete(cid: u16) {}
+
+    fn nvme_write_enqueue(cid: u16, slba: u64, nlb: u16) {}
+    fn nvme_write_complete(cid: u16) {}
+}
 
 impl block::Device for PciNvme {
     fn next(&self, ctx: &DispCtx) -> Option<Request> {
@@ -83,7 +91,7 @@ fn read_op(
     cqe_permit: CompQueueEntryPermit,
     ctx: &DispCtx,
 ) -> Request {
-    propolis::nvme_read_enqueue!(|| (cid, cmd.slba, cmd.nlb));
+    probes::nvme_read_enqueue!(|| (cid, cmd.slba, cmd.nlb));
     let off = state.nlb_to_size(cmd.slba as usize);
     let size = state.nlb_to_size(cmd.nlb as usize);
     let bufs = cmd.data(size as u64, ctx.mctx.memctx()).collect();
@@ -103,7 +111,7 @@ fn write_op(
     cqe_permit: CompQueueEntryPermit,
     ctx: &DispCtx,
 ) -> Request {
-    propolis::nvme_write_enqueue!(|| (cid, cmd.slba, cmd.nlb));
+    probes::nvme_write_enqueue!(|| (cid, cmd.slba, cmd.nlb));
     let off = state.nlb_to_size(cmd.slba as usize);
     let size = state.nlb_to_size(cmd.nlb as usize);
     let bufs = cmd.data(size as u64, ctx.mctx.memctx()).collect();
@@ -149,10 +157,10 @@ fn complete_block_req(
 
     match op {
         Operation::Read(..) => {
-            propolis::nvme_read_complete!(|| (cid));
+            probes::nvme_read_complete!(|| (cid));
         }
         Operation::Write(..) => {
-            propolis::nvme_write_complete!(|| (cid));
+            probes::nvme_write_complete!(|| (cid));
         }
         _ => {}
     }

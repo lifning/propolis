@@ -1,7 +1,7 @@
 //! Describes a server config which may be parsed from a TOML file.
 
 use std::collections::{btree_map, BTreeMap};
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -141,15 +141,12 @@ impl BlockDevice {
                 let be = propolis::block::FileBackend::create(
                     path, readonly, nworkers,
                 )?;
-                let child = inventory::ChildRegister::new(
-                    &be,
-                    "backend-file".to_string(),
-                );
+                let child = inventory::ChildRegister::new(&be, None);
 
                 Ok((be, child))
             }
             "crucible" => {
-                let targets: Vec<SocketAddrV4> = self
+                let targets: Vec<SocketAddr> = self
                     .options
                     .get("targets")
                     .ok_or_else(|| {
@@ -183,7 +180,7 @@ impl BlockDevice {
                                 )
                             })
                     })
-                    .collect::<Result<Vec<SocketAddrV4>, ParseError>>()?;
+                    .collect::<Result<Vec<SocketAddr>, ParseError>>()?;
 
                 let read_only: bool = || -> Option<bool> {
                     self.options.get("readonly")?.as_str()?.parse().ok()
@@ -204,15 +201,20 @@ impl BlockDevice {
                             .to_string())
                     })
                     .map_or(Ok(None), |r| r.map(Some))?;
+                let gen: Option<u64> = self
+                    .options
+                    .get("gen")
+                    .map(|x| x.as_str())
+                    .flatten()
+                    .map(|x| u64::from_str(x).ok())
+                    .flatten();
 
                 let be = propolis::block::CrucibleBackend::create(
-                    disp, targets, read_only, key,
+                    disp, targets, read_only, key, gen,
                 )?;
 
-                let creg = inventory::ChildRegister::new(
-                    &be,
-                    "backend-crucible".to_string(),
-                );
+                // TODO: use volume ID or something for instance name
+                let creg = inventory::ChildRegister::new(&be, None);
 
                 Ok((be, creg))
             }

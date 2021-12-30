@@ -1,5 +1,9 @@
 // Required for USDT
 #![cfg_attr(feature = "dtrace-probes", feature(asm))]
+#![cfg_attr(
+    all(feature = "dtrace-probes", target_os = "macos"),
+    feature(asm_sym)
+)]
 
 extern crate pico_args;
 extern crate propolis;
@@ -11,6 +15,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use propolis::chardev::{BlockingSource, Sink, Source};
 use propolis::hw::chipset::Chipset;
@@ -141,13 +146,20 @@ fn main() {
             }
             Ok(())
         })?;
-        machine.initialize_rtc(lowmem, highmem).unwrap();
+
+        let (pic, pit, hpet, ioapic, rtc) = propolis::hw::bhyve::defaults();
+        rtc.memsize_to_nvram(lowmem, highmem, mctx.hdl())?;
+        rtc.set_time(SystemTime::now(), mctx.hdl())?;
+
+        inv.register(&pic)?;
+        inv.register(&pit)?;
+        inv.register(&hpet)?;
+        inv.register(&ioapic)?;
+        inv.register(&rtc)?;
 
         let hdl = machine.get_hdl();
         let chipset = hw::chipset::i440fx::I440Fx::create(machine);
-        let chipset_id = inv
-            .register(&chipset, "chipset".to_string(), None)
-            .map_err(|e| -> std::io::Error { e.into() })?;
+        inv.register(&chipset)?;
 
         // UARTs
         let com1 = LpcUart::new(chipset.irq_pin(ibmpc::IRQ_COM1).unwrap());
@@ -172,28 +184,22 @@ fn main() {
         LpcUart::attach(&com2, pio, ibmpc::PORT_COM2);
         LpcUart::attach(&com3, pio, ibmpc::PORT_COM3);
         LpcUart::attach(&com4, pio, ibmpc::PORT_COM4);
-        inv.register(&com1, "com1".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
-        inv.register(&com2, "com2".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
-        inv.register(&com3, "com3".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
-        inv.register(&com4, "com4".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
+        inv.register_instance(&com1, "com1")?;
+        inv.register_instance(&com2, "com2")?;
+        inv.register_instance(&com3, "com3")?;
+        inv.register_instance(&com4, "com4")?;
 
         // PS/2
         let ps2_ctrl = PS2Ctrl::create();
         ps2_ctrl.attach(pio, chipset.as_ref());
-        inv.register(&ps2_ctrl, "ps2_ctrl".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
+        inv.register(&ps2_ctrl)?;
 
         let debug_file = std::fs::File::create("debug.out").unwrap();
         let debug_out = chardev::BlockingFileOutput::new(debug_file).unwrap();
         let debug_device = hw::qemu::debug::QemuDebugPort::create(pio);
         debug_out
             .attach(Arc::clone(&debug_device) as Arc<dyn BlockingSource>, disp);
-        inv.register(&debug_device, "debug".to_string(), None)
-            .map_err(|e| -> std::io::Error { e.into() })?;
+        inv.register(&debug_device)?;
 
 
         for (name, dev) in config.devs() {
@@ -211,48 +217,50 @@ fn main() {
                         dev.options.get("block_dev").unwrap().as_str().unwrap();
 
                     let (backend, creg) = config.block_dev(block_dev, disp);
+                    let bdf = bdf.unwrap();
 
                     let info = backend.info();
                     let vioblk = hw::virtio::PciVirtioBlock::new(0x100, info);
-                    let id = inv
-                        .register(&vioblk, format!("vioblk-{}", name), None)
-                        .map_err(|e| -> std::io::Error { e.into() })?;
-                    let _be_id = inv
-                        .register_child(creg, id)
-                        .map_err(|e| -> std::io::Error { e.into() })?;
+                    let id = inv.register_instance(&vioblk, bdf.to_string())?;
+                    let _be_id = inv.register_child(creg, id)?;
 
                     backend
                         .attach(vioblk.clone() as Arc<dyn block::Device>, disp);
 
-                    chipset.pci_attach(bdf.unwrap(), vioblk);
+                    chipset.pci_attach(bdf, vioblk);
                 }
                 "pci-virtio-viona" => {
                     let vnic_name =
                         dev.options.get("vnic").unwrap().as_str().unwrap();
+                    let bdf = bdf.unwrap();
 
                     let viona = hw::virtio::PciVirtioViona::new(
                         vnic_name, 0x100, &hdl,
                     )?;
-                    inv.register(&viona, format!("viona-{}", name), None)
-                        .map_err(|e| -> std::io::Error { e.into() })?;
-                    chipset.pci_attach(bdf.unwrap(), viona);
+                    inv.register_instance(&viona, bdf.to_string())?;
+                    chipset.pci_attach(bdf, viona);
                 }
                 "pci-nvme" => {
                     let block_dev =
                         dev.options.get("block_dev").unwrap().as_str().unwrap();
 
                     let (backend, creg) = config.block_dev(block_dev, disp);
+                    let bdf = bdf.unwrap();
 
                     let info = backend.info();
-                    let nvme = hw::nvme::PciNvme::create(0x1de, 0x1000, info);
+                    let nvme = hw::nvme::PciNvme::create(
+                        0x1de,
+                        0x1000,
+                        block_dev.to_string(),
+                        info,
+                    );
 
-                    let id =
-                        inv.register(&nvme, format!("nvme-{}", name), None)?;
+                    let id = inv.register_instance(&nvme, bdf.to_string())?;
                     let _be_id = inv.register_child(creg, id)?;
 
                     backend.attach(nvme.clone(), disp);
 
-                    chipset.pci_attach(bdf.unwrap(), nvme);
+                    chipset.pci_attach(bdf, nvme);
                 }
                 "pci-virtio-9p" => {
                     let source = dev.options.get("source")
@@ -270,7 +278,7 @@ fn main() {
                     let vio9p = hw::virtio::PciVirtio9pfs::new(
                         source, target, 0x40,
                     );
-                    inv.register(&vio9p, format!("vio9p-{}", name), None)
+                    inv.register(&vio9p)
                         .map_err(|e| -> std::io::Error { e.into() })?;
 
                     chipset.pci_attach(bdf.unwrap(), vio9p);
@@ -296,10 +304,8 @@ fn main() {
         let fwcfg_dev = fwcfg.finalize();
         fwcfg_dev.attach(pio);
 
-        inv.register(&fwcfg_dev, "fwcfg".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
-        inv.register(&ramfb, "ramfb".to_string(), Some(chipset_id))
-            .map_err(|e| -> std::io::Error { e.into() })?;
+        inv.register(&fwcfg_dev)?;
+        inv.register(&ramfb)?;
 
         for mut vcpu in mctx.vcpus() {
             vcpu.set_default_capabs().unwrap();
@@ -320,7 +326,7 @@ fn main() {
     slog::error!(log, "Waiting for a connection to ttya");
     com1_sock.wait_for_connect();
 
-    inst.on_transition(Box::new(|next_state, ctx| {
+    inst.on_transition(Box::new(|next_state, inv, ctx| {
         match next_state {
             State::Boot => {
                 for mut vcpu in ctx.mctx.vcpus() {
@@ -337,6 +343,24 @@ fn main() {
                     }
                 }
             }
+            State::Quiesce => {
+                println!("Device state at quiesce:");
+                inv.for_each_node(
+                    propolis::inventory::Order::Post,
+                    |_id, record| {
+                        let ent = record.entity();
+                        if let Some(mig_ent) = ent.migrate() {
+                            let data = mig_ent.export(ctx);
+                            let output = DevExport {
+                                id: record.name().to_string(),
+                                data,
+                            };
+                            serde_json::to_writer(std::io::stdout(), &output)
+                                .unwrap();
+                        }
+                    },
+                );
+            }
             _ => {}
         }
     }));
@@ -344,4 +368,12 @@ fn main() {
 
     inst.wait_for_state(State::Destroy);
     drop(inst);
+}
+
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct DevExport {
+    id: String,
+    data: Box<dyn erased_serde::Serialize>,
 }

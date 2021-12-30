@@ -53,6 +53,11 @@ use libc::{
 };
 use ispf::WireSize;
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn p9fs_cfg_read() {}
+}
+
 pub struct PciVirtio9pfs {
     virtio_state: PciVirtioState,
     pci_state: pci::DeviceState,
@@ -878,7 +883,7 @@ impl VirtioDevice for PciVirtio9pfs {
     fn cfg_rw(&self, mut rwo: RWOp) {
         P9FS_DEV_REGS.process(&mut rwo, |id, rwo| match rwo {
             RWOp::Read(ro) => {
-                crate::propolis::p9fs_cfg_read!(||());
+                probes::p9fs_cfg_read!(||());
                 match id {
                     P9fsReg::TagLen => {
                         //println!("read taglen");
@@ -909,6 +914,9 @@ impl VirtioDevice for PciVirtio9pfs {
 }
 
 impl Entity for PciVirtio9pfs {
+    fn type_name(&self) -> &'static str {
+        "pci-virtio-9pfs"
+    }
     fn reset(&self, ctx: &DispCtx) {
         self.virtio_state.reset(self, ctx);
     }

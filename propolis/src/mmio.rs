@@ -3,10 +3,15 @@ use std::sync::{Arc, Mutex};
 use crate::common::*;
 use crate::dispatch::DispCtx;
 use crate::util::aspace::ASpace;
-use crate::propolis;
 pub use crate::util::aspace::{Error, Result};
 
 use byteorder::{ByteOrder, LE};
+
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn mmio_read(addr: u64, bytes: u8, value: u64, was_handled: u8) {}
+    fn mmio_write(addr: u64, bytes: u8, value: u64, was_handled: u8) {}
+}
 
 pub type MmioFn = dyn Fn(usize, RWOp, &DispCtx) + Send + Sync + 'static;
 
@@ -54,7 +59,7 @@ impl MmioBus {
             slog::info!(ctx.log, "unhandled MMIO";
                 "op" => "write", "addr" => addr, "bytes" => bytes);
         }
-        propolis::mmio_write!(|| (addr as u64, bytes, val, handled as u8));
+        probes::mmio_write!(|| (addr as u64, bytes, val, handled as u8));
     }
     pub fn handle_read(&self, addr: usize, bytes: u8, ctx: &DispCtx) -> u64 {
         let mut buf = [0xffu8; 8];
@@ -75,7 +80,7 @@ impl MmioBus {
         }
 
         let val = LE::read_u64(&buf);
-        propolis::mmio_read!(|| (addr as u64, bytes, val, handled as u8));
+        probes::mmio_read!(|| (addr as u64, bytes, val, handled as u8));
         val
     }
 

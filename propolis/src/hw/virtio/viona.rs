@@ -10,6 +10,7 @@ use crate::common::*;
 use crate::dispatch::{AsyncCtx, DispCtx};
 use crate::hw::pci;
 use crate::instance;
+use crate::migrate::Migrate;
 use crate::util::regmap::RegMap;
 use crate::util::self_arc::*;
 use crate::util::sys;
@@ -20,6 +21,7 @@ use super::pci::{PciVirtio, PciVirtioState};
 use super::queue::{VirtQueue, VirtQueues};
 use super::{VirtioDevice, VqChange, VqIntr};
 
+use erased_serde::Serialize;
 use lazy_static::lazy_static;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -208,6 +210,9 @@ impl VirtioDevice for PciVirtioViona {
     }
 }
 impl Entity for PciVirtioViona {
+    fn type_name(&self) -> &'static str {
+        "pci-virtio-viona"
+    }
     fn state_transition(
         &self,
         next: instance::State,
@@ -244,6 +249,16 @@ impl Entity for PciVirtioViona {
     }
     fn reset(&self, ctx: &DispCtx) {
         self.virtio_state.reset(self, ctx);
+    }
+    fn migrate(&self) -> Option<&dyn Migrate> {
+        Some(self)
+    }
+}
+impl Migrate for PciVirtioViona {
+    fn export(&self, _ctx: &DispCtx) -> Box<dyn Serialize> {
+        Box::new(migrate::PciVirtioVionaV1 {
+            pci_virtio_state: self.virtio_state.export(&self.pci_state),
+        })
     }
 }
 impl PciVirtio for PciVirtioViona {
@@ -487,6 +502,16 @@ impl Drop for VionaPoller {
         unsafe {
             libc::close(self.epfd);
         }
+    }
+}
+
+pub mod migrate {
+    use crate::hw::virtio::pci::migrate::PciVirtioStateV1;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct PciVirtioVionaV1 {
+        pub pci_virtio_state: PciVirtioStateV1,
     }
 }
 

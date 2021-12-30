@@ -1,5 +1,5 @@
 use std::collections::{btree_map, BTreeMap};
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -100,11 +100,11 @@ impl BlockDevice {
                 )
                 .unwrap();
 
-                let creg = ChildRegister::new(&be, "backend-file".to_string());
+                let creg = ChildRegister::new(&be, None);
                 (be, creg)
             }
             "crucible" => {
-                let mut targets: Vec<SocketAddrV4> = Vec::new();
+                let mut targets: Vec<SocketAddr> = Vec::new();
 
                 for target in self
                     .options
@@ -128,14 +128,21 @@ impl BlockDevice {
                     .options
                     .get("key")
                     .map(|x| x.as_str().unwrap().to_string());
+                let gen: Option<u64> = self
+                    .options
+                    .get("gen")
+                    .map(|x| x.as_str())
+                    .flatten()
+                    .map(|x| u64::from_str(x).ok())
+                    .flatten();
 
                 let be = propolis::block::CrucibleBackend::create(
-                    disp, targets, read_only, key,
+                    disp, targets, read_only, key, gen,
                 )
                 .unwrap();
 
-                let creg =
-                    ChildRegister::new(&be, "backend-crucible".to_string());
+                // TODO: use volume ID or something for instance name
+                let creg = ChildRegister::new(&be, None);
                 (be, creg)
             }
             _ => {

@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::dispatch::DispCtx;
 use crate::hw::pci;
+use crate::migrate::Migrate;
 use crate::util::regmap::RegMap;
 use crate::{block, common::*};
 
+use erased_serde::Serialize;
 use lazy_static::lazy_static;
 use thiserror::Error;
 
@@ -21,10 +23,6 @@ use queue::{CompQueue, QueueId, SubQueue};
 
 /// The max number of MSI-X interrupts we support
 const NVME_MSIX_COUNT: u16 = 1024;
-
-/// Supported block size.
-/// TODO: Support more
-const BLOCK_SZ: u64 = 512;
 
 /// NVMe errors
 #[derive(Debug, Error)]
@@ -422,6 +420,7 @@ impl PciNvme {
     pub fn create(
         vendor: u16,
         device: u16,
+        serial_number: String,
         binfo: block::DeviceInfo,
     ) -> Arc<Self> {
         let builder = pci::Builder::new(pci::Ident {
@@ -442,12 +441,16 @@ impl PciNvme {
         let cqes = size_of::<RawCompletion>().trailing_zeros() as u8;
         let sqes = size_of::<RawSubmission>().trailing_zeros() as u8;
 
+        let sz = std::cmp::min(20, serial_number.len());
+        let mut sn: [u8; 20] = [0u8; 20];
+        sn[..sz].clone_from_slice(&serial_number.as_bytes()[..sz]);
+
         // Initialize the Identify structure returned when the host issues
         // an Identify Controller command.
         let ctrl_ident = bits::IdentifyController {
             vid: vendor,
             ssvid: vendor,
-            // TODO: fill out serial number
+            sn,
             ieee: [0xA8, 0x40, 0x25], // Oxide OUI
             // We use standard Completion/Submission Queue Entry structures with no extra
             // data, so required (minimum) == maximum
@@ -463,8 +466,7 @@ impl PciNvme {
 
         // Initialize the Identify structure returned when the  host issues
         // an Identify Namespace command.
-        let total_bytes = binfo.total_size * binfo.block_size as u64;
-        let nsze = total_bytes / BLOCK_SZ;
+        let nsze = binfo.total_size;
         let mut ns_ident = bits::IdentifyNamespace {
             // No thin provisioning so nsze == ncap == nuse
             nsze,
@@ -477,11 +479,15 @@ impl PciNvme {
 
         // Update the block format we support
         debug_assert!(
-            BLOCK_SZ.is_power_of_two(),
-            "BLOCK_SZ must be a power of 2"
+            binfo.block_size.is_power_of_two(),
+            "binfo.block_size must be a power of 2"
         );
-        debug_assert!(BLOCK_SZ >= 512, "BLOCK_SZ must be at least 512 bytes");
-        ns_ident.lbaf[0].lbads = BLOCK_SZ.trailing_zeros() as u8;
+        debug_assert!(
+            binfo.block_size >= 512,
+            "binfo.block_size must be at least 512 bytes"
+        );
+
+        ns_ident.lbaf[0].lbads = binfo.block_size.trailing_zeros() as u8;
 
         // Initialize the CAP "register" leaving most values
         // at their defaults (0):
@@ -848,7 +854,35 @@ impl pci::Device for PciNvme {
         &self.pci_state
     }
 }
-impl Entity for PciNvme {}
+impl Entity for PciNvme {
+    fn type_name(&self) -> &'static str {
+        "pci-nvme"
+    }
+    fn reset(&self, _ctx: &DispCtx) {
+        let mut ctrl = self.state.lock().unwrap();
+        ctrl.reset();
+        self.pci_state.reset(self);
+    }
+    fn migrate(&self) -> Option<&dyn crate::migrate::Migrate> {
+        Some(self)
+    }
+}
+impl Migrate for PciNvme {
+    fn export(&self, _ctx: &DispCtx) -> Box<dyn Serialize> {
+        Box::new(migrate::PciNvmeStateV1 { pci: self.pci_state.export() })
+    }
+}
+
+pub mod migrate {
+    use crate::hw::pci::migrate::PciStateV1;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct PciNvmeStateV1 {
+        pub pci: PciStateV1,
+        // TODO: Add the rest of the controller state
+    }
+}
 
 /// NVMe Controller Registers
 ///

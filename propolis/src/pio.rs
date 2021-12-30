@@ -3,10 +3,15 @@ use std::sync::{Arc, Mutex};
 use crate::common::*;
 use crate::dispatch::DispCtx;
 use crate::util::aspace::ASpace;
-use crate::propolis;
 pub use crate::util::aspace::{Error, Result};
 
 use byteorder::{ByteOrder, LE};
+
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn pio_in(port: u16, bytes: u8, value: u32, was_handled: u8) {}
+    fn pio_out(port: u16, bytes: u8, value: u32, was_handled: u8) {}
+}
 
 pub type PioFn = dyn Fn(u16, RWOp<'_, '_>, &DispCtx) + Send + Sync + 'static;
 
@@ -48,7 +53,7 @@ impl PioBus {
             slog::info!(ctx.log, "unhandled PIO";
                 "op" => "out", "port" => port, "bytes" => bytes);
         }
-        propolis::pio_out!(|| (port, bytes, val, handled as u8));
+        probes::pio_out!(|| (port, bytes, val, handled as u8));
     }
 
     pub fn handle_in(&self, port: u16, bytes: u8, ctx: &DispCtx) -> u32 {
@@ -69,7 +74,7 @@ impl PioBus {
         }
 
         let val = LE::read_u32(&buf);
-        propolis::pio_in!(|| (port, bytes, val, handled as u8));
+        probes::pio_in!(|| (port, bytes, val, handled as u8));
 
         val
     }
