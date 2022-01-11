@@ -36,6 +36,7 @@ pub async fn migrate(
     Ok(())
 }
 
+#[allow(dead_code)]
 struct DestinationProtocol {
     request_context: Arc<RequestContext<Context>>,
     migrate_context: Arc<MigrateContext>,
