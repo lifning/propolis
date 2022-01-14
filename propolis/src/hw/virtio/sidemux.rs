@@ -1,21 +1,22 @@
 use std::sync::Arc;
 use std::num::NonZeroU16;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::convert::TryInto;
 
 use crate::hw::pci;
 use crate::dispatch::{AsyncCtx, DispCtx};
+use crate::instance;
 use super::pci::{PciVirtio, PciVirtioState};
 use super::queue::{Chain, VirtQueue, VirtQueues};
-use super::{VirtioDevice, VqChange, VqIntr};
+use super::VirtioDevice;
 use crate::util::regmap::RegMap;
 use super::bits::*;
 use super::viona::{
     bits::VIRTIO_NET_S_LINK_UP,
 };
 use crate::common::*;
+use crate::vmm::MemCtx;
 
-use tokio::task::spawn_blocking;
 use slog::{Logger, debug, warn, error};
 use lazy_static::lazy_static;
 
@@ -33,7 +34,7 @@ const MTU_PLUS_SIDECAR: usize = 1523;
 /// Only supporting 48-bit MACs
 const ETHERADDRL: usize = 6;
 
-mod Ethertype {
+mod ethertype {
     pub const IPV6: u16 = 0x86dd;
     pub const IPV4: u16 = 0x0800;
     pub const ARP: u16 = 0x0806;
@@ -56,9 +57,73 @@ pub struct Sidemux {
     link_name: String,
 
     /// Switch ports exposed to guest as virtio-net devices.
-    ports: Vec<Arc::<PciVirtioSidemux>>
+    ports: Vec<Arc::<PciVirtioSidemux>>,
+
+    /// DLPI handle for simulator link
+    sim_dh: dlpi::DlpiHandle,
+
+    /// Logging instance
+    log: slog::Logger
 
 }
+
+impl Sidemux {
+
+    /// Create a new sidemux device with the specified port radix. Once
+    /// activated, a dlpi link will be created on the specified interface for
+    /// sidecar L2 traffic handling.
+    pub fn new(
+        radix: usize,
+        link_name: String,
+        queue_size: u16,
+        log: slog::Logger
+    ) -> Result<Arc<Self>> {
+
+        let sim_dh = dlpi::open(&link_name, dlpi::sys::DLPI_RAW)?;
+        dlpi::bind(sim_dh, SIDECAR_ETHERTYPE)?;
+
+        let mut ports = Vec::new();
+        for i in 0..radix {
+            //TODO
+            let mac = [0,0,0,0,0,0];
+            let log = log.clone();
+            ports.push(PciVirtioSidemux::new(i, queue_size, mac, sim_dh, log)?);
+        }
+
+        Ok(Arc::new(Sidemux{link_name, ports, sim_dh, log}))
+
+    }
+
+}
+
+impl Entity for Sidemux {
+
+    fn type_name(&self) -> &'static str {
+        "sidemux"
+    }
+
+    fn reset(&self, _ctx: &DispCtx) { }
+
+    fn state_transition(
+        &self,
+        next: instance::State,
+        _target: Option<instance::State>,
+        ctx: &DispCtx,
+    ) {
+        match next {
+            instance::State::Boot => {
+                simulator_io_handler(
+                    self.sim_dh,
+                    self.ports.clone(),
+                    self.log.clone(),
+                    ctx,
+                ).unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
 
 /// PciVirtioSidemuxPort is a PCI device exposed to the guest as a virtio-net
 /// device. This device represents a sidecar switch port.
@@ -79,32 +144,8 @@ pub struct PciVirtioSidemux {
     /// DLPI handle for simulator link
     sim_dh: dlpi::DlpiHandle,
 
-}
-
-impl Sidemux {
-
-    /// Create a new sidemux device with the specified port radix. Once
-    /// activated, a dlpi link will be created on the specified interface for
-    /// sidecar L2 traffic handling.
-    pub fn new(
-        radix: usize,
-        link_name: String,
-        queue_size: u16,
-    ) -> Result<Arc<Self>> {
-
-        let dh = dlpi::open(&link_name, 0)?;
-        dlpi::bind(dh, SIDECAR_ETHERTYPE)?;
-
-        let mut ports = Vec::new();
-        for i in 0..radix {
-            //TODO
-            let mac = [0,0,0,0,0,0];
-            ports.push(PciVirtioSidemux::new(i, queue_size, mac, dh)?);
-        }
-
-        Ok(Arc::new(Sidemux{link_name, ports}))
-
-    }
+    /// Logging instance
+    log: slog::Logger
 
 }
 
@@ -115,6 +156,7 @@ impl PciVirtioSidemux {
         queue_size: u16,
         mac_addr: [u8; ETHERADDRL],
         sim_dh: dlpi::DlpiHandle,
+        log: slog::Logger,
     ) -> Result<Arc<Self>> {
 
         let queues = VirtQueues::new(
@@ -130,7 +172,8 @@ impl PciVirtioSidemux {
             VIRTIO_NET_CFG_SIZE,
         );
 
-        Ok(Arc::new(PciVirtioSidemux{index, virtio_state, pci_state, mac_addr, sim_dh}))
+        Ok(Arc::new(PciVirtioSidemux{
+            index, virtio_state, pci_state, mac_addr, sim_dh, log}))
 
     }
 
@@ -174,15 +217,15 @@ impl PciVirtioSidemux {
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
             let len = match ethertype {
 
-                Ethertype::IPV6 => {
+                ethertype::IPV6 => {
                     let payload_len = u16::from_be_bytes([data[14+4], data[14+5]]);
                     payload_len as usize + 40
                 }
-                Ethertype::IPV4 => {
+                ethertype::IPV4 => {
                     let total_len = u16::from_be_bytes([data[14+2], data[14+3]]);
                     total_len as usize
                 }
-                Ethertype::ARP => 28,
+                ethertype::ARP => 28,
                 _ => {
                     panic!("it's a bird, it's a plane, it's {}!", ethertype);
                 }
@@ -205,8 +248,10 @@ impl PciVirtioSidemux {
             let b = ethertype.to_be_bytes();
             msg[5] = b[0];
             msg[6] = b[1];
+
+            // copy packet into msg buf
             for j in i..i+(len as usize) {
-                msg[i+SIDECAR_HDR_SIZE] = data[i]
+                msg[j+SIDECAR_HDR_SIZE] = data[j]
             }
 
             // send encapped packet out external port
@@ -217,21 +262,45 @@ impl PciVirtioSidemux {
             match dlpi::send(self.sim_dh, &dst, &msg.as_slice(), None) {
                 Ok(_) => {},
                 Err(e) => {
-                    //error!("tx[ext]: {}", e);
+                    error!(self.log, "tx[ext]: {}", e);
                     continue;
                 }
             };
 
-
-
         }
-
-
 
     }
 
-    pub fn tx_to_guest(&self, _dst: &[u8], _data: &[u8]) {
+    fn write_buf(&self, buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+
+        // more copy pasta from Chain::write b/c like Chain:read a
+        // statically sized type is expected.
+        let mut done = 0;
+        let _total = chain.for_remaining_type(false, |addr, len| {
+            let remain = &buf[done..];
+            if let Some(copied) = mem.write_from(addr, remain, len) {
+                let need_more = copied != remain.len();
+
+                done += copied;
+                (copied, need_more)
+            } else {
+                // Copy failed, so do not attempt anything else
+                (0, false)
+            }
+        });
+
+    }
+
+    pub fn tx_to_guest(&self, data: &[u8], ctx: &DispCtx) {
+
+        let mem = &ctx.mctx.memctx();
+        let mut chain = Chain::with_capacity(1);
+        //let clen = vq.pop_avail(&mut chain, mem).unwrap() as usize;
+
+        self.write_buf(data, &mut chain, mem);
+
         todo!();
+
     }
 
     fn net_cfg_read(&self, id: &NetReg, ro: &mut ReadOp) {
@@ -292,24 +361,23 @@ impl PciVirtio for PciVirtioSidemux {
 
 fn simulator_io_handler(
     dh: dlpi::DlpiHandle,
-    sidemux: Arc::<Sidemux>,
     ports: Vec::<Arc::<PciVirtioSidemux>>,
     log: Logger,
+    ctx: &DispCtx,
 ) -> Result<()> {
 
-    //let dh = dlpi::open(&sidemux.link_name, 0)?;
-    //dlpi::bind(dh, SIDECAR_ETHERTYPE)?;
-
-    spawn_blocking(move || { handle_simulator_packets(dh, ports, log) });
+    let actx = ctx.async_ctx();
+    tokio::spawn(async move { handle_simulator_packets(dh, ports, log, actx).await });
 
     Ok(())
 
 }
 
-fn handle_simulator_packets(
+async fn handle_simulator_packets(
     dh: dlpi::DlpiHandle,
     ports: Vec::<Arc::<PciVirtioSidemux>>,
     log: Logger,
+    actx: AsyncCtx,
 ) {
 
     let mut src = [0u8; dlpi::sys::DLPI_PHYSADDR_MAX];
@@ -317,7 +385,9 @@ fn handle_simulator_packets(
     loop {
         // receive packet
         let mut recvinfo = dlpi::sys::dlpi_recvinfo_t::default();
-        let n = match dlpi::recv(dh, &mut src, &mut msg, -1, Some(&mut recvinfo)) {
+        let n = match dlpi::recv_async(
+            dh, &mut src, &mut msg, Some(&mut recvinfo)).await {
+
             Ok((_, n)) => {
                 debug!(log, "rx: ({})", n);
                 n
@@ -326,6 +396,7 @@ fn handle_simulator_packets(
                 error!(log, "rx: {}", e);
                 continue;
             }
+
         };
         if n < SIDECAR_HDR_SIZE {
             warn!(log, "packet too small for sidecar header?");
@@ -350,9 +421,14 @@ fn handle_simulator_packets(
             continue;
         }
 
-        // send decapped packet to target simnet port
-        let dst = &recvinfo.destaddr[..recvinfo.destaddrlen as usize];
-        ports[port].tx_to_guest(&dst, &msg[SIDECAR_HDR_SIZE..n]);
+        // send decapped packet to target port
+
+        // XXX DLPI is in raw mode, dst MAC is in the buffer
+        //let dst = &recvinfo.destaddr[..recvinfo.destaddrlen as usize];
+
+        // TODO need DispCtx
+        let ctx = actx.dispctx().await.unwrap();
+        ports[port].tx_to_guest(&msg[SIDECAR_HDR_SIZE..n], &ctx);
     }
 }
 
