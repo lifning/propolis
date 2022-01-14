@@ -515,7 +515,7 @@ pub mod migrate {
     }
 }
 
-mod bits {
+pub(crate) mod bits {
     #![allow(unused)]
 
     pub const VIRTIO_NET_S_LINK_UP: u16 = 1 << 0;

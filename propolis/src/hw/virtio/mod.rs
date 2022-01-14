@@ -8,6 +8,7 @@ pub mod pci;
 mod queue;
 pub mod viona;
 pub mod p9fs;
+pub mod sidemux;
 
 use crate::common::*;
 use crate::dispatch::DispCtx;
