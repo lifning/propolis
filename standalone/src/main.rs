@@ -16,6 +16,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+use std::str::FromStr;
 
 use propolis::chardev::{BlockingSource, Sink, Source};
 use propolis::hw::chipset::Chipset;
@@ -282,6 +283,44 @@ fn main() {
                         .map_err(|e| -> std::io::Error { e.into() })?;
 
                     chipset.pci_attach(bdf.unwrap(), vio9p);
+                }
+                "sidemux" => {
+                    let radix = usize::from_str(
+                        dev.options.get("radix")
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                    ).unwrap();
+
+                    let link_name = dev.options.get("link-name")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .into();
+
+                    let sidemux = hw::virtio::Sidemux::new(
+                        radix,
+                        link_name,
+                        0x100,
+                        log.clone(),
+                    ).unwrap();
+                    
+                    inv.register(&sidemux)
+                        .map_err(|e| -> std::io::Error { e.into() })?;
+
+                    let mut bdf = bdf.unwrap();
+                    for port in &sidemux.ports {
+                        inv.register(&port)
+                           .map_err(|e| -> std::io::Error { e.into() })?;
+                        chipset.pci_attach(bdf, port.clone());
+                        bdf = hw::pci::Bdf{
+                            bus: bdf.bus,
+                            dev: hw::pci::DevNum::new(bdf.dev.get()+1).unwrap(),
+                            func: bdf.func,
+                        };
+                    }
+
+
                 }
                 _ => {
                     slog::error!(log, "unrecognized driver"; "name" => name);

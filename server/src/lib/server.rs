@@ -503,6 +503,30 @@ async fn instance_ensure(
                         init.initialize_9pfs(&chipset, source, target, bdf)?;
 
                     }
+                    "sidemux" => {
+                        let radix = dev.get::<usize, &str>("radix").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse sidemux radix",
+                            )
+                        })?;
+
+                        let link_name = dev.get_string("link-name").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse sidemux link-name",
+                            )
+                        })?;
+
+                        let bdf: pci::Bdf = dev.get("pci-path").ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot parse vnic PCI",
+                            )
+                        })?;
+
+                        init.initialize_sidemux(&chipset, radix, link_name, bdf)?;
+                    }
                     _ => {
                         return Err(Error::new(
                             ErrorKind::InvalidData,

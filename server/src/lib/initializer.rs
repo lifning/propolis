@@ -277,6 +277,40 @@ impl<'a> MachineInitializer<'a> {
         Ok(())
     }
 
+    pub fn initialize_sidemux(
+        &self,
+        chipset: &RegisteredChipset,
+        radix: usize,
+        link_name: &str,
+        bdf: pci::Bdf,
+    ) -> Result<(), Error> {
+
+        let sidemux = virtio::Sidemux::new(
+            radix,
+            link_name.into(),
+            0x100,
+            self.log.clone(),
+        )?;
+        self.inv
+            .register(&sidemux)
+            .map_err(|e| -> std::io::Error { e.into() })?;
+
+        let mut bdf = bdf;
+        for port in &sidemux.ports {
+            self.inv
+                .register(port)
+                .map_err(|e| -> std::io::Error { e.into() })?;
+            chipset.device().pci_attach(bdf, port.clone());
+            bdf = pci::Bdf{
+                bus: bdf.bus,
+                dev: pci::DevNum::new(bdf.dev.get()+1).unwrap(),
+                func: bdf.func,
+            };
+        }
+
+        Ok(())
+    }
+
     pub fn initialize_crucible(
         &self,
         chipset: &RegisteredChipset,

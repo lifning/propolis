@@ -17,6 +17,7 @@ use queue::VirtQueue;
 pub use block::PciVirtioBlock;
 pub use viona::PciVirtioViona;
 pub use p9fs::PciVirtio9pfs;
+pub use sidemux::Sidemux;
 
 pub trait VirtioDevice: Send + Sync + 'static + Entity {
     /// Read/write device-specific virtio configuration space

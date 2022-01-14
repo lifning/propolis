@@ -54,10 +54,10 @@ mod ethertype {
 pub struct Sidemux {
 
     /// Name data link sidemux will communicate with the Tofino simulator over.
-    link_name: String,
+    pub link_name: String,
 
     /// Switch ports exposed to guest as virtio-net devices.
-    ports: Vec<Arc::<PciVirtioSidemux>>,
+    pub ports: Vec<Arc::<PciVirtioSidemux>>,
 
     /// DLPI handle for simulator link
     sim_dh: dlpi::DlpiHandle,
