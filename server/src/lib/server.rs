@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use std::io::{Error, ErrorKind};
 use std::ops::Range;
 use std::sync::Arc;
+use std::convert::TryInto;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
@@ -504,7 +505,7 @@ async fn instance_ensure(
 
                     }
                     "sidemux" => {
-                        let radix = dev.get::<usize, &str>("radix").ok_or_else(|| {
+                        let radix: i64 = dev.get_integer("radix").ok_or_else(|| {
                             Error::new(
                                 ErrorKind::InvalidData,
                                 "Cannot parse sidemux radix",
@@ -522,6 +523,13 @@ async fn instance_ensure(
                             Error::new(
                                 ErrorKind::InvalidData,
                                 "Cannot parse vnic PCI",
+                            )
+                        })?;
+
+                        let radix: usize = radix.try_into().map_err(|_| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot convert sidemux radix to usize",
                             )
                         })?;
 

@@ -17,7 +17,7 @@ use super::viona::{
 use crate::common::*;
 use crate::vmm::MemCtx;
 
-use slog::{Logger, debug, warn, error};
+use slog::{Logger, trace, debug, warn, error};
 use lazy_static::lazy_static;
 
 /// The sidecar ethertype, also refered to as the service acess point (SAP) by
@@ -191,7 +191,7 @@ impl PciVirtioSidemux {
         // cannot use Chain::read as-is because it expects a statically sized
         // type.
         let mut done = 0;
-        let _total = chain.for_remaining_type(true, |addr, len| {
+        let total = chain.for_remaining_type(true, |addr, len| {
             let remain = &mut buf[done..];
             if let Some(copied) = mem.read_into(addr, remain, len) {
                 let need_more = copied != remain.len();
@@ -212,7 +212,7 @@ impl PciVirtioSidemux {
         let mut i = 0; 
         loop {
 
-            if i >= clen { break; }
+            if i >= total { break; }
 
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
             let len = match ethertype {
@@ -227,7 +227,8 @@ impl PciVirtioSidemux {
                 }
                 ethertype::ARP => 28,
                 _ => {
-                    panic!("it's a bird, it's a plane, it's {}!", ethertype);
+                    //trace!(self.log, "it's a bird, it's a plane, it's {}!", ethertype);
+                    continue;
                 }
 
             };
