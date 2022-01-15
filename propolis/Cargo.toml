@@ -32,6 +32,7 @@ ispf = { git = "ssh://git@github.com/oxidecomputer/ispf" }
 dlpi = { path = "/home/ry/src/dlpi" }
 packet = { path = "/home/ry/src/dendrite/packet" }
 pretty-hex = "0.2"
+rand = "0.8"
 
 [dev-dependencies]
 crossbeam-channel = "0.5"

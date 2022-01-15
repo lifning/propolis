@@ -20,6 +20,7 @@ use crate::vmm::MemCtx;
 use slog::{Logger, trace, debug, warn, error};
 use lazy_static::lazy_static;
 use pretty_hex::*;
+use rand::Rng;
 
 /// The sidecar ethertype, also refered to as the service acess point (SAP) by
 /// dlpi, is the cue in the ethernet header we use on ingress packet processing
@@ -86,10 +87,14 @@ impl Sidemux {
         let sim_dh = dlpi::open(&link_name, dlpi::sys::DLPI_RAW)?;
         dlpi::bind(sim_dh, SIDECAR_ETHERTYPE)?;
 
+        let mut rng = rand::thread_rng();
+
         let mut ports = Vec::new();
         for i in 0..radix {
-            //TODO
-            let mac = [0,0,0,0,0,0];
+
+            // per RFD 174
+            let m = rng.gen_range::<u32, _>(0xf00000..0xffffff).to_le_bytes();
+            let mac = [0xa8,0x40,0x25,m[0],m[1],m[2]];
             let log = log.clone();
             ports.push(PciVirtioSidemux::new(i, queue_size, mac, sim_dh, log)?);
         }
