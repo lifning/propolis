@@ -7,10 +7,12 @@
 
 use anyhow::anyhow;
 use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter,
+    ConfigDropshot, 
+    //ConfigLogging, ConfigLoggingLevel, 
+    HttpServerStarter,
 };
 use propolis::usdt::register_probes;
-use slog::info;
+use slog::{info, Logger, Drain};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -33,6 +35,16 @@ enum Args {
         #[structopt(name = "PROPOLIS_IP:PORT", parse(try_from_str))]
         propolis_addr: SocketAddr,
     },
+}
+
+fn init_logger() -> Logger {
+
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_envlogger::new(drain).fuse();
+    let drain = slog_async::Async::new(drain).chan_size(0x2000).build().fuse();
+    slog::Logger::root(drain, slog::o!())
+
 }
 
 pub fn run_openapi() -> Result<(), String> {
@@ -64,12 +76,15 @@ async fn main() -> anyhow::Result<()> {
                 bind_address: propolis_addr,
                 ..Default::default()
             };
+            /*
             let config_logging = ConfigLogging::StderrTerminal {
                 level: ConfigLoggingLevel::Info,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
+            */
+            let log = init_logger();
 
             let context = server::Context::new(config, log.new(slog::o!()));
             info!(log, "Starting server...");

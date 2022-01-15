@@ -19,6 +19,7 @@ use crate::vmm::MemCtx;
 
 use slog::{Logger, trace, debug, warn, error};
 use lazy_static::lazy_static;
+use pretty_hex::*;
 
 /// The sidecar ethertype, also refered to as the service acess point (SAP) by
 /// dlpi, is the cue in the ethernet header we use on ingress packet processing
@@ -33,6 +34,9 @@ const MTU_PLUS_SIDECAR: usize = 1523;
 
 /// Only supporting 48-bit MACs
 const ETHERADDRL: usize = 6;
+
+/// Layer 2 ethernet frame size, assuming no vlan tags.
+const ETHERNET_FRAME_SIZE: usize = 14;
 
 mod ethertype {
     pub const IPV6: u16 = 0x86dd;
@@ -181,7 +185,10 @@ impl PciVirtioSidemux {
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
-        let clen = vq.pop_avail(&mut chain, mem).unwrap() as usize;
+        let clen = match vq.pop_avail(&mut chain, mem) {
+            Some(val) => val as usize,
+            None => return
+        };
 
         //TODO gross, no alloc in handler
         let mut data: Vec<u8> = vec![0;clen];
@@ -202,6 +209,15 @@ impl PciVirtioSidemux {
             }
         });
 
+        // for reasons unknown to me, there are 10 bytes of leading spacing
+        // before the ethernet frame, 
+        if total < 10 + ETHERNET_FRAME_SIZE {
+            warn!(self.log, "short frame!");
+            return;
+        }
+        let data = &data[10..];
+        let total = total - 10;
+
         // iterate over ethernet packets, add sidecar header and push to
         // simulator
         //
@@ -218,47 +234,84 @@ impl PciVirtioSidemux {
             let len = match ethertype {
 
                 ethertype::IPV6 => {
+                    trace!(self.log, "pci: ipv6 packet");
                     let payload_len = u16::from_be_bytes([data[14+4], data[14+5]]);
                     payload_len as usize + 40
                 }
                 ethertype::IPV4 => {
+                    trace!(self.log, "pci: ipv4 packet");
                     let total_len = u16::from_be_bytes([data[14+2], data[14+3]]);
                     total_len as usize
                 }
-                ethertype::ARP => 28,
+                ethertype::ARP => {
+                    trace!(self.log, "pci: arp packet");
+                    28
+                }
                 _ => {
-                    //trace!(self.log, "it's a bird, it's a plane, it's {}!", ethertype);
-                    continue;
+                    trace!(
+                        self.log,
+                        "it's a bird, it's a plane, it's {}! ({})",
+                        ethertype,
+                        total
+                    );
+                    let cfg = HexConfig {
+                        title: false,
+                        ascii: false,
+                        width: 4,
+                        group: 0, 
+                        ..HexConfig::default() 
+                    };
+                    trace!(self.log, "\n{:?}\n", data.hex_conf(cfg));
+                    break;
                 }
 
             };
-            i += len;
+
+            // TODO need to handle fragmentation?
+            if i + len > data.len() {
+                warn!(self.log, "packet size greater than buffer size: {}+{}={} >= {}", 
+                    i, len, i+len, data.len());
+                break;
+            }
 
             //TODO gross, even more data path allocation!
             let mut msg: Vec<u8> = vec![0;len+SIDECAR_HDR_SIZE];
 
+            // add ethernet header
+            for j in 0..ETHERNET_FRAME_SIZE {
+                msg[j] = data[i+j];
+            }
+            i += ETHERNET_FRAME_SIZE;
+
+            // set ethertype to sidecar
+            let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
+            msg[12] = b[0];
+            msg[13] = b[1];
+
             // add sidecar header
             // code
-            msg[0] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
+            msg[14] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
             // TODO: is ingress needed here?
             // egress
             let b = (self.index as u16).to_be_bytes();
-            msg[3] = b[0];
-            msg[4] = b[1];
-            // this program assumes ipv6
-            let b = ethertype.to_be_bytes();
-            msg[5] = b[0];
-            msg[6] = b[1];
+            msg[14+3] = b[0];
+            msg[14+4] = b[1];
+            let b = (ethertype).to_be_bytes();
+            msg[14+5] = b[0];
+            msg[14+6] = b[1];
 
             // copy packet into msg buf
-            for j in i..i+(len as usize) {
-                msg[j+SIDECAR_HDR_SIZE] = data[j]
+            for j in 0..(len-ETHERNET_FRAME_SIZE as usize) {
+                msg[j+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE] = data[i+j]
             }
+
+            i += ETHERNET_FRAME_SIZE + len;
 
             // send encapped packet out external port
 
-            // destination MAC
-            let dst = &msg[6..12];
+            // destination MAC, this is actually ignored since the dlpi link is
+            // in raw mode.
+            let dst = &data[..6];
 
             match dlpi::send(self.sim_dh, &dst, &msg.as_slice(), None) {
                 Ok(_) => {},
@@ -397,6 +450,7 @@ async fn handle_simulator_packets(
                 error!(log, "rx: {}", e);
                 continue;
             }
+
 
         };
         if n < SIDECAR_HDR_SIZE {
