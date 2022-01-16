@@ -280,7 +280,7 @@ impl PciVirtioSidemux {
             }
 
             //TODO gross, even more data path allocation!
-            let mut msg: Vec<u8> = vec![0;len+SIDECAR_HDR_SIZE];
+            let mut msg: Vec<u8> = vec![0;len+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE];
 
             // add ethernet header
             for j in 0..ETHERNET_FRAME_SIZE {
@@ -306,11 +306,11 @@ impl PciVirtioSidemux {
             msg[14+6] = b[1];
 
             // copy packet into msg buf
-            for j in 0..(len-ETHERNET_FRAME_SIZE as usize) {
+            for j in 0..(len as usize) {
                 msg[j+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE] = data[i+j]
             }
 
-            i += ETHERNET_FRAME_SIZE + len;
+            i += len;
 
             // send encapped packet out external port
 
