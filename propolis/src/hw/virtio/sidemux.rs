@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::num::NonZeroU16;
 use std::io::Result;
 use std::convert::TryInto;
@@ -26,6 +26,9 @@ use rand::Rng;
 /// dlpi, is the cue in the ethernet header we use on ingress packet processing
 /// to identify host-bound packets from a sidecar.
 const SIDECAR_ETHERTYPE: u32 = 0x0901;
+
+/// The fixed size of a sidecar header payload
+const SIDECAR_PAYLOAD_SIZE: usize = 16;
 
 /// Size of the sidecar L2 header.
 const SIDECAR_HDR_SIZE: usize = 23;
@@ -117,7 +120,7 @@ impl Entity for Sidemux {
         &self,
         next: instance::State,
         _target: Option<instance::State>,
-        ctx: &DispCtx,
+        _ctx: &DispCtx,
     ) {
         match next {
             instance::State::Boot => {
@@ -125,7 +128,6 @@ impl Entity for Sidemux {
                     self.sim_dh,
                     self.ports.clone(),
                     self.log.clone(),
-                    ctx,
                 ).unwrap();
             }
             _ => {}
@@ -154,8 +156,10 @@ pub struct PciVirtioSidemux {
     sim_dh: dlpi::DlpiHandle,
 
     /// Logging instance
-    log: slog::Logger
+    log: slog::Logger,
 
+    /// Dispatch context for interacting with guest
+    dispatch_context: Mutex::<Option::<AsyncCtx>>
 }
 
 impl PciVirtioSidemux {
@@ -180,9 +184,17 @@ impl PciVirtioSidemux {
             pci::bits::CLASS_NETWORK,
             VIRTIO_NET_CFG_SIZE,
         );
+        let dispatch_context = Mutex::new(None);
 
         Ok(Arc::new(PciVirtioSidemux{
-            index, virtio_state, pci_state, mac_addr, sim_dh, log}))
+            index,
+            virtio_state,
+            pci_state,
+            mac_addr,
+            sim_dh,
+            log,
+            dispatch_context,
+        }))
 
     }
 
@@ -190,10 +202,15 @@ impl PciVirtioSidemux {
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
+        debug!(self.log, "[rx0] q={} this chain:\n{:?}", vq.id, chain);
         let clen = match vq.pop_avail(&mut chain, mem) {
             Some(val) => val as usize,
-            None => return
+            None => {
+                debug!(self.log, "[rx] pop_avail is none");
+                return;
+            }
         };
+        debug!(self.log, "[rx1] this chain:\n{:?}", chain);
 
         //TODO gross, no alloc in handler
         let mut data: Vec<u8> = vec![0;clen];
@@ -328,25 +345,33 @@ impl PciVirtioSidemux {
 
         }
 
+        vq.push_used(&mut chain, mem, ctx);
+
     }
 
     fn write_buf(&self, buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
 
+        debug!(self.log, "writing {} bytes to guest", buf.len());
+
         // more copy pasta from Chain::write b/c like Chain:read a
         // statically sized type is expected.
         let mut done = 0;
-        let _total = chain.for_remaining_type(false, |addr, len| {
+        let total = chain.for_remaining_type(false, |addr, len| {
+            debug!(self.log, "write {} @{:x}", len, addr.0);
             let remain = &buf[done..];
             if let Some(copied) = mem.write_from(addr, remain, len) {
+                debug!(self.log, "wrote {} @{:x}", copied, addr.0);
                 let need_more = copied != remain.len();
-
                 done += copied;
                 (copied, need_more)
             } else {
+                warn!(self.log, "write to guest failed");
                 // Copy failed, so do not attempt anything else
                 (0, false)
             }
         });
+
+        debug!(self.log, "wrote {} bytes to guest", total);
 
     }
 
@@ -354,11 +379,25 @@ impl PciVirtioSidemux {
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
-        //let clen = vq.pop_avail(&mut chain, mem).unwrap() as usize;
+        let vq = &self.virtio_state.queues[0];
+        for i in 0..self.virtio_state.queues.count().get() as usize {
+            let q = &self.virtio_state.queues[i];
+            debug!(self.log, "found queue id={} size={}", q.id, q.size);
+        }
+        debug!(self.log, "using queue id={} size={}", vq.id, vq.size);
+        match vq.pop_avail(&mut chain, mem) {
+            Some(clen) => debug!(self.log, "[tx] pop_avail {}", clen),
+            None => {
+                warn!(self.log, "[tx] pop_avail is none");
+                return;
+            }
+        }
+
+        debug!(self.log, "[tx] this chain:\n{:?}", chain);
 
         self.write_buf(data, &mut chain, mem);
 
-        todo!();
+        vq.push_used(&mut chain, mem, ctx);
 
     }
 
@@ -409,6 +448,27 @@ impl Entity for PciVirtioSidemux {
     fn reset(&self, ctx: &DispCtx) {
         self.virtio_state.reset(self, ctx);
     }
+
+    fn state_transition(
+        &self,
+        next: instance::State,
+        _target: Option<instance::State>,
+        ctx: &DispCtx,
+    ) {
+        match next {
+            instance::State::Boot => {
+                match self.dispatch_context.lock() {
+                    Ok(mut opt_dc) => {
+                        *opt_dc = Some(ctx.async_ctx());
+                    }
+                    Err(e) => {
+                        error!(self.log, "lock dispatch context: {}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl PciVirtio for PciVirtioSidemux {
@@ -422,11 +482,9 @@ fn simulator_io_handler(
     dh: dlpi::DlpiHandle,
     ports: Vec::<Arc::<PciVirtioSidemux>>,
     log: Logger,
-    ctx: &DispCtx,
 ) -> Result<()> {
 
-    let actx = ctx.async_ctx();
-    tokio::spawn(async move { handle_simulator_packets(dh, ports, log, actx).await });
+    tokio::spawn(async move { handle_simulator_packets(dh, ports, log).await });
 
     Ok(())
 
@@ -436,7 +494,6 @@ async fn handle_simulator_packets(
     dh: dlpi::DlpiHandle,
     ports: Vec::<Arc::<PciVirtioSidemux>>,
     log: Logger,
-    actx: AsyncCtx,
 ) {
 
     let mut src = [0u8; dlpi::sys::DLPI_PHYSADDR_MAX];
@@ -448,11 +505,11 @@ async fn handle_simulator_packets(
             dh, &mut src, &mut msg, Some(&mut recvinfo)).await {
 
             Ok((_, n)) => {
-                debug!(log, "rx: ({})", n);
+                debug!(log, "sim rx: ({})", n);
                 n
             }
             Err(e) => {
-                error!(log, "rx: {}", e);
+                error!(log, "sim rx: {}", e);
                 continue;
             }
 
@@ -465,12 +522,13 @@ async fn handle_simulator_packets(
 
         // extract relevant info from sidecar header
         let sch = packet::sidecar::SidecarHdr{
-            sc_code: msg[0],
-            sc_ingress: u16::from_be_bytes([msg[1], msg[2]]),
-            sc_egress: u16::from_be_bytes([msg[3], msg[4]]),
-            sc_ether_type: u16::from_be_bytes([msg[5], msg[6]]),
-            sc_payload: msg[7..SIDECAR_HDR_SIZE].try_into().unwrap(),
+            sc_code: msg[14+0],
+            sc_ingress: u16::from_be_bytes([msg[14+1], msg[14+2]]),
+            sc_egress: u16::from_be_bytes([msg[14+3], msg[14+4]]),
+            sc_ether_type: u16::from_be_bytes([msg[14+5], msg[14+6]]),
+            sc_payload: msg[14+7..14+7+SIDECAR_PAYLOAD_SIZE].try_into().unwrap(),
         };
+
         if sch.sc_code != packet::sidecar::SC_FORWARD_TO_USERSPACE {
             warn!(log, "unk sidecar header code: {}", sch.sc_code);
             continue;
@@ -480,15 +538,42 @@ async fn handle_simulator_packets(
             error!(log, "port out of range {} >= {}", port, ports.len());
             continue;
         }
+        debug!(log, "sidecar header: {:#?}", sch);
 
         // send decapped packet to target port
 
-        // XXX DLPI is in raw mode, dst MAC is in the buffer
-        //let dst = &recvinfo.destaddr[..recvinfo.destaddrlen as usize];
 
-        // TODO need DispCtx
+        let mut full_decapd = vec![0u8; n + 10 - SIDECAR_HDR_SIZE];
+        let decapd = &mut full_decapd[10..];
+        for i in 0..ETHERNET_FRAME_SIZE {
+            decapd[i] = msg[i]
+        }
+        // replace sidecar ethertype with encapsulated packet ethertype
+        decapd[12] = msg[14+5];
+        decapd[13] = msg[14+6];
+        for i in 0..n-SIDECAR_HDR_SIZE-ETHERNET_FRAME_SIZE {
+            decapd[i+ETHERNET_FRAME_SIZE] = msg[i+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE];
+        }
+
+        let actx = match ports[port].dispatch_context.lock() {
+            Ok(opt_ctx) => {
+                match &*opt_ctx {
+                    Some(actx) => actx.clone(),
+                    None => {
+                        warn!(log, "no dispatch context for port {} yet", port);
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                error!(log, "lock context for port {}: {}", port, e);
+                continue;
+            }
+        };
+
         let ctx = actx.dispctx().await.unwrap();
-        ports[port].tx_to_guest(&msg[SIDECAR_HDR_SIZE..n], &ctx);
+        ports[port].tx_to_guest(&full_decapd, &ctx);
+
     }
 }
 

@@ -288,7 +288,7 @@ impl<'a> MachineInitializer<'a> {
         let sidemux = virtio::Sidemux::new(
             radix,
             link_name.into(),
-            0x100,
+            0x8000,
             self.log.clone(),
         )?;
         self.inv
