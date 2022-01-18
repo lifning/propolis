@@ -20,6 +20,7 @@ use crate::vmm::MemCtx;
 use slog::{Logger, debug, warn, error};
 use lazy_static::lazy_static;
 use rand::Rng;
+use pretty_hex::{HexConfig, PrettyHex};
 
 /// The sidecar ethertype, also refered to as the service acess point (SAP) by
 /// dlpi, is the cue in the ethernet header we use on ingress packet processing
@@ -39,7 +40,22 @@ const MTU_PLUS_SIDECAR: usize = 1523;
 const ETHERADDRL: usize = 6;
 
 /// Layer 2 ethernet frame size, assuming no vlan tags.
-const ETHERNET_FRAME_SIZE: usize = 14;
+const ETHERNET_HDR_SIZE: usize = 14;
+
+/// IPv4 header size (static portion)
+const IPV4_HDR_SIZE: usize = 20;
+
+/// IPv6 header size (static portion)
+const IPV6_HDR_SIZE: usize = 40;
+
+/// ARP packet size
+const ARP_PKT_SIZE: usize = 28;
+
+mod ethertype {
+    pub const IPV6: u16 = 0x86dd;
+    pub const IPV4: u16 = 0x0800;
+    pub const ARP: u16 = 0x0806;
+}
 
 /// Sidemux is an emulated sidecar switch device.
 ///
@@ -200,78 +216,136 @@ impl PciVirtioSidemux {
             None => return,
         };
 
-        // Create a statically allocated buffer to read ethernet frames from the
-        // guest into.
-        //
-        // For reasons unknown to me, there are 10 bytes of leading spacing
-        // before the ethernet frame coming from virtio. If we're considering
-        // this a layer 1 frame from virtio, which I guess makes some amount of
-        // sense, then this would account for the 7 bits of preamble and the 1
-        // bit frame delimiter, but we are still left with 2 mystery bytes ....
-        let mut frame = [0u8; MTU_PLUS_SIDECAR + 10];
+        // only vq.push_used if we actually read something
+        let mut push_used = false;
 
-        // skip 10 mystery bytes
-        let n = read_buf(mem, &mut chain, &mut frame[..10]);
+        // read as many ethernet frames from the guest as we can
+        loop {
 
-        // TODO This seems to happen somewhat regularly, and if we push_used
-        // after a zero read, we enter a death spiral. So just return.
-        if n == 0 {
-            return;
-        }
-        if n < 10 {
-            warn!(self.log, "short read ({})!", n);
-            vq.push_used(&mut chain, mem, ctx);
-            return;
-        }
+            // Create a statically allocated buffer to read ethernet frames from the
+            // guest into.
+            //
+            // For reasons unknown to me, there are 10 bytes of leading spacing
+            // before the ethernet frame coming from virtio. If we're considering
+            // this a layer 1 frame from virtio, which I guess makes some amount of
+            // sense, then this would account for the 7 bits of preamble and the 1
+            // bit frame delimiter, but we are still left with 2 mystery bytes ....
+            let mut frame = [0u8; MTU_PLUS_SIDECAR + 10];
 
-        // read in the ethernet header
-        let eth = &mut frame[0..ETHERNET_FRAME_SIZE];
-        let n = read_buf(mem, &mut chain, eth);
-        if n < ETHERNET_FRAME_SIZE {
-            warn!(self.log, "frame from guest too small for Ethernet");
-            vq.push_used(&mut chain, mem, ctx);
-            return;
-        }
-        // get orignial ethertype
-        let ethertype = u16::from_be_bytes([eth[12], eth[13]]);
-        // set ethertype to sidecar
-        let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
-        eth[12] = b[0];
-        eth[13] = b[1];
+            // skip 10 mystery bytes
+            let n = read_buf(mem, &mut chain, &mut frame[..10]);
 
-        // create a sidecar header, goes right after ethernet header
-        let sc = &mut frame[
-            ETHERNET_FRAME_SIZE
-            ..
-            ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE
-        ];
-        // code
-        sc[0] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
-        // egress
-        let b = (self.index as u16).to_be_bytes();
-        sc[3] = b[0];
-        sc[4] = b[1];
-        // ethertype
-        let b = (ethertype).to_be_bytes();
-        sc[5] = b[0];
-        sc[6] = b[1];
-
-        // read in payload, goes right after sidecar header
-        let payload = &mut frame[
-            ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE
-            ..
-        ];
-        read_buf(mem, &mut chain, payload);
-
-        // send encapped packet out external port
-        match dlpi::send(self.sim_dh, &[], &frame, None) {
-            Ok(_) => {},
-            Err(e) => {
-                error!(self.log, "tx (ext): {}", e);
+            // check if there is nothing left to read
+            if n == 0 {
+                break;
             }
-        };
+            push_used = true;
 
-        vq.push_used(&mut chain, mem, ctx);
+            if n < 10 {
+                warn!(self.log, "short read ({})!", n);
+                break;
+            }
+
+            // read in the ethernet header
+            let eth = &mut frame[0..ETHERNET_HDR_SIZE];
+            let n = read_buf(mem, &mut chain, eth);
+            if n < ETHERNET_HDR_SIZE {
+                warn!(self.log, "frame from guest too small for Ethernet");
+                break;
+            }
+            // get orignial ethertype
+            let ethertype = u16::from_be_bytes([eth[12], eth[13]]);
+            // set ethertype to sidecar
+            let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
+            eth[12] = b[0];
+            eth[13] = b[1];
+
+            // create a sidecar header, goes right after ethernet header
+            let sc = &mut frame[
+                ETHERNET_HDR_SIZE
+                ..
+                ETHERNET_HDR_SIZE+SIDECAR_HDR_SIZE
+            ];
+            // code
+            sc[0] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
+            // egress
+            let b = (self.index as u16).to_be_bytes();
+            sc[3] = b[0];
+            sc[4] = b[1];
+            // ethertype
+            let b = (ethertype).to_be_bytes();
+            sc[5] = b[0];
+            sc[6] = b[1];
+
+            // determine payload buffer size
+            let begin = ETHERNET_HDR_SIZE+SIDECAR_HDR_SIZE;
+            let payload = match ethertype {
+
+                ethertype::IPV6 => {
+                    let end = begin+IPV6_HDR_SIZE;
+                    let ipv6 = &mut frame[begin..end];
+                    read_buf(mem, &mut chain, ipv6);
+                    let payload_len = u16::from_be_bytes([ipv6[4],ipv6[5]]);
+                    let begin = end;
+                    let len = payload_len as usize;
+                    &mut frame[begin..begin+len]
+                }
+
+                ethertype::IPV4 => {
+                    let end = begin+IPV4_HDR_SIZE;
+                    let ipv4 = &mut frame[begin..end];
+                    read_buf(mem, &mut chain, ipv4);
+                    let remaining =
+                        u16::from_be_bytes([ipv4[2], ipv4[3]]) as usize - 
+                        IPV4_HDR_SIZE;
+                    let begin = end;
+                    &mut frame[begin..begin+remaining]
+                }
+
+                ethertype::ARP => {
+                    let end = begin+ARP_PKT_SIZE;
+                    &mut frame[begin..end]
+                }
+
+                _ => {
+                    debug!(
+                        self.log,
+                        "it's a bird, it's a plane, it's {}!",
+                        ethertype,
+                    );
+                    let cfg = HexConfig {
+                        title: false,
+                        ascii: false,
+                        width: 4,
+                        group: 0,
+                        ..HexConfig::default()
+                    };
+                    debug!(self.log, "\n{:?}\n",
+                        (&frame[..ETHERNET_HDR_SIZE]).hex_conf(cfg));
+
+                    // we cannot continue, since we don't know the size of the
+                    // current frame.
+                    break;
+                }
+
+            };
+
+            // read in payload, goes right after sidecar header
+            read_buf(mem, &mut chain, payload);
+
+            // send encapped packet out external port
+            match dlpi::send(self.sim_dh, &[], &frame, None) {
+                Ok(_) => {},
+                Err(e) => {
+                    error!(self.log, "tx (ext): {}", e);
+                }
+            };
+
+        }
+
+        if push_used {
+            vq.push_used(&mut chain, mem, ctx);
+        }
 
     }
 
@@ -437,14 +511,14 @@ async fn handle_simulator_packets(
 
         let mut full_decapd = vec![0u8; n + 10 - SIDECAR_HDR_SIZE];
         let decapd = &mut full_decapd[10..];
-        for i in 0..ETHERNET_FRAME_SIZE {
+        for i in 0..ETHERNET_HDR_SIZE {
             decapd[i] = msg[i]
         }
         // replace sidecar ethertype with encapsulated packet ethertype
         decapd[12] = msg[14+5];
         decapd[13] = msg[14+6];
-        for i in 0..n-SIDECAR_HDR_SIZE-ETHERNET_FRAME_SIZE {
-            decapd[i+ETHERNET_FRAME_SIZE] = msg[i+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE];
+        for i in 0..n-SIDECAR_HDR_SIZE-ETHERNET_HDR_SIZE {
+            decapd[i+ETHERNET_HDR_SIZE] = msg[i+ETHERNET_HDR_SIZE+SIDECAR_HDR_SIZE];
         }
 
         let actx = match ports[port].dispatch_context.lock() {
