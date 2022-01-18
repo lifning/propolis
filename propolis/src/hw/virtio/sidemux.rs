@@ -11,9 +11,7 @@ use super::queue::{Chain, VirtQueue, VirtQueues};
 use super::VirtioDevice;
 use crate::util::regmap::RegMap;
 use super::bits::*;
-use super::viona::{
-    bits::VIRTIO_NET_S_LINK_UP,
-};
+use super::viona::bits::VIRTIO_NET_S_LINK_UP;
 use crate::common::*;
 use crate::vmm::MemCtx;
 
@@ -109,6 +107,7 @@ impl Sidemux {
             let mac = [0xa8,0x40,0x25,m[0],m[1],m[2]];
             let log = log.clone();
             ports.push(PciVirtioSidemux::new(i, queue_size, mac, sim_dh, log)?);
+
         }
 
         Ok(Arc::new(Sidemux{link_name, ports, sim_dh, log}))
@@ -207,7 +206,7 @@ impl PciVirtioSidemux {
 
     }
 
-    pub fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
+    fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
@@ -346,24 +345,6 @@ impl PciVirtioSidemux {
         if push_used {
             vq.push_used(&mut chain, mem, ctx);
         }
-
-    }
-
-    pub fn tx_to_guest(&self, data: &[u8], ctx: &DispCtx) {
-
-        let mem = &ctx.mctx.memctx();
-        let mut chain = Chain::with_capacity(1);
-        let vq = &self.virtio_state.queues[0];
-        match vq.pop_avail(&mut chain, mem) {
-            Some(_) =>  {}
-            None => {
-                warn!(self.log, "[tx] pop_avail is none");
-                return;
-            }
-        }
-
-        write_buf(data, &mut chain, mem);
-        vq.push_used(&mut chain, mem, ctx);
 
     }
 
@@ -569,7 +550,7 @@ async fn handle_simulator_packets(
 }
 
 // helper functions to read/write a buffer from/to a guest
-pub fn read_buf(mem: &MemCtx, chain: &mut Chain, buf: &mut [u8]) -> usize {
+fn read_buf(mem: &MemCtx, chain: &mut Chain, buf: &mut [u8]) -> usize {
 
     let mut done = 0;
     chain.for_remaining_type(true, |addr, len| {
