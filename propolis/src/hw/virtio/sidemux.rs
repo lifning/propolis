@@ -486,15 +486,23 @@ async fn handle_simulator_packets(
             continue;
         }
 
+        // get ethernet slice
+        let eth_begin = 0;
+        let eth_end = eth_begin+ETHERNET_HDR_SIZE;
+
+        // get sidecar header slice
+        let sc_begin = eth_end;
+        let sc_end = sc_begin+SIDECAR_HDR_SIZE;
+        let sc = &msg[sc_begin..sc_end];
+
         // extract relevant info from sidecar header
         let sch = packet::sidecar::SidecarHdr{
-            sc_code: msg[14+0],
-            sc_ingress: u16::from_be_bytes([msg[14+1], msg[14+2]]),
-            sc_egress: u16::from_be_bytes([msg[14+3], msg[14+4]]),
-            sc_ether_type: u16::from_be_bytes([msg[14+5], msg[14+6]]),
-            sc_payload: msg[14+7..14+7+SIDECAR_PAYLOAD_SIZE].try_into().unwrap(),
+            sc_code: sc[0],
+            sc_ingress: u16::from_be_bytes([sc[1], sc[2]]),
+            sc_egress: u16::from_be_bytes([sc[3], sc[4]]),
+            sc_ether_type: u16::from_be_bytes([sc[5], sc[6]]),
+            sc_payload: sc[7..7+SIDECAR_PAYLOAD_SIZE].try_into().unwrap(),
         };
-
         if sch.sc_code != packet::sidecar::SC_FORWARD_TO_USERSPACE {
             warn!(log, "unk sidecar header code: {}", sch.sc_code);
             continue;
@@ -504,23 +512,15 @@ async fn handle_simulator_packets(
             error!(log, "port out of range {} >= {}", port, ports.len());
             continue;
         }
-        debug!(log, "sidecar header: {:#?}", sch);
-
-        // send decapped packet to target port
-
-
-        let mut full_decapd = vec![0u8; n + 10 - SIDECAR_HDR_SIZE];
-        let decapd = &mut full_decapd[10..];
-        for i in 0..ETHERNET_HDR_SIZE {
-            decapd[i] = msg[i]
-        }
+        
         // replace sidecar ethertype with encapsulated packet ethertype
-        decapd[12] = msg[14+5];
-        decapd[13] = msg[14+6];
-        for i in 0..n-SIDECAR_HDR_SIZE-ETHERNET_HDR_SIZE {
-            decapd[i+ETHERNET_HDR_SIZE] = msg[i+ETHERNET_HDR_SIZE+SIDECAR_HDR_SIZE];
-        }
+        let eth = &mut msg[eth_begin..eth_end]; 
+        let b = sch.sc_ether_type.to_be_bytes();
+        eth[12] = b[0];
+        eth[13] = b[1];
 
+        // Get a VirtioQeue for his PciVirtioSidemux device from it's async
+        // dispatch context.
         let actx = match ports[port].dispatch_context.lock() {
             Ok(opt_ctx) => {
                 match &*opt_ctx {
@@ -536,9 +536,34 @@ async fn handle_simulator_packets(
                 continue;
             }
         };
-
+        let port = &ports[port];
         let ctx = actx.dispctx().await.unwrap();
-        ports[port].tx_to_guest(&full_decapd, &ctx);
+        let mem = &ctx.mctx.memctx();
+        let mut chain = Chain::with_capacity(1);
+        let vq = &port.virtio_state.queues[0];
+        match vq.pop_avail(&mut chain, mem) {
+            Some(_) =>  {}
+            None => {
+                warn!(port.log, "[tx] pop_avail is none");
+                return;
+            }
+        }
+
+
+        // write the virtio mystery bytes
+        write_buf(&[0u8; 10], &mut chain, mem);
+
+        // write the ethernet header
+        write_buf(&eth, &mut chain, mem);
+
+        // get payload slice
+        let p_begin = sc_end; 
+        let payload = &msg[p_begin..];
+
+        // write payload
+        write_buf(&payload, &mut chain, mem);
+
+        vq.push_used(&mut chain, mem, &ctx);
 
     }
 }
