@@ -17,9 +17,8 @@ use super::viona::{
 use crate::common::*;
 use crate::vmm::MemCtx;
 
-use slog::{Logger, trace, debug, warn, error};
+use slog::{Logger, debug, warn, error};
 use lazy_static::lazy_static;
-use pretty_hex::*;
 use rand::Rng;
 
 /// The sidecar ethertype, also refered to as the service acess point (SAP) by
@@ -41,12 +40,6 @@ const ETHERADDRL: usize = 6;
 
 /// Layer 2 ethernet frame size, assuming no vlan tags.
 const ETHERNET_FRAME_SIZE: usize = 14;
-
-mod ethertype {
-    pub const IPV6: u16 = 0x86dd;
-    pub const IPV4: u16 = 0x0800;
-    pub const ARP: u16 = 0x0806;
-}
 
 /// Sidemux is an emulated sidecar switch device.
 ///
@@ -95,7 +88,7 @@ impl Sidemux {
         let mut ports = Vec::new();
         for i in 0..radix {
 
-            // per RFD 174
+            // Create a MAC address with the Oxide OUI per RFD 174
             let m = rng.gen_range::<u32, _>(0xf00000..0xffffff).to_le_bytes();
             let mac = [0xa8,0x40,0x25,m[0],m[1],m[2]];
             let log = log.clone();
@@ -202,176 +195,83 @@ impl PciVirtioSidemux {
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
-        debug!(self.log, "[rx0] q={} this chain:\n{:?}", vq.id, chain);
-        let clen = match vq.pop_avail(&mut chain, mem) {
+        match vq.pop_avail(&mut chain, mem) {
             Some(val) => val as usize,
-            None => {
-                debug!(self.log, "[rx] pop_avail is none");
-                return;
-            }
+            None => return,
         };
-        debug!(self.log, "[rx1] this chain:\n{:?}", chain);
 
-        //TODO gross, no alloc in handler
-        let mut data: Vec<u8> = vec![0;clen];
-        let buf = data.as_mut_slice();
+        // Create a statically allocated buffer to read ethernet frames from the
+        // guest into.
+        //
+        // For reasons unknown to me, there are 10 bytes of leading spacing
+        // before the ethernet frame coming from virtio. If we're considering
+        // this a layer 1 frame from virtio, which I guess makes some amount of
+        // sense, then this would account for the 7 bits of preamble and the 1
+        // bit frame delimiter, but we are still left with 2 mystery bytes ....
+        let mut frame = [0u8; MTU_PLUS_SIDECAR + 10];
 
-        // TODO copy pasta from tail end of Chain::read function. Seemingly
-        // cannot use Chain::read as-is because it expects a statically sized
-        // type.
-        let mut done = 0;
-        let total = chain.for_remaining_type(true, |addr, len| {
-            let remain = &mut buf[done..];
-            if let Some(copied) = mem.read_into(addr, remain, len) {
-                let need_more = copied != remain.len();
-                done += copied;
-                (copied, need_more)
-            } else {
-                (0, false)
-            }
-        });
+        // skip 10 mystery bytes
+        let n = read_buf(mem, &mut chain, &mut frame[..10]);
 
-        // for reasons unknown to me, there are 10 bytes of leading spacing
-        // before the ethernet frame, 
-        if total < 10 + ETHERNET_FRAME_SIZE {
-            warn!(self.log, "short frame!");
+        // TODO This seems to happen somewhat regularly, and if we push_used
+        // after a zero read, we enter a death spiral. So just return.
+        if n == 0 {
             return;
         }
-        let data = &data[10..];
-        let total = total - 10;
-
-        // iterate over ethernet packets, add sidecar header and push to
-        // simulator
-        //
-        // TODO
-        //   - assuming that we're not going to get fragmented L2 packets
-        //   - assuming there are no vlan tags in the ethernet headers
-        //   - assuming IPv6, IPv4 or ARP ethertypes
-        let mut i = 0; 
-        loop {
-
-            if i >= total { break; }
-
-            let ethertype = u16::from_be_bytes([data[12], data[13]]);
-            let len = match ethertype {
-
-                ethertype::IPV6 => {
-                    trace!(self.log, "pci: ipv6 packet");
-                    let payload_len = u16::from_be_bytes([data[14+4], data[14+5]]);
-                    payload_len as usize + 40
-                }
-                ethertype::IPV4 => {
-                    trace!(self.log, "pci: ipv4 packet");
-                    let total_len = u16::from_be_bytes([data[14+2], data[14+3]]);
-                    total_len as usize
-                }
-                ethertype::ARP => {
-                    trace!(self.log, "pci: arp packet");
-                    28
-                }
-                _ => {
-                    trace!(
-                        self.log,
-                        "it's a bird, it's a plane, it's {}! ({})",
-                        ethertype,
-                        total
-                    );
-                    let cfg = HexConfig {
-                        title: false,
-                        ascii: false,
-                        width: 4,
-                        group: 0, 
-                        ..HexConfig::default() 
-                    };
-                    trace!(self.log, "\n{:?}\n", data.hex_conf(cfg));
-                    break;
-                }
-
-            };
-
-            // TODO need to handle fragmentation?
-            if i + len > data.len() {
-                warn!(self.log, "packet size greater than buffer size: {}+{}={} >= {}", 
-                    i, len, i+len, data.len());
-                break;
-            }
-
-            //TODO gross, even more data path allocation!
-            let mut msg: Vec<u8> = vec![0;len+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE];
-
-            // add ethernet header
-            for j in 0..ETHERNET_FRAME_SIZE {
-                msg[j] = data[i+j];
-            }
-            i += ETHERNET_FRAME_SIZE;
-
-            // set ethertype to sidecar
-            let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
-            msg[12] = b[0];
-            msg[13] = b[1];
-
-            // add sidecar header
-            // code
-            msg[14] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
-            // TODO: is ingress needed here?
-            // egress
-            let b = (self.index as u16).to_be_bytes();
-            msg[14+3] = b[0];
-            msg[14+4] = b[1];
-            let b = (ethertype).to_be_bytes();
-            msg[14+5] = b[0];
-            msg[14+6] = b[1];
-
-            // copy packet into msg buf
-            for j in 0..(len as usize) {
-                msg[j+ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE] = data[i+j]
-            }
-
-            i += len;
-
-            // send encapped packet out external port
-
-            // destination MAC, this is actually ignored since the dlpi link is
-            // in raw mode.
-            let dst = &data[..6];
-
-            match dlpi::send(self.sim_dh, &dst, &msg.as_slice(), None) {
-                Ok(_) => {},
-                Err(e) => {
-                    error!(self.log, "tx[ext]: {}", e);
-                    continue;
-                }
-            };
-
+        if n < 10 {
+            warn!(self.log, "short read ({})!", n);
+            vq.push_used(&mut chain, mem, ctx);
+            return;
         }
 
-        vq.push_used(&mut chain, mem, ctx);
+        // read in the ethernet header
+        let eth = &mut frame[0..ETHERNET_FRAME_SIZE];
+        let n = read_buf(mem, &mut chain, eth);
+        if n < ETHERNET_FRAME_SIZE {
+            warn!(self.log, "frame from guest too small for Ethernet");
+            vq.push_used(&mut chain, mem, ctx);
+            return;
+        }
+        // get orignial ethertype
+        let ethertype = u16::from_be_bytes([eth[12], eth[13]]);
+        // set ethertype to sidecar
+        let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
+        eth[12] = b[0];
+        eth[13] = b[1];
 
-    }
+        // create a sidecar header, goes right after ethernet header
+        let sc = &mut frame[
+            ETHERNET_FRAME_SIZE
+            ..
+            ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE
+        ];
+        // code
+        sc[0] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
+        // egress
+        let b = (self.index as u16).to_be_bytes();
+        sc[3] = b[0];
+        sc[4] = b[1];
+        // ethertype
+        let b = (ethertype).to_be_bytes();
+        sc[5] = b[0];
+        sc[6] = b[1];
 
-    fn write_buf(&self, buf: &[u8], chain: &mut Chain, mem: &MemCtx) {
+        // read in payload, goes right after sidecar header
+        let payload = &mut frame[
+            ETHERNET_FRAME_SIZE+SIDECAR_HDR_SIZE
+            ..
+        ];
+        read_buf(mem, &mut chain, payload);
 
-        debug!(self.log, "writing {} bytes to guest", buf.len());
-
-        // more copy pasta from Chain::write b/c like Chain:read a
-        // statically sized type is expected.
-        let mut done = 0;
-        let total = chain.for_remaining_type(false, |addr, len| {
-            debug!(self.log, "write {} @{:x}", len, addr.0);
-            let remain = &buf[done..];
-            if let Some(copied) = mem.write_from(addr, remain, len) {
-                debug!(self.log, "wrote {} @{:x}", copied, addr.0);
-                let need_more = copied != remain.len();
-                done += copied;
-                (copied, need_more)
-            } else {
-                warn!(self.log, "write to guest failed");
-                // Copy failed, so do not attempt anything else
-                (0, false)
+        // send encapped packet out external port
+        match dlpi::send(self.sim_dh, &[], &frame, None) {
+            Ok(_) => {},
+            Err(e) => {
+                error!(self.log, "tx (ext): {}", e);
             }
-        });
+        };
 
-        debug!(self.log, "wrote {} bytes to guest", total);
+        vq.push_used(&mut chain, mem, ctx);
 
     }
 
@@ -380,23 +280,15 @@ impl PciVirtioSidemux {
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
         let vq = &self.virtio_state.queues[0];
-        for i in 0..self.virtio_state.queues.count().get() as usize {
-            let q = &self.virtio_state.queues[i];
-            debug!(self.log, "found queue id={} size={}", q.id, q.size);
-        }
-        debug!(self.log, "using queue id={} size={}", vq.id, vq.size);
         match vq.pop_avail(&mut chain, mem) {
-            Some(clen) => debug!(self.log, "[tx] pop_avail {}", clen),
+            Some(_) =>  {}
             None => {
                 warn!(self.log, "[tx] pop_avail is none");
                 return;
             }
         }
 
-        debug!(self.log, "[tx] this chain:\n{:?}", chain);
-
-        self.write_buf(data, &mut chain, mem);
-
+        write_buf(data, &mut chain, mem);
         vq.push_used(&mut chain, mem, ctx);
 
     }
@@ -575,6 +467,38 @@ async fn handle_simulator_packets(
         ports[port].tx_to_guest(&full_decapd, &ctx);
 
     }
+}
+
+// helper functions to read/write a buffer from/to a guest
+pub fn read_buf(mem: &MemCtx, chain: &mut Chain, buf: &mut [u8]) -> usize {
+
+    let mut done = 0;
+    chain.for_remaining_type(true, |addr, len| {
+        let remain = &mut buf[done..];
+        if let Some(copied) = mem.read_into(addr, remain, len) {
+            let need_more = copied != remain.len();
+            done += copied;
+            (copied, need_more)
+        } else {
+            (0, false)
+        }
+    })
+
+}
+fn write_buf(buf: &[u8], chain: &mut Chain, mem: &MemCtx) -> usize {
+
+    let mut done = 0;
+    chain.for_remaining_type(false, |addr, len| {
+        let remain = &buf[done..];
+        if let Some(copied) = mem.write_from(addr, remain, len) {
+            let need_more = copied != remain.len();
+            done += copied;
+            (copied, need_more)
+        } else {
+            (0, false)
+        }
+    })
+
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
