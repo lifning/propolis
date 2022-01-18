@@ -481,8 +481,8 @@ async fn handle_simulator_packets(
 
 
         };
-        if n < SIDECAR_HDR_SIZE {
-            warn!(log, "packet too small for sidecar header?");
+        if n < ETHERNET_HDR_SIZE + SIDECAR_HDR_SIZE {
+            warn!(log, "packet too small for sidecar encap?");
             continue;
         }
 
