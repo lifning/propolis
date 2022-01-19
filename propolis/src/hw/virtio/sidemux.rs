@@ -2,6 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::num::NonZeroU16;
 use std::io::Result;
 use std::convert::TryInto;
+use std::collections::BTreeMap;
+use std::array::IntoIter;
+use std::iter::FromIterator;
 
 use crate::hw::pci;
 use crate::dispatch::{AsyncCtx, DispCtx};
@@ -96,6 +99,8 @@ impl Sidemux {
 
         let sim_dh = dlpi::open(&link_name, dlpi::sys::DLPI_RAW)?;
         dlpi::bind(sim_dh, SIDECAR_ETHERTYPE)?;
+        // pick up DDM link local multicast traffic
+        dlpi::enable_multicast(sim_dh, &[0x33, 0x33, 0x00, 0x00, 0x00, 0xdd])?;
 
         let mut rng = rand::thread_rng();
 
@@ -258,6 +263,7 @@ impl PciVirtioSidemux {
             let b = (SIDECAR_ETHERTYPE as u16).to_be_bytes();
             eth[12] = b[0];
             eth[13] = b[1];
+            let mut total = eth.len();
 
             // create a sidecar header, goes right after ethernet header
             let sc = &mut frame[
@@ -268,13 +274,22 @@ impl PciVirtioSidemux {
             // code
             sc[0] = packet::sidecar::SC_FORWARD_FROM_USERSPACE;
             // egress
-            let b = (self.index as u16).to_be_bytes();
+            let port = match LOCAL_TO_TOFINO.get(&self.index) {
+                Some(p) => *p,
+                None => {
+                    warn!(self.log, "local port out of range `{}`", self.index);
+                    break;
+                }
+            };
+
+            let b = (port as u16).to_be_bytes();
             sc[3] = b[0];
             sc[4] = b[1];
             // ethertype
             let b = (ethertype).to_be_bytes();
             sc[5] = b[0];
             sc[6] = b[1];
+            total += sc.len();
 
             // determine payload buffer size
             let begin = ETHERNET_HDR_SIZE+SIDECAR_HDR_SIZE;
@@ -283,6 +298,7 @@ impl PciVirtioSidemux {
                 ethertype::IPV6 => {
                     let end = begin+IPV6_HDR_SIZE;
                     let ipv6 = &mut frame[begin..end];
+                    total += IPV6_HDR_SIZE;
                     read_buf(mem, &mut chain, ipv6);
                     let payload_len = u16::from_be_bytes([ipv6[4],ipv6[5]]);
                     let begin = end;
@@ -293,6 +309,7 @@ impl PciVirtioSidemux {
                 ethertype::IPV4 => {
                     let end = begin+IPV4_HDR_SIZE;
                     let ipv4 = &mut frame[begin..end];
+                    total += IPV4_HDR_SIZE;
                     read_buf(mem, &mut chain, ipv4);
                     let remaining =
                         u16::from_be_bytes([ipv4[2], ipv4[3]]) as usize - 
@@ -303,6 +320,7 @@ impl PciVirtioSidemux {
 
                 ethertype::ARP => {
                     let end = begin+ARP_PKT_SIZE;
+                    total += ARP_PKT_SIZE;
                     &mut frame[begin..end]
                 }
 
@@ -332,8 +350,10 @@ impl PciVirtioSidemux {
             // read in payload, goes right after sidecar header
             read_buf(mem, &mut chain, payload);
 
+            total += payload.len();
+
             // send encapped packet out external port
-            match dlpi::send(self.sim_dh, &[], &frame, None) {
+            match dlpi::send(self.sim_dh, &[], &frame[..total], None) {
                 Ok(_) => {},
                 Err(e) => {
                     error!(self.log, "tx (ext): {}", e);
@@ -489,10 +509,15 @@ async fn handle_simulator_packets(
             continue;
         }
         let port = sch.sc_ingress as usize;
-        if port >= ports.len() {
-            error!(log, "port out of range {} >= {}", port, ports.len());
-            continue;
-        }
+        let port = match TOFINO_TO_LOCAL.get(&port) {
+            Some(p) => *p,
+            None => {
+                warn!(log, "bad tofino port `{}`, dropping", port);
+                continue;
+            }
+        };
+
+        debug!(log, "mapped {} to {}", sch.sc_ingress, port);
         
         // replace sidecar ethertype with encapsulated packet ethertype
         let eth = &mut msg[eth_begin..eth_end]; 
@@ -526,7 +551,7 @@ async fn handle_simulator_packets(
             Some(_) =>  {}
             None => {
                 warn!(port.log, "[tx] pop_avail is none");
-                return;
+                continue;
             }
         }
 
@@ -595,6 +620,83 @@ lazy_static! {
             (NetReg::MaxVqPairs, 2),
         ];
         RegMap::create_packed(VIRTIO_NET_CFG_SIZE, &layout, None)
+    };
+}
+
+lazy_static! {
+    static ref LOCAL_TO_TOFINO: BTreeMap<usize, usize> = {
+        BTreeMap::from_iter(IntoIter::new([
+                (0, 8),
+                (1, 16),
+                (2, 24),
+                (3, 32),
+                (4, 40),
+                (5, 48),
+                (6, 56),
+                (7, 64),
+                (8, 136),
+                (9, 144),
+                (10, 152),
+                (11, 160),
+                (12, 168),
+                (13, 176),
+                (14, 184),
+                (15, 192),
+                (16, 264),
+                (17, 272),
+                (18, 280),
+                (19, 288),
+                (20, 296),
+                (21, 304),
+                (22, 312),
+                (23, 320),
+                (24, 392),
+                (25, 400),
+                (26, 408),
+                (27, 416),
+                (28, 424),
+                (29, 432),
+                (30, 440),
+                (31, 448)
+        ]))
+    };
+}
+lazy_static! {
+    static ref TOFINO_TO_LOCAL: BTreeMap<usize, usize> = {
+        BTreeMap::from_iter(IntoIter::new([
+                (8, 0),
+                (16, 1),
+                (24, 2),
+                (32, 3),
+                (40, 4),
+                (48, 5),
+                (56, 6),
+                (64, 7),
+                (136, 8),
+                (144, 9),
+                (152, 10),
+                (160, 11),
+                (168, 12),
+                (176, 13),
+                (184, 14),
+                (192, 15),
+                (264, 16),
+                (272, 17),
+                (280, 18),
+                (288, 19),
+                (296, 20),
+                (304, 21),
+                (312, 22),
+                (320, 23),
+                (392, 24),
+                (400, 25),
+                (408, 26),
+                (416, 27),
+                (424, 28),
+                (432, 29),
+                (440, 30),
+                (448, 31)
+        ]))
     };
 }
 

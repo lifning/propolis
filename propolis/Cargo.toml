@@ -29,7 +29,7 @@ serde_arrays = "0.1"
 erased-serde = "0.3"
 p9ds = { path = "/home/ry/src/p9fs/lib" }
 ispf = { git = "ssh://git@github.com/oxidecomputer/ispf" }
-dlpi = { path = "/home/ry/src/dlpi" }
+dlpi = { path = "/home/ry/src/dlpi-sys" }
 packet = { path = "/home/ry/src/dendrite/packet" }
 rand = "0.8"
 pretty-hex = "0.2"
