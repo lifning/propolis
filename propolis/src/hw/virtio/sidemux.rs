@@ -211,7 +211,23 @@ impl PciVirtioSidemux {
 
     }
 
+    fn handle_q0_req(&self, _vq: &Arc<VirtQueue>, _ctx: &DispCtx) {
+
+        // This is the queue that the virtio driver in the guest reads from and
+        // we write to. It seems that the correct way to handle a queue
+        // notification on this queue is to not handle it? If we vq.pop_avail to
+        // see what's in the queue, it's always zero data, and the act of doing
+        // a vq.pop_avail seems to drain the queue until it is unusable for
+        // writes, even if we do the corresponding push_used.
+
+        return;
+    }
+
     fn handle_req(&self, vq: &Arc<VirtQueue>, ctx: &DispCtx) {
+
+        if vq.id == 0 {
+            return self.handle_q0_req(vq, ctx);
+        }
 
         let mem = &ctx.mctx.memctx();
         let mut chain = Chain::with_capacity(1);
