@@ -2,7 +2,8 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 
 use hyper::upgrade::Upgraded;
-use propolis::instance::Instance;
+use propolis::dispatch::AsyncCtx;
+use propolis::instance::{Instance, ReqState};
 use slog::info;
 use tokio_util::codec::Framed;
 
@@ -15,12 +16,14 @@ type Result<T> = anyhow::Result<T, MigrateError>;
 pub async fn migrate(
     migrate_context: Arc<MigrateContext>,
     instance: Arc<Instance>,
+    async_context: AsyncCtx,
     conn: Upgraded,
     log: slog::Logger,
 ) -> Result<()> {
     let mut proto = SourceProtocol {
         migrate_context,
         instance,
+        async_context,
         conn: Framed::new(conn, codec::LiveMigrationFramer::new()),
         log,
     };
@@ -31,13 +34,15 @@ pub async fn migrate(
     proto.arch_state().await?;
     proto.ram_pull().await?;
     proto.finish().await?;
-    proto.end();
+    proto.end()?;
     Ok(())
 }
 
 struct SourceProtocol {
     migrate_context: Arc<MigrateContext>,
     instance: Arc<Instance>,
+    #[allow(dead_code)]
+    async_context: AsyncCtx,
     conn: Framed<Upgraded, codec::LiveMigrationFramer>,
     log: slog::Logger,
 }
@@ -100,8 +105,10 @@ impl SourceProtocol {
         Ok(())
     }
 
-    fn end(&mut self) {
+    fn end(&mut self) -> Result<()> {
+        self.instance.set_target_state(ReqState::Halt)?;
         info!(self.log, "Source Migration Successful");
+        Ok(())
     }
 
     async fn read_msg(&mut self) -> Result<codec::Message> {
