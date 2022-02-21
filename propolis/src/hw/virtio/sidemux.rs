@@ -133,6 +133,7 @@ impl Entity for Sidemux {
         &self,
         next: instance::State,
         _target: Option<instance::State>,
+        _phase: instance::TransitionPhase,
         _ctx: &DispCtx,
     ) {
         match next {
@@ -436,6 +437,7 @@ impl Entity for PciVirtioSidemux {
         &self,
         next: instance::State,
         _target: Option<instance::State>,
+        _phase: instance::TransitionPhase,
         ctx: &DispCtx,
     ) {
         match next {
