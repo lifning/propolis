@@ -12,7 +12,15 @@ use crate::vcpu::VcpuRunFunc;
 use crate::vmm::*;
 
 use slog::{self, Drain};
+use thiserror::Error;
 use tokio::runtime::Handle;
+
+/// The role of an instance during a migration.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MigrateRole {
+    Source,
+    Destination,
+}
 
 /// States of operation for an instance.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -27,6 +35,8 @@ pub enum State {
     /// The instance is in a paused state such that it may
     /// later be booted or maintained.
     Quiesce,
+    /// The instance is being migrated.
+    Migrate(MigrateRole),
     /// The instance is no longer running
     Halt,
     /// The instance is rebooting, and should transition back
@@ -65,10 +75,14 @@ impl State {
             },
             State::Boot => match target {
                 None | Some(State::Run) => State::Run,
+                Some(State::Migrate(MigrateRole::Destination)) => {
+                    State::Migrate(MigrateRole::Destination)
+                }
                 _ => State::Quiesce,
             },
             State::Run => match target {
                 None | Some(State::Run) => State::Run,
+                Some(State::Migrate(role)) => State::Migrate(role),
                 Some(_) => State::Quiesce,
             },
             State::Quiesce => match target {
@@ -76,7 +90,13 @@ impl State {
                 Some(State::Reset) => State::Reset,
                 // Machine must go through reset before it can be booted
                 Some(State::Boot) => State::Reset,
+                Some(State::Migrate(role)) => State::Migrate(role),
                 _ => State::Quiesce,
+            },
+            State::Migrate(role) => match target {
+                Some(State::Run) => State::Run,
+                Some(State::Halt) | Some(State::Destroy) => State::Halt,
+                _ => State::Migrate(*role),
             },
             State::Halt => State::Destroy,
             State::Reset => State::Boot,
@@ -91,6 +111,14 @@ impl State {
     }
 }
 
+/// An instance state transition can be broken down into different phases
+/// visible to consumers.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TransitionPhase {
+    Pre,
+    Post,
+}
+
 /// States which external consumers are permitted to request that the instance
 /// transition to.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -98,6 +126,23 @@ pub enum ReqState {
     Run,
     Reset,
     Halt,
+}
+
+/// Errors that may be returned when an instance is requested to transition
+/// to a different state.
+#[derive(Debug, Error)]
+pub enum TransitionError {
+    #[error("cannot reset instance while halted")]
+    ResetWhileHalted,
+
+    #[error("cannot transition from {current:?} state to {target:?}")]
+    InvalidTarget { current: State, target: State },
+
+    #[error("cannot transition away from terminal state")]
+    Terminal,
+
+    #[error("an outstanding migration task already exists")]
+    MigrationAlreadyInProgress,
 }
 
 type TransitionFunc =
@@ -111,6 +156,7 @@ struct Inner {
     machine: Option<Arc<Machine>>,
     inv: Inventory,
     transition_funcs: Vec<Box<TransitionFunc>>,
+    migrate_ctx: Option<CtxId>,
 }
 
 /// A single virtual machine.
@@ -141,6 +187,7 @@ impl Instance {
                 machine: Some(machine),
                 inv: Inventory::new(),
                 transition_funcs: Vec::new(),
+                migrate_ctx: None,
             }),
             cv: Condvar::new(),
             disp,
@@ -217,12 +264,15 @@ impl Instance {
     /// Updates the state of the instance.
     ///
     /// Returns an error if the state transition is invalid.
-    pub fn set_target_state(&self, target: ReqState) -> Result<(), ()> {
+    pub fn set_target_state(
+        &self,
+        target: ReqState,
+    ) -> Result<(), TransitionError> {
         let mut inner = self.inner.lock().unwrap();
 
         if matches!(inner.state_target, Some(State::Halt | State::Destroy)) {
             // Cannot request any state once the target is halt/destroy
-            return Err(());
+            return Err(TransitionError::Terminal);
         }
         if inner.state_target == Some(State::Reset) && target == ReqState::Run {
             // Requesting a run when already on the road to reboot is an
@@ -247,11 +297,24 @@ impl Instance {
         }
     }
 
+    pub fn begin_migrate(
+        &self,
+        role: MigrateRole,
+        migrate_ctx_id: CtxId,
+    ) -> Result<(), TransitionError> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(_) = inner.migrate_ctx {
+            return Err(TransitionError::MigrationAlreadyInProgress);
+        }
+        inner.migrate_ctx = Some(migrate_ctx_id);
+        self.set_target_state_locked(&mut inner, State::Migrate(role))
+    }
+
     pub(crate) fn trigger_suspend(
         &self,
         kind: SuspendKind,
         source: SuspendSource,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransitionError> {
         let mut inner = self.inner.lock().unwrap();
         self.trigger_suspend_locked(&mut inner, kind, source)
     }
@@ -261,10 +324,10 @@ impl Instance {
         inner: &mut MutexGuard<Inner>,
         kind: SuspendKind,
         source: SuspendSource,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransitionError> {
         if matches!(inner.state_current, State::Halt | State::Destroy) {
             // No way out from Halt or Destroy
-            return Err(());
+            return Err(TransitionError::Terminal);
         }
 
         match kind {
@@ -272,7 +335,7 @@ impl Instance {
                 match inner.suspend_info {
                     Some((SuspendKind::Halt, _)) => {
                         // Cannot supersede active halt
-                        return Err(());
+                        return Err(TransitionError::ResetWhileHalted);
                     }
                     Some((SuspendKind::Reset, _)) => {
                         return Ok(());
@@ -306,9 +369,12 @@ impl Instance {
         &self,
         inner: &mut MutexGuard<Inner>,
         target: State,
-    ) -> Result<(), ()> {
+    ) -> Result<(), TransitionError> {
         if !State::valid_target(&inner.state_current, &target) {
-            return Err(());
+            return Err(TransitionError::InvalidTarget {
+                current: inner.state_current,
+                target,
+            });
         }
         // XXX: verify validity of transitions
         inner.state_target = Some(target);
@@ -339,19 +405,30 @@ impl Instance {
         inner: &MutexGuard<Inner>,
         state: State,
         target: Option<State>,
+        phase: TransitionPhase,
     ) {
         self.disp.with_ctx(|ctx| {
             // Allow any entity to act on the new state
             inner.inv.for_each_node(inventory::Order::Pre, |_id, rec| {
                 let ent = rec.entity();
-                if matches!(state, State::Reset) {
+
+                // Entities using the `reset` shortcut will be notified of the
+                // new state in the `Pre` phase, so they can complete any
+                // clean-up or reset activities before the in-kernel state is
+                // reinitialized.
+                if state == State::Reset && phase == TransitionPhase::Pre {
                     ent.reset(ctx);
                 }
-                ent.state_transition(state, target, ctx);
+
+                ent.state_transition(state, target, phase, ctx);
             });
 
-            for f in inner.transition_funcs.iter() {
-                f(state, &inner.inv, ctx)
+            // Transition-func consumers only expect post-state-change
+            // notifications for now.
+            if phase == TransitionPhase::Post {
+                for f in inner.transition_funcs.iter() {
+                    f(state, &inner.inv, ctx)
+                }
             }
         });
     }
@@ -393,6 +470,14 @@ impl Instance {
             }
 
             // Pre-state-change actions
+            self.transition_actions(
+                &inner,
+                state,
+                inner.state_target,
+                TransitionPhase::Pre,
+            );
+
+            // Implicit actions for a state change
             match state {
                 State::Quiesce => {
                     // Worker thread quiesce cannot be done with `inner` lock
@@ -416,12 +501,28 @@ impl Instance {
                     // suspend become stale.
                     inner.suspend_info = None;
                 }
+                State::Migrate(_) => {
+                    let migrate_ctx = inner.migrate_ctx.unwrap();
+                    // Worker thread quiesce cannot be done with `inner` lock
+                    // held without risking a deadlock.
+                    drop(inner);
+                    self.disp.quiesce();
+                    // We explicitly allow the migrate task to run
+                    self.disp.release_one(migrate_ctx);
+                    inner = self.inner.lock().unwrap();
+                }
                 _ => {}
             }
 
-            self.transition_actions(&inner, state, inner.state_target);
-
             // Post-state-change actions
+            self.transition_actions(
+                &inner,
+                state,
+                inner.state_target,
+                TransitionPhase::Post,
+            );
+
+            // Implicit post-state-change actions
             match state {
                 State::Boot => {
                     // A reset is as good as fulfilled when transitioning

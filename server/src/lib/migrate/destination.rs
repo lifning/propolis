@@ -1,27 +1,39 @@
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 
-use dropshot::RequestContext;
 use hyper::upgrade::Upgraded;
+use propolis::dispatch::AsyncCtx;
+use propolis::instance::Instance;
 use slog::info;
 use tokio_util::codec::Framed;
 
 use crate::migrate::codec;
 use crate::migrate::preamble::Preamble;
 use crate::migrate::{MigrateContext, MigrateError, MigrationState};
-use crate::server::Context;
 
 type Result<T> = anyhow::Result<T, MigrateError>;
 
 pub async fn migrate(
-    request_context: Arc<RequestContext<Context>>,
     migrate_context: Arc<MigrateContext>,
+    instance: Arc<Instance>,
+    async_context: AsyncCtx,
     conn: Upgraded,
     log: slog::Logger,
 ) -> Result<()> {
+    {
+        // TODO: Not exactly the right error
+        let ctx = async_context
+            .dispctx()
+            .await
+            .ok_or(MigrateError::InstanceNotInitialized)?;
+        let machine = ctx.mctx;
+        let _vmm_hdl = machine.hdl();
+    }
+
     let mut proto = DestinationProtocol {
-        request_context,
         migrate_context,
+        instance,
+        async_context,
         conn: Framed::new(conn, codec::LiveMigrationFramer::new()),
         log,
     };
@@ -38,8 +50,11 @@ pub async fn migrate(
 
 #[allow(dead_code)]
 struct DestinationProtocol {
-    request_context: Arc<RequestContext<Context>>,
     migrate_context: Arc<MigrateContext>,
+    #[allow(dead_code)]
+    instance: Arc<Instance>,
+    #[allow(dead_code)]
+    async_context: AsyncCtx,
     conn: Framed<Upgraded, codec::LiveMigrationFramer>,
     log: slog::Logger,
 }
