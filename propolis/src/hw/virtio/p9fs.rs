@@ -7,7 +7,6 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::mem::size_of;
 use std::io::{Read, Seek};
-//use std::os::illumos::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::common::*;
@@ -47,7 +46,6 @@ use libc::{
     ERANGE,
     EILSEQ,
     EINVAL,
-
     DT_DIR,
     DT_REG,
 };

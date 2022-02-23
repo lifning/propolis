@@ -7,7 +7,9 @@ pub mod block;
 pub mod pci;
 mod queue;
 pub mod viona;
+#[cfg(feature = "falcon")]
 pub mod p9fs;
+#[cfg(feature = "falcon")]
 pub mod sidemux;
 
 use crate::common::*;
@@ -16,7 +18,9 @@ use queue::VirtQueue;
 
 pub use block::PciVirtioBlock;
 pub use viona::PciVirtioViona;
+#[cfg(feature = "falcon")]
 pub use p9fs::PciVirtio9pfs;
+#[cfg(feature = "falcon")]
 pub use sidemux::Sidemux;
 
 pub trait VirtioDevice: Send + Sync + 'static + Entity {

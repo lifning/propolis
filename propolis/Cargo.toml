@@ -27,12 +27,14 @@ slog = "2.7"
 serde = { version = "1" }
 serde_arrays = "0.1"
 erased-serde = "0.3"
-p9ds = { git = "ssh://git@github.com/oxidecomputer/p9fs" }
-ispf = { git = "ssh://git@github.com/oxidecomputer/ispf" }
-dlpi = { path = "/home/ry/src/dlpi-sys" }
-packet = { path = "/home/ry/src/dendrite/packet" }
-rand = "0.8"
-pretty-hex = "0.2"
+
+# falcon
+rand = { version = "0.8", optional = true }
+pretty-hex = { version = "0.2", optional = true }
+p9ds = { git = "https://github.com/oxidecomputer/p9fs", optional = true }
+ispf = { git = "https://github.com/oxidecomputer/ispf", optional = true }
+dlpi = { git = "https://github.com/oxidecomputer/dlpi-sys", optional = true }
+packet = { git = "https://github.com/oxidecomputer/dendrite", optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.5"
@@ -44,3 +46,4 @@ rand = "0.8"
 [features]
 default = ["dtrace-probes"]
 dtrace-probes = ["usdt/asm"]
+falcon = ["p9ds", "ispf", "dlpi", "packet", "rand", "pretty-hex"]

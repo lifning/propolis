@@ -259,6 +259,7 @@ impl<'a> MachineInitializer<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "falcon")]
     pub fn initialize_9pfs(
         &self,
         chipset: &RegisteredChipset,
@@ -277,6 +278,7 @@ impl<'a> MachineInitializer<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "falcon")]
     pub fn initialize_sidemux(
         &self,
         chipset: &RegisteredChipset,

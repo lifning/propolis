@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use std::io::{Error, ErrorKind};
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(feature = "falcon")]
 use std::convert::TryInto;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch, Mutex};
@@ -436,6 +437,7 @@ async fn instance_ensure(
                             })?;
                         init.initialize_vnic(&chipset, name, bdf)?;
                     }
+                    #[cfg(feature = "falcon")]
                     "pci-virtio-9p" => {
                         let source = dev.get_string("source").ok_or_else(|| {
                             Error::new(
@@ -461,6 +463,7 @@ async fn instance_ensure(
                         init.initialize_9pfs(&chipset, source, target, bdf)?;
 
                     }
+                    #[cfg(feature = "falcon")]
                     "sidemux" => {
                         let radix: i64 = dev.get_integer("radix").ok_or_else(|| {
                             Error::new(

@@ -16,6 +16,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+#[cfg(feature = "falcon")]
 use std::str::FromStr;
 
 use propolis::chardev::{BlockingSource, Sink, Source};
@@ -263,6 +264,7 @@ fn main() {
 
                     chipset.pci_attach(bdf, nvme);
                 }
+                #[cfg(feature = "falcon")]
                 "pci-virtio-9p" => {
                     let source = dev.options.get("source")
                         .unwrap()
@@ -284,6 +286,7 @@ fn main() {
 
                     chipset.pci_attach(bdf.unwrap(), vio9p);
                 }
+                #[cfg(feature = "falcon")]
                 "sidemux" => {
                     let radix = usize::from_str(
                         dev.options.get("radix")
