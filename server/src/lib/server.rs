@@ -975,6 +975,30 @@ async fn instance_migrate_status(
         .map(HttpResponseOk)
 }
 
+/*
+#[endpoint {
+    method = GET,
+    path = "/instances/{instance_id}/vnc"
+}]
+async fn instance_vnc(
+    rqctx: Arc<RequestContext<Context>>,
+    _path_params: Path<api::InstancePathParams>,
+) -> Result<HttpResponseOk<Body>, HttpError> {
+    let mut context = rqctx.context().context.lock().await;
+
+    let context = context.as_mut().ok_or_else(|| {
+        HttpError::for_internal_error(
+            "Server not initialized (no instance)".to_string(),
+        )
+    })?;
+    if path_params.into_inner().instance_id != context.properties.id {
+        return Err(HttpError::for_internal_error(
+            "UUID mismatch (path did not match struct)".to_string(),
+        ));
+    }
+
+} */
+
 /// Returns a Dropshot [`ApiDescription`] object to launch a server.
 pub fn api() -> ApiDescription<Context> {
     let mut api = ApiDescription::new();
@@ -987,5 +1011,6 @@ pub fn api() -> ApiDescription<Context> {
     api.register(instance_serial_detach).unwrap();
     api.register(instance_migrate_start).unwrap();
     api.register(instance_migrate_status).unwrap();
+    //api.register(instance_vnc).unwrap();
     api
 }
