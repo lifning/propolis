@@ -284,6 +284,7 @@ impl<'a> MachineInitializer<'a> {
         chipset: &RegisteredChipset,
         radix: usize,
         link_name: &str,
+        macs: Option<Vec<String>>,
         bdf: pci::Bdf,
     ) -> Result<(), Error> {
 
@@ -291,6 +292,7 @@ impl<'a> MachineInitializer<'a> {
             radix,
             link_name.into(),
             0x8000,
+            macs,
             self.log.clone(),
         )?;
         self.inv

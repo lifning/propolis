@@ -479,6 +479,23 @@ async fn instance_ensure(
                             )
                         })?;
 
+                        let macs = match dev.get_array("macs") {
+                            None => None,
+                            Some(mac_values) => {
+                                let mut macs: Vec<String> = Vec::new();
+                                for m in mac_values {
+                                    match m.as_str() {
+                                        None => return Err(Error::new(
+                                                ErrorKind::InvalidData,
+                                                "mac address must be a string",
+                                        )),
+                                        Some(m) => macs.push(m.into()),
+                                    }
+                                }
+                                Some(macs)
+                            }
+                        };
+
                         let bdf: pci::Bdf = dev.get("pci-path").ok_or_else(|| {
                             Error::new(
                                 ErrorKind::InvalidData,
@@ -493,7 +510,8 @@ async fn instance_ensure(
                             )
                         })?;
 
-                        init.initialize_sidemux(&chipset, radix, link_name, bdf)?;
+                        init.initialize_sidemux(
+                            &chipset, radix, link_name, macs, bdf)?;
                     }
                     _ => {
                         return Err(Error::new(

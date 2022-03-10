@@ -35,6 +35,7 @@ p9ds = { git = "https://github.com/oxidecomputer/p9fs", optional = true }
 ispf = { git = "https://github.com/oxidecomputer/ispf", optional = true }
 dlpi = { git = "https://github.com/oxidecomputer/dlpi-sys", optional = true }
 packet = { git = "https://github.com/oxidecomputer/dendrite", optional = true }
+macaddr = { version = "1", optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.5"
@@ -46,4 +47,4 @@ rand = "0.8"
 [features]
 default = ["dtrace-probes"]
 dtrace-probes = ["usdt/asm"]
-falcon = ["p9ds", "ispf", "dlpi", "packet", "rand", "pretty-hex"]
+falcon = ["p9ds", "ispf", "dlpi", "packet", "rand", "pretty-hex", "macaddr"]

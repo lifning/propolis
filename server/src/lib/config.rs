@@ -98,6 +98,10 @@ impl Device {
         self.options.get(key.as_ref())?.as_integer()
     }
 
+    pub fn get_array<S: AsRef<str>>(&self, key: S) -> Option<&Vec<toml::Value>> {
+        self.options.get(key.as_ref())?.as_array()
+    }
+
     pub fn get<T: FromStr, S: AsRef<str>>(&self, key: S) -> Option<T> {
         self.get_string(key)?.parse().ok()
     }

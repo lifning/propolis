@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroU16;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::convert::TryInto;
 use std::collections::BTreeMap;
 use std::array::IntoIter;
 use std::iter::FromIterator;
+use std::str::FromStr;
 
 use crate::hw::pci;
 use crate::dispatch::{AsyncCtx, DispCtx};
@@ -94,24 +95,53 @@ impl Sidemux {
         radix: usize,
         link_name: String,
         queue_size: u16,
+        macs: Option<Vec<String>>,
         log: slog::Logger
     ) -> Result<Arc<Self>> {
+
+        let addrs = match macs {
+            None => {
+                let mut rng = rand::thread_rng();
+                let mut addrs = Vec::new();
+                for _ in 0..radix {
+                    let m = rng.gen_range::<u32, _>(0xf00000..0xffffff).to_le_bytes();
+                    addrs.push([0xa8,0x40,0x25,m[0],m[1],m[2]]);
+                }
+                addrs
+            }
+            Some(macs) => {
+                if macs.len() != radix {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "number of macs must equal radix",
+                    ))
+                }
+                let mut addrs = Vec::new();
+                for mac in macs {
+                    let addr = match macaddr::MacAddr6::from_str(&mac) {
+                        Ok(addr) => addr,
+                        Err(e) => return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                format!("invalid mac {}: {}", mac, e),
+                        ))
+                    };
+                    addrs.push(addr.into_array())
+                }
+                addrs
+            }
+        };
 
         let sim_dh = dlpi::open(&link_name, dlpi::sys::DLPI_RAW)?;
         dlpi::bind(sim_dh, SIDECAR_ETHERTYPE)?;
         // pick up DDM link local multicast traffic
         dlpi::enable_multicast(sim_dh, &[0x33, 0x33, 0x00, 0x00, 0x00, 0xdd])?;
 
-        let mut rng = rand::thread_rng();
-
         let mut ports = Vec::new();
         for i in 0..radix {
 
             // Create a MAC address with the Oxide OUI per RFD 174
-            let m = rng.gen_range::<u32, _>(0xf00000..0xffffff).to_le_bytes();
-            let mac = [0xa8,0x40,0x25,m[0],m[1],m[2]];
             let log = log.clone();
-            ports.push(PciVirtioSidemux::new(i, queue_size, mac, sim_dh, log)?);
+            ports.push(PciVirtioSidemux::new(i, queue_size, addrs[i], sim_dh, log)?);
 
         }
 

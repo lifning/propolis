@@ -305,6 +305,7 @@ fn main() {
                         radix,
                         link_name,
                         0x100,
+                        None,
                         log.clone(),
                     ).unwrap();
                     
