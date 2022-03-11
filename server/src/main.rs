@@ -7,7 +7,8 @@
 
 use anyhow::anyhow;
 use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter, ConfigLoggingIfExists,
+    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    HttpServerStarter,
 };
 use propolis::usdt::register_probes;
 use slog::info;
