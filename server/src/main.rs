@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Command line arguments.
     let args = Args::from_args();
+println!("PARSED");
 
     match args {
         Args::OpenApi => run_openapi()

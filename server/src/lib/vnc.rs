@@ -3,16 +3,26 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::net::{TcpStream, TcpListener};
 
+use image::io::Reader as ImageReader;
+use image::ImageResult;
+use image::GenericImageView;
+use image::Rgba;
+
 pub fn start_vnc_server() {
-    let addrs = [SocketAddr::from(([127, 0, 0, 1], 9000))];
+    println!("starting vnc server");
+    //let addrs = [SocketAddr::from(([127, 0, 0, 1], 9000))];
+    let addrs = [SocketAddr::from(([0, 0, 0, 0], 9000))];
     let listener = TcpListener::bind(&addrs[..]).unwrap();
+    println!("listening");
     for stream in listener.incoming() {
+    	println!("incoming");
         handle_vnc_client(stream.unwrap());
     }
 }
 
 fn handle_vnc_client(mut stream: TcpStream) {
     // 1. send ProtocolVersion message
+    println!("handle vnc client");
     let version = "RFB 003.008\n";
     stream
         .write_all(version.as_bytes())
@@ -147,6 +157,7 @@ fn handle_vnc_client(mut stream: TcpStream) {
     */
 
     loop {
+/*
         let mut msg_type = [0];
         stream
             .read_exact(&mut msg_type)
@@ -207,6 +218,7 @@ fn handle_vnc_client(mut stream: TcpStream) {
                 stream.read_exact(&mut height).expect("could not read height");
 
                 println!("rx: message=FramebufferUpdateRequest (incremental={}, x_pos={}, y_pos={}, width={}, height={}", if incremental[0] == 1 { "true" } else { "false" }, u16::from_be_bytes(x_pos), u16::from_be_bytes(y_pos), u16::from_be_bytes(width), u16::from_be_bytes(height));
+*/
 
                 // send a FramebufferUpdate
                 stream.write_all(&[0, 0]); // type=0, padding
@@ -224,12 +236,24 @@ fn handle_vnc_client(mut stream: TcpStream) {
                 let mut pixels = [0 as u8; len];
                 for i in 0..len {
                     //if i % 4 == 0 {
-                    if i % 4 == 2 {
+                    if i % 4 == 0 {
                         pixels[i] = 0xf0; // blue
                     }
                 }
+  
+		let img = ImageReader::open("oxide.jpg").unwrap().decode().unwrap();
+		for (x, y, pixel) in img.pixels() {
+			let ux = x as usize;
+			let uy = y as usize + 100;
+			pixels[uy * (1024 * 4) + ux * 4] = pixel[0];
+			pixels[uy * (1024 * 4) + ux * 4 + 1] = pixel[1];
+			pixels[uy * (1024 * 4) + ux * 4 + 2] = pixel[2];
+			pixels[uy * (1024 * 4) + ux * 4 + 3] = pixel[3];
+		}
+
                 stream.write(&pixels).expect("could not write pixels");
                 println!("tx: message=FramebufferUpdate");
+/*
             }
             4 => {
                 println!("rx: message=KeyEvent");
@@ -244,5 +268,6 @@ fn handle_vnc_client(mut stream: TcpStream) {
                 println!("invalid message type-{}", msg_type[0]);
             }
         }
+*/
     }
 }
