@@ -8,8 +8,10 @@ use image::ImageResult;
 use image::GenericImageView;
 use image::Rgba;
 
-pub fn start_vnc_server() {
-    println!("starting vnc server");
+use slog::{info, Logger};
+
+pub fn start_vnc_server(log: &Logger) {
+    info!(log, "starting vnc server");
     //let addrs = [SocketAddr::from(([127, 0, 0, 1], 9000))];
     let addrs = [SocketAddr::from(([0, 0, 0, 0], 9000))];
     let listener = TcpListener::bind(&addrs[..]).unwrap();

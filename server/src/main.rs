@@ -7,7 +7,7 @@
 
 use anyhow::anyhow;
 use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter,
+    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter, ConfigLoggingIfExists,
 };
 use propolis::usdt::register_probes;
 use slog::info;
@@ -52,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Command line arguments.
     let args = Args::from_args();
-println!("PARSED");
 
     match args {
         Args::OpenApi => run_openapi()
@@ -66,14 +65,16 @@ println!("PARSED");
                 request_body_max_bytes: 1024 * 1024, // 1M for ISO bytes
                 ..Default::default()
             };
-            let config_logging = ConfigLogging::StderrTerminal {
+            let config_logging = ConfigLogging::File {
                 level: ConfigLoggingLevel::Info,
+                path: "propolis-log.json".to_string(),
+                if_exists: ConfigLoggingIfExists::Append,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
 
-            vnc::start_vnc_server();
+            vnc::start_vnc_server(&log);
 
             let context = server::Context::new(config, log.new(slog::o!()));
             info!(log, "Starting server...");
