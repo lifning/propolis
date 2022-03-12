@@ -331,6 +331,7 @@ impl<'a> MachineInitializer<'a> {
 
         let ramfb = ramfb::RamFb::create();
         ramfb.attach(&mut fwcfg);
+        info!(self.log, "rafmb={:?}", ramfb);
 
         let fwcfg_dev = fwcfg.finalize();
         let pio = self.mctx.pio();

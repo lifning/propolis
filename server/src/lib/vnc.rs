@@ -8,17 +8,29 @@ use image::GenericImageView;
 use image::ImageResult;
 use image::Rgba;
 
+use dropshot::{
+    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    HttpServerStarter,
+};
 use slog::{info, Logger};
 
-pub fn start_vnc_server(log: &Logger) {
+pub fn start_vnc_server() {
+    let config_logging = ConfigLogging::File {
+        level: ConfigLoggingLevel::Info,
+        path: "vnc-log.json".to_string(),
+        if_exists: ConfigLoggingIfExists::Truncate,
+    };
+    let log = config_logging
+        .to_logger("vnc-server").unwrap();
+
     info!(log, "starting vnc server");
     //let addrs = [SocketAddr::from(([127, 0, 0, 1], 9000))];
-    let addrs = [SocketAddr::from(([0, 0, 0, 0], 9000))];
+    let addrs = [SocketAddr::from(([0, 0, 0, 0], 5900))];
     let listener = TcpListener::bind(&addrs[..]).unwrap();
-    info!(log, "listening");
+    info!(log, "listening on port 5900");
     for stream in listener.incoming() {
         info!(log, "incoming");
-        handle_vnc_client(log, stream.unwrap());
+        handle_vnc_client(&log, stream.unwrap());
     }
 }
 

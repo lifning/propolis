@@ -69,13 +69,15 @@ async fn main() -> anyhow::Result<()> {
             let config_logging = ConfigLogging::File {
                 level: ConfigLoggingLevel::Info,
                 path: "propolis-log.json".to_string(),
-                if_exists: ConfigLoggingIfExists::Append,
+                if_exists: ConfigLoggingIfExists::Truncate,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
 
-            vnc::start_vnc_server(&log);
+//            std::thread::spawn(move || {
+                vnc::start_vnc_server();
+ //           });
 
             let context = server::Context::new(config, log.new(slog::o!()));
             info!(log, "Starting server...");

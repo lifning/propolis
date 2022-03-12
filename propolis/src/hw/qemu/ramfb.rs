@@ -72,7 +72,7 @@ impl Config {
         Some(())
     }
 }
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct RamFb {
     config: Mutex<Config>,
 }
