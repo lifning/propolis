@@ -75,10 +75,6 @@ async fn main() -> anyhow::Result<()> {
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
 
-//            std::thread::spawn(move || {
-                vnc::start_vnc_server();
- //           });
-
             let context = server::Context::new(config, log.new(slog::o!()));
             info!(log, "Starting server...");
             let server = HttpServerStarter::new(

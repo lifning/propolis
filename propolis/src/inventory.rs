@@ -414,7 +414,7 @@ pub struct Record {
     ent: Arc<dyn Entity>,
     parent: Option<EntityID>,
     children: BTreeSet<EntityID>,
-    name: String,
+    pub name: String,
 }
 
 impl Record {

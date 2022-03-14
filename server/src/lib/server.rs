@@ -31,11 +31,13 @@ use propolis::hw::pci;
 use propolis::hw::uart::LpcUart;
 use propolis::instance::Instance;
 use propolis_client::api;
+use propolis::inventory::EntityID;
 
 use crate::config::Config;
 use crate::initializer::{build_instance, MachineInitializer};
 use crate::migrate;
 use crate::serial::Serial;
+
 
 // TODO(error) Do a pass of HTTP codes (error and ok)
 // TODO(idempotency) Idempotency mechanisms?
@@ -212,7 +214,7 @@ async fn instance_ensure(
         }
     }
 
-    // Handle requsts to an instance that has already been initialized.
+    // Handle requests to an instance that has already been initialized.
     let mut context = server_context.context.lock().await;
     if let Some(ctx) = &*context {
         if ctx.properties.id != properties.id {
@@ -472,6 +474,10 @@ async fn instance_ensure(
                 }
             }
 
+            let vnc_log = rqctx.log.clone();
+            std::thread::spawn(move || {
+                crate::vnc::start_vnc_server(&vnc_log);
+            });
             init.initialize_fwcfg(properties.vcpus)?;
             init.initialize_cpus()?;
             Ok(())
@@ -527,6 +533,9 @@ async fn instance_ensure(
         None
     };
     instance.print();
+    instance.inv().for_each_node(propolis::inventory::Order::Pre, |eid, record| {
+        println!("eid={:?}, record = {:?}", eid, record.name);
+    });
 
     Ok(HttpResponseCreated(api::InstanceEnsureResponse { migrate }))
 }
@@ -893,6 +902,31 @@ async fn instance_serial(
         .body(Body::empty())?)
 }
 
+
+#[endpoint {
+    method = GET,
+    path = "/instances/{instance_id}/vnc",
+}]
+async fn instance_vnc(
+    rqctx: Arc<RequestContext<Context>>,
+    path_params: Path<api::InstancePathParams>,
+) -> Result<HttpResponseOk<Uuid>, HttpError> {
+    let mut context = rqctx.context().context.lock().await;
+
+    let context = context.as_ref().ok_or_else(|| {
+        HttpError::for_internal_error(
+            "Server not initialized (no instance)".to_string(),
+        )
+    })?;
+    if path_params.into_inner().instance_id != context.properties.id {
+        return Err(HttpError::for_internal_error(
+            "UUID mismatch (path did not match struct)".to_string(),
+        ));
+    }
+
+    Ok(HttpResponseOk(context.properties.id))
+}
+
 #[endpoint {
     method = PUT,
     path = "/instances/{instance_id}/serial/detach",
@@ -975,30 +1009,6 @@ async fn instance_migrate_status(
         .map(HttpResponseOk)
 }
 
-/*
-#[endpoint {
-    method = GET,
-    path = "/instances/{instance_id}/vnc"
-}]
-async fn instance_vnc(
-    rqctx: Arc<RequestContext<Context>>,
-    _path_params: Path<api::InstancePathParams>,
-) -> Result<HttpResponseOk<Body>, HttpError> {
-    let mut context = rqctx.context().context.lock().await;
-
-    let context = context.as_mut().ok_or_else(|| {
-        HttpError::for_internal_error(
-            "Server not initialized (no instance)".to_string(),
-        )
-    })?;
-    if path_params.into_inner().instance_id != context.properties.id {
-        return Err(HttpError::for_internal_error(
-            "UUID mismatch (path did not match struct)".to_string(),
-        ));
-    }
-
-} */
-
 /// Returns a Dropshot [`ApiDescription`] object to launch a server.
 pub fn api() -> ApiDescription<Context> {
     let mut api = ApiDescription::new();
@@ -1011,6 +1021,6 @@ pub fn api() -> ApiDescription<Context> {
     api.register(instance_serial_detach).unwrap();
     api.register(instance_migrate_start).unwrap();
     api.register(instance_migrate_status).unwrap();
-    //api.register(instance_vnc).unwrap();
+    api.register(instance_vnc).unwrap();
     api
 }
