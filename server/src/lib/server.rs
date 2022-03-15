@@ -36,6 +36,7 @@ use crate::config::Config;
 use crate::initializer::{build_instance, MachineInitializer};
 use crate::migrate;
 use crate::serial::Serial;
+use crate::vnc::server::VncServer;
 
 // TODO(error) Do a pass of HTTP codes (error and ok)
 // TODO(idempotency) Idempotency mechanisms?
@@ -91,16 +92,18 @@ pub struct Context {
     pub(crate) migrate_task: Mutex<Option<migrate::MigrateTask>>,
     config: Config,
     log: Logger,
+    vnc_server: VncServer,
 }
 
 impl Context {
     /// Creates a new server context object.
-    pub fn new(config: Config, log: Logger) -> Self {
+    pub fn new(config: Config, vnc_server: VncServer, log: Logger) -> Self {
         Context {
             context: Mutex::new(None),
             migrate_task: Mutex::new(None),
             config,
             log,
+            vnc_server,
         }
     }
 }
@@ -203,7 +206,7 @@ async fn instance_ensure(
         ));
     }
 
-    // Handle requsts to an instance that has already been initialized.
+    // Handle requests to an instance that has already been initialized.
     let mut context = server_context.context.lock().await;
     if let Some(ctx) = &*context {
         if ctx.properties.id != properties.id {
@@ -267,6 +270,7 @@ async fn instance_ensure(
     }));
 
     let mut com1 = None;
+    let mut framebuffer = None;
 
     // Initialize (some) of the instance's hardware.
     //
@@ -463,7 +467,7 @@ async fn instance_ensure(
                 }
             }
 
-            init.initialize_fwcfg(properties.vcpus)?;
+            framebuffer = Some(init.initialize_fwcfg(properties.vcpus)?);
             init.initialize_cpus()?;
             Ok(())
         })
@@ -474,6 +478,8 @@ async fn instance_ensure(
             ))
         })?;
 
+    server_context.vnc_server.initialize_fb(framebuffer.unwrap());
+
     // Save the newly created instance in the server's context.
     *context = Some(InstanceContext {
         instance: instance.clone(),
@@ -483,6 +489,7 @@ async fn instance_ensure(
         serial_task: None,
     });
     drop(context);
+
 
     // Is this part of a migration?
     let migrate = if let Some(migrate_request) = request.migrate {
@@ -517,6 +524,8 @@ async fn instance_ensure(
 
         None
     };
+
+
     instance.print();
 
     Ok(HttpResponseCreated(api::InstanceEnsureResponse { migrate }))

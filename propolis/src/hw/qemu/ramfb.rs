@@ -71,6 +71,10 @@ impl Config {
 
         Some(())
     }
+
+    fn get_fb_info(&self) -> (u64, u32, u32) {
+        (self.addr, self.width, self.height)
+    }
 }
 #[derive(Default)]
 pub struct RamFb {
@@ -84,6 +88,9 @@ impl RamFb {
         builder
             .add_named("etc/ramfb", Arc::clone(self) as Arc<dyn Item>)
             .unwrap();
+    }
+    pub fn get_fb_info(&self) -> (u64, u32, u32) {
+        self.config.lock().unwrap().get_fb_info()
     }
 }
 impl Item for RamFb {

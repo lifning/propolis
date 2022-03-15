@@ -10,12 +10,15 @@ use dropshot::{
     ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter,
 };
 use propolis::usdt::register_probes;
-use slog::info;
+use slog::{info, o};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
 use propolis_server::{config, server};
+use propolis_server::vnc::server::VncServer;
+
+const VNC_PORT: u16 = 5900;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -71,8 +74,10 @@ async fn main() -> anyhow::Result<()> {
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
+            let vnc_server = VncServer::new(VNC_PORT, log.new(o!("component" => "vnc-server")));
+            vnc_server.start();
 
-            let context = server::Context::new(config, log.new(slog::o!()));
+            let context = server::Context::new(config, vnc_server, log.new(slog::o!()));
             info!(log, "Starting server...");
             let server = HttpServerStarter::new(
                 &config_dropshot,

@@ -5,4 +5,5 @@ pub mod config;
 mod initializer;
 mod migrate;
 mod serial;
+pub mod vnc;
 pub mod server;
