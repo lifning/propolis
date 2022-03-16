@@ -15,8 +15,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-use propolis_server::{config, server};
 use propolis_server::vnc::server::VncServer;
+use propolis_server::{config, server};
 
 const VNC_PORT: u16 = 5900;
 
@@ -74,10 +74,14 @@ async fn main() -> anyhow::Result<()> {
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
             )?;
-            let vnc_server = VncServer::new(VNC_PORT, log.new(o!("component" => "vnc-server")));
-            vnc_server.start();
+            let vnc_server = VncServer::new(
+                VNC_PORT,
+                log.new(o!("component" => "vnc-server")),
+            );
+            VncServer::start();
 
-            let context = server::Context::new(config, vnc_server, log.new(slog::o!()));
+            let context =
+                server::Context::new(config, vnc_server, log.new(slog::o!()));
             info!(log, "Starting server...");
             let server = HttpServerStarter::new(
                 &config_dropshot,

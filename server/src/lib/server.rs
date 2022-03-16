@@ -12,6 +12,7 @@ use hyper::{header, Body, Response, StatusCode};
 use slog::{error, info, o, Logger};
 use std::borrow::Cow;
 use std::io::{Error, ErrorKind};
+use std::ops::Deref;
 use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
@@ -92,7 +93,7 @@ pub struct Context {
     pub(crate) migrate_task: Mutex<Option<migrate::MigrateTask>>,
     config: Config,
     log: Logger,
-    vnc_server: VncServer,
+    vnc_server: Mutex<VncServer>,
 }
 
 impl Context {
@@ -103,7 +104,7 @@ impl Context {
             migrate_task: Mutex::new(None),
             config,
             log,
-            vnc_server,
+            vnc_server: Mutex::new(vnc_server),
         }
     }
 }
@@ -208,7 +209,7 @@ async fn instance_ensure(
 
     // Handle requests to an instance that has already been initialized.
     let mut context = server_context.context.lock().await;
-    if let Some(ctx) = &*context {
+    if let Some(ctx) = context.deref() {
         if ctx.properties.id != properties.id {
             return Err(HttpError::for_internal_error(format!(
                 "Server already initialized with ID {}",
@@ -478,7 +479,9 @@ async fn instance_ensure(
             ))
         })?;
 
-    server_context.vnc_server.initialize_fb(framebuffer.unwrap());
+    let mut vnc = server_context.vnc_server.lock().await;
+    vnc.initialize_fb(framebuffer.unwrap());
+    drop(vnc);
 
     // Save the newly created instance in the server's context.
     *context = Some(InstanceContext {
@@ -489,7 +492,6 @@ async fn instance_ensure(
         serial_task: None,
     });
     drop(context);
-
 
     // Is this part of a migration?
     let migrate = if let Some(migrate_request) = request.migrate {
@@ -524,7 +526,6 @@ async fn instance_ensure(
 
         None
     };
-
 
     instance.print();
 

@@ -316,7 +316,10 @@ impl<'a> MachineInitializer<'a> {
         self.initialize_virtio_block(chipset, bdf, be, creg)
     }
 
-    pub fn initialize_fwcfg(&self, cpus: u8) -> Result<crate::vnc::server::RamFb, Error> {
+    pub fn initialize_fwcfg(
+        &self,
+        cpus: u8,
+    ) -> Result<crate::vnc::server::RamFb, Error> {
         let mut fwcfg = fwcfg::FwCfgBuilder::new();
         fwcfg
             .add_legacy(

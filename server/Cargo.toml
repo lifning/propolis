@@ -44,6 +44,7 @@ propolis = { path = "../propolis", features = ["crucible"], default-features = f
 propolis-client = { path = "../client" }
 uuid = "0.8"
 base64 = "0.13"
+image = "0.24.1"
 
 [dev-dependencies]
 hex = "0.4.3"
