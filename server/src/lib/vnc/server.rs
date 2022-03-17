@@ -1,6 +1,6 @@
 use slog::{error, info, o, Logger};
 
-use tokio::net::{TcpStream, TcpListener};
+use std::net::{TcpStream, TcpListener};
 use std::net::SocketAddr;
 use image::{GenericImageView, ImageResult, Rgba, io::Reader as ImageReader};
 use std::io::{Read, Write};
@@ -41,13 +41,14 @@ impl VncServer {
         let log = self.log.clone();
 
         tokio::spawn(async move {
-            let listener = TcpListener::bind(listen_addr).await.unwrap();
+            let listener = TcpListener::bind(listen_addr).unwrap();
 
             loop {
-                let (stream, addr) = listener.accept().await.unwrap();
+                let (stream, addr) = listener.accept().unwrap();
+                let log = log.clone();
                 tokio::spawn(async move {
-                    let conn = VncConnection::new(stream, addr, log);
-                    conn.process().await;
+                    let mut conn = VncConnection::new(stream, addr, log);
+                    conn.process();
                 });
             }
         });
@@ -78,19 +79,13 @@ impl VncConnection {
         }
     }
 
-    async fn process(&self) {
-        let (reader, mut writer) = self.stream.split();
-
+    fn process(&mut self) {
         info!(self.log, "BEGIN: ProtocolVersion Handshake");
         let server_version = RfbProtoVersion::Rfb38;
-        server_version.write_to(&mut writer).await.unwrap();
+        server_version.write_to(&mut self.stream).unwrap();
 
-        let client_version: RfbProtoVersion = RfbProtoVersion::read_to(reader).await.unwrap();
+        let client_version: RfbProtoVersion = RfbProtoVersion::read_from(&mut self.stream).unwrap();
         assert_eq!(server_version, client_version);
         info!(self.log, "END: ProtocolVersion Handshake\n");
-
-
-
-
     }
 }

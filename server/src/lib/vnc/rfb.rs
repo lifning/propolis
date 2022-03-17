@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
+use std::io::{Read, Write};
 use tokio::net::TcpStream;
 
 enum RfbState {
@@ -8,8 +8,8 @@ enum RfbState {
 
 // TODO: error handling with anyhow
 pub trait Message {
-    async fn read_from(reader: &mut TcpStream) -> Result<Self> where Self: Sized;
-    async fn write_to(&self, writer: &mut TcpStream) -> Result<()>;
+    fn read_from<R: Read>(reader: &mut R) -> Result<Self> where Self: Sized;
+    fn write_to<W: Write>(&self, writer: &mut W) -> Result<()>;
 }
 
 #[derive(Debug, PartialEq)]
@@ -19,9 +19,9 @@ pub enum RfbProtoVersion {
 
 
 impl Message for RfbProtoVersion {
-    async fn read_from(reader: &mut TcpStream) -> Result<RfbProtoVersion> {
+    fn read_from<R: Read>(reader: &mut R) -> Result<RfbProtoVersion> {
         let mut client_buf = [0; 12];
-        reader.read_exact(&mut client_buf).await;
+        reader.read_exact(&mut client_buf);
 
         match &client_buf {
             b"RFB 003.008\n" => Ok(RfbProtoVersion::Rfb38),
@@ -29,9 +29,9 @@ impl Message for RfbProtoVersion {
         }
     }
 
-    async fn write_to(&self, writer: &mut TcpStream) -> Result<()> {
+    fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         match self {
-            RfbProtoVersion::Rfb38 => writer.write_all(b"RFB 003.008\n").await,
+            RfbProtoVersion::Rfb38 => writer.write_all(b"RFB 003.008\n"),
         }?;
 
         Ok(())
