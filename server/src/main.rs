@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
                 VNC_PORT,
                 log.new(o!("component" => "vnc-server")),
             );
-            VncServer::start();
+            vnc_server.start();
 
             let context =
                 server::Context::new(config, vnc_server, log.new(slog::o!()));
