@@ -41,6 +41,7 @@ impl Message for ProtoVersion {
     }
 }
 
+#[derive(PartialEq, Debug)]
 pub enum SecurityType {
     None,
 }
@@ -50,8 +51,8 @@ impl Message for SecurityType {
         let mut sec_type = [0; 1];
         reader.read_exact(&mut sec_type)?;
 
-        match &sec_type {
-            [0] => Ok(SecurityType::None),
+        match &sec_type[0] {
+            1 => Ok(SecurityType::None),
             _ => Err(anyhow!("unexpected security type: {}", sec_type[0])),
         }
     }
@@ -310,15 +311,19 @@ impl Message for FramebufferUpdate {
         unimplemented!()
     }
     fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
+	println!("1");
         writer.write_all(&[ServerMessageType::FramebufferUpdate.into()])?;
 
         // 1 byte of padding
+	println!("2");
         writer.write_all(&[0])?;
 
         let num_rectangles: u16 = self.rectangles.len().try_into().unwrap();
+	println!("3");
         writer.write_all(&num_rectangles.to_be_bytes())?;
 
         for r in &self.rectangles {
+	println!("4");
             r.write_to(writer)?;
         }
 
@@ -328,6 +333,7 @@ impl Message for FramebufferUpdate {
         for i in 0..len {
             pixels[i] = 0xff;
         }
+	println!("5");
         writer.write_all(&pixels)?;
 
         Ok(())

@@ -42,17 +42,20 @@ impl VncServer {
     pub fn start(&self) {
         let listen_addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let log = self.log.clone();
+	info!(self.log, "vnc-server: starting...");
 
         tokio::spawn(async move {
             let listener = TcpListener::bind(listen_addr).unwrap();
 
             loop {
-                let (stream, addr) = listener.accept().unwrap();
                 let log = log.clone();
+                let (stream, addr) = listener.accept().unwrap();
+		info!(log, "vnc-server: got connection");
                 tokio::spawn(async move {
+		info!(log, "vnc-server: spawned");
                     let mut conn = VncConnection::new(stream, addr, log);
                     conn.process();
-                });
+                }).await;
             }
         });
     }
@@ -99,10 +102,13 @@ impl VncConnection {
         let security_types = SecurityTypes(vec![SecurityType::None]);
         security_types.write_to(&mut self.stream).unwrap();
 
-        info!(self.log, "rx: SecurityResult");
-        let security_result =
-            SecurityResult::read_from(&mut self.stream).unwrap();
-        assert_eq!(security_result, SecurityResult::Ok);
+        info!(self.log, "rx: SecurityType");
+	let client_sectype = SecurityType::read_from(&mut self.stream).unwrap();
+        assert_eq!(client_sectype, SecurityType::None);
+
+        info!(self.log, "tx: SecurityResult");
+	let sec_res = SecurityResult::Ok;
+	sec_res.write_to(&mut self.stream).unwrap();
 
         info!(self.log, "END: Security Handshake\n");
 
