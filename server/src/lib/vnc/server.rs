@@ -1,11 +1,14 @@
 use slog::{error, info, o, Logger};
 
-use std::net::{TcpStream, TcpListener};
-use std::net::SocketAddr;
-use image::{GenericImageView, ImageResult, Rgba, io::Reader as ImageReader};
+use image::{io::Reader as ImageReader, GenericImageView, ImageResult, Rgba};
 use std::io::{Read, Write};
+use std::net::SocketAddr;
+use std::net::{TcpListener, TcpStream};
 
-use crate::vnc::rfb::{RfbProtoVersion, Message};
+use crate::vnc::rfb::{
+    ClientInit, Message, ProtoVersion, SecurityResult, SecurityType,
+    SecurityTypes, ServerInit, FramebufferUpdate, Rectangle, Encoding,
+};
 
 #[derive(Debug)]
 pub struct RamFb {
@@ -72,20 +75,54 @@ struct VncConnection {
 
 impl VncConnection {
     fn new(stream: TcpStream, addr: SocketAddr, log: Logger) -> Self {
-        VncConnection {
-            stream,
-            addr,
-            log,
-        }
+        VncConnection { stream, addr, log }
     }
 
     fn process(&mut self) {
         info!(self.log, "BEGIN: ProtocolVersion Handshake");
-        let server_version = RfbProtoVersion::Rfb38;
+
+        info!(self.log, "tx: ProtocolVersion");
+        let server_version = ProtoVersion::Rfb38;
         server_version.write_to(&mut self.stream).unwrap();
 
-        let client_version: RfbProtoVersion = RfbProtoVersion::read_from(&mut self.stream).unwrap();
+        info!(self.log, "rx: ProtocolVersion");
+        let client_version: ProtoVersion =
+            ProtoVersion::read_from(&mut self.stream).unwrap();
         assert_eq!(server_version, client_version);
+
         info!(self.log, "END: ProtocolVersion Handshake\n");
+
+
+        info!(self.log, "BEGIN: Security Handshake");
+
+        info!(self.log, "tx: SecurityTypes");
+        let security_types = SecurityTypes(vec![SecurityType::None]);
+        security_types.write_to(&mut self.stream).unwrap();
+
+        info!(self.log, "rx: SecurityResult");
+        let security_result =
+            SecurityResult::read_from(&mut self.stream).unwrap();
+        assert_eq!(security_result, SecurityResult::Ok);
+
+        info!(self.log, "END: Security Handshake\n");
+
+
+        info!(self.log, "BEGIN: Initialization");
+
+        info!(self.log, "rx: ClientInit");
+        let client_init = ClientInit::read_from(&mut self.stream).unwrap();
+        assert_eq!(client_init, ClientInit::Shared);
+
+        info!(self.log, "tx: ServerInit");
+        let server_init = ServerInit::default();
+        server_init.write_to(&mut self.stream).unwrap();
+
+        info!(self.log, "END: Initialization\n");
+
+        loop {
+            let r = Rectangle::new(0, 0, 1024, 748, Encoding::Raw);
+            let fbu = FramebufferUpdate::new(vec![r]);
+            fbu.write_to(&mut self.stream).unwrap();
+        }
     }
 }

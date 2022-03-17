@@ -1,2 +1,2 @@
-pub mod server;
 mod rfb;
+pub mod server;
