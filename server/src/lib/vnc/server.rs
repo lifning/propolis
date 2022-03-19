@@ -6,8 +6,8 @@ use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
 
 use crate::vnc::rfb::{
-    ClientInit, Message, ProtoVersion, SecurityResult, SecurityType,
-    SecurityTypes, ServerInit, FramebufferUpdate, Rectangle, Encoding,
+    ClientInit, Encoding, FramebufferUpdate, Message, ProtoVersion, Rectangle,
+    SecurityResult, SecurityType, SecurityTypes, ServerInit,
 };
 
 #[derive(Debug)]
@@ -42,7 +42,7 @@ impl VncServer {
     pub fn start(&self) {
         let listen_addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let log = self.log.clone();
-	info!(self.log, "vnc-server: starting...");
+        info!(self.log, "vnc-server: starting...");
 
         tokio::spawn(async move {
             let listener = TcpListener::bind(listen_addr).unwrap();
@@ -50,12 +50,13 @@ impl VncServer {
             loop {
                 let log = log.clone();
                 let (stream, addr) = listener.accept().unwrap();
-		info!(log, "vnc-server: got connection");
+                info!(log, "vnc-server: got connection");
                 tokio::spawn(async move {
-		info!(log, "vnc-server: spawned");
+                    info!(log, "vnc-server: spawned");
                     let mut conn = VncConnection::new(stream, addr, log);
                     conn.process();
-                }).await;
+                })
+                .await;
             }
         });
     }
@@ -95,7 +96,6 @@ impl VncConnection {
 
         info!(self.log, "END: ProtocolVersion Handshake\n");
 
-
         info!(self.log, "BEGIN: Security Handshake");
 
         info!(self.log, "tx: SecurityTypes");
@@ -103,15 +103,14 @@ impl VncConnection {
         security_types.write_to(&mut self.stream).unwrap();
 
         info!(self.log, "rx: SecurityType");
-	let client_sectype = SecurityType::read_from(&mut self.stream).unwrap();
+        let client_sectype = SecurityType::read_from(&mut self.stream).unwrap();
         assert_eq!(client_sectype, SecurityType::None);
 
         info!(self.log, "tx: SecurityResult");
-	let sec_res = SecurityResult::Ok;
-	sec_res.write_to(&mut self.stream).unwrap();
+        let sec_res = SecurityResult::Ok;
+        sec_res.write_to(&mut self.stream).unwrap();
 
         info!(self.log, "END: Security Handshake\n");
-
 
         info!(self.log, "BEGIN: Initialization");
 

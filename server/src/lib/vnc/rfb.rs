@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 
-use std::convert::{TryInto, From};
+use std::convert::{From, TryInto};
 use std::default::Default;
 use std::io::{Read, Write};
 
@@ -227,7 +227,6 @@ impl Default for ServerInit {
     }
 }
 
-
 pub enum ServerMessageType {
     FramebufferUpdate,
     SetColorMapEntries,
@@ -246,9 +245,7 @@ impl From<ServerMessageType> for u8 {
     }
 }
 
-pub enum ServerMessages {
-
-}
+pub enum ServerMessages {}
 
 // TODO: add others
 #[derive(Copy, Clone)]
@@ -291,19 +288,12 @@ impl Message for Rectangle {
 
 impl Rectangle {
     pub fn new(x: u16, y: u16, w: u16, h: u16, e: Encoding) -> Self {
-        Rectangle {
-            x_pos: x,
-            y_pos: y,
-            width: w,
-            height: h,
-            encoding: e
-        }
+        Rectangle { x_pos: x, y_pos: y, width: w, height: h, encoding: e }
     }
 }
 
-
 pub struct FramebufferUpdate {
-    rectangles: Vec<Rectangle>
+    rectangles: Vec<Rectangle>,
 }
 
 impl Message for FramebufferUpdate {
@@ -311,19 +301,19 @@ impl Message for FramebufferUpdate {
         unimplemented!()
     }
     fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
-	println!("1");
+        println!("1");
         writer.write_all(&[ServerMessageType::FramebufferUpdate.into()])?;
 
         // 1 byte of padding
-	println!("2");
+        println!("2");
         writer.write_all(&[0])?;
 
         let num_rectangles: u16 = self.rectangles.len().try_into().unwrap();
-	println!("3");
+        println!("3");
         writer.write_all(&num_rectangles.to_be_bytes())?;
 
         for r in &self.rectangles {
-	println!("4");
+            println!("4");
             r.write_to(writer)?;
         }
 
@@ -334,7 +324,7 @@ impl Message for FramebufferUpdate {
         for i in 0..len {
             pixels[i] = 0xff;
         }
-	println!("5");
+        println!("5");
         writer.write_all(&pixels)?;
 
         Ok(())
@@ -343,9 +333,7 @@ impl Message for FramebufferUpdate {
 
 impl FramebufferUpdate {
     pub fn new(rectangles: Vec<Rectangle>) -> Self {
-        FramebufferUpdate {
-            rectangles,
-        }
+        FramebufferUpdate { rectangles }
     }
 }
 

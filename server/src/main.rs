@@ -7,8 +7,8 @@
 
 use anyhow::anyhow;
 use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpServerStarter,
-ConfigLoggingIfExists,
+    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    HttpServerStarter,
 };
 use propolis::usdt::register_probes;
 use slog::{info, o};
@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
             }; */
             let config_logging = ConfigLogging::File {
                 level: ConfigLoggingLevel::Info,
-		path: "propolis-log.json".to_string(),
-		if_exists: ConfigLoggingIfExists::Truncate,
+                path: "propolis-log.json".to_string(),
+                if_exists: ConfigLoggingIfExists::Truncate,
             };
             let log = config_logging.to_logger("propolis-server").map_err(
                 |error| anyhow!("failed to create logger: {}", error),
