@@ -320,7 +320,7 @@ impl Message for FramebufferUpdate {
         // TODO: not generic
         const len: usize = 1024 * 768 * 4;
         //let mut pixels = Box::new([0 as u8; len]);
-	let mut pixels = vec![0u8; len];
+        let mut pixels = vec![0u8; len];
         for i in 0..len {
             pixels[i] = 0xff;
         }

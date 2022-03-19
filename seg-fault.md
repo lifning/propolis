@@ -134,6 +134,28 @@ Instruction `+0x4` creates the stack, and it's grabbing quite a bit of memory: `
 
 That seems very suspicious.
 XXX: talk about repro'ing on mac 
+finding code
+fixing with box
+
+
+The assembly of the new and improved binary shows that the same function allocates a much more reasonable stack size, `0x3f0`, or about 1KB:
+```
+jordan@atrium ~/propolis $ dis -F '_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E' ./target/debug/propolis-server | head
+disassembly for ./target/debug/propolis-server
+
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E()
+    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E:       55                 pushq  %rbp
+    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x1:   48 89 e5           movq   %rsp,%rbp
+    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x4:   48 81 ec f0 03 00  subq   $0x3f0,%rsp
+                                                                                                                                                 00 
+    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:   48 89 bd 70 fc ff  movq   %rdi,0xfffffffffffffc70(%rbp)
+                                                                                                                                                 ff 
+    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x12:  48 89 b5 78 fc ff  movq   %rsi,0xfffffffffffffc78(%rbp)
+```
+
+
+
+
 
 
 This log output shows about how far it made it in to the protocol:
@@ -232,3 +254,4 @@ _ZN94_$LT$propolis_server..vnc..rfb..SecurityType$u20$as$u20$propolis_server..vn
     _ZN94_$LT$propolis_server..vnc..rfb..SecurityType$u20$as$u20$propolis_server..vnc..rfb..Message$GT$9read_from17h69a8c3ade8b46e9cE+0x1d:  ba 01 00 00 00     movl   $0x1,%edx
     _ZN94_$LT$propolis_server..vnc..rfb..SecurityType$u20$as$u20$propolis_server..vnc..rfb..Message$GT$9read_from17h69a8c3ade8b46e9cE+0x22:  e8 f9 70 0a 00     call   +0xa70f9 <_ZN3std2io4Read10read_exact17h6c9106d96c6e445fE>
 ```
+
