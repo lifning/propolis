@@ -18,7 +18,7 @@ _ZN15propolis_server3vnc6server9VncServer5start28_$u7b$$u7b$closure$u7d$$u7d$28_
 ...
 ```
 
-It died trying to write to a TcpStream -- specifically, trying to write a FramebufferUpdate packet. I took a look at the assembly of the function where it died to get a better sense of what it was doing (XXX: comment about dis with `$`; another alternative `<rip::dis`:
+This code is from a tokio task trying to write to a TcpStream -- specifically, trying to write a FramebufferUpdate packet. I took a look at the assembly of the function where it died to get a better sense of what it was doing (XXX: comment about dis with `$`; another alternative `<rip::dis`:
 
 
 ```
@@ -112,6 +112,7 @@ fffffc7fe45fe000 fffffc7fe4600000             2000 [ unknown ]
 fffffc7fe464e000 fffffc7fe46a2000            54000 /lib/amd64/ld.so.1
 fffffc7fe46b2000 fffffc7fe46b5000             3000 /lib/amd64/ld.so.1
 fffffc7fe46b5000 fffffc7fe46b7000             2000 /lib/amd64/ld.so.1
+```
 
 ...
 
