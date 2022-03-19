@@ -220,7 +220,7 @@ impl Default for ServerInit {
     fn default() -> Self {
         ServerInit {
             fb_width: 1024,
-            fb_height: 1024,
+            fb_height: 748,
             pixel_fmt: PixelFormat::default(),
             name: "propolis-vnc-server".to_string(),
         }
@@ -329,7 +329,8 @@ impl Message for FramebufferUpdate {
 
         // TODO: not generic
         const len: usize = 1024 * 768 * 4;
-        let mut pixels = [0 as u8; len];
+        //let mut pixels = Box::new([0 as u8; len]);
+	let mut pixels = vec![0u8; len];
         for i in 0..len {
             pixels[i] = 0xff;
         }
