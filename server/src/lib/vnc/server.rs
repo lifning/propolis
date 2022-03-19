@@ -4,6 +4,7 @@ use image::{io::Reader as ImageReader, GenericImageView, ImageResult, Rgba};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use crate::vnc::rfb::{
     ClientInit, Encoding, FramebufferUpdate, Message, ProtoVersion, Rectangle,
@@ -30,18 +31,19 @@ enum Framebuffer {
 
 pub struct VncServer {
     port: u16,
-    fb: Framebuffer,
+    fb: Arc<Mutex<Framebuffer>>,
     log: Logger,
 }
 
 impl VncServer {
     pub fn new(port: u16, log: Logger) -> Self {
-        VncServer { port, fb: Framebuffer::Uninitialized, log }
+        VncServer { port, fb: Arc::new(Mutex::new(Framebuffer::Uninitialized)), log }
     }
 
     pub fn start(&self) {
         let listen_addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let log = self.log.clone();
+        let fb = Arc::clone(&self.fb);
         info!(self.log, "vnc-server: starting...");
 
         tokio::spawn(async move {
@@ -49,11 +51,12 @@ impl VncServer {
 
             loop {
                 let log = log.clone();
+                let fb = fb.clone();
                 let (stream, addr) = listener.accept().unwrap();
                 info!(log, "vnc-server: got connection");
                 tokio::spawn(async move {
                     info!(log, "vnc-server: spawned");
-                    let mut conn = VncConnection::new(stream, addr, log);
+                    let mut conn = VncConnection::new(stream, addr, fb, log);
                     conn.process();
                 })
                 .await;
@@ -62,7 +65,8 @@ impl VncServer {
     }
 
     pub fn initialize_fb(&mut self, fb: RamFb) {
-        self.fb = Framebuffer::Initialized(fb);
+        let mut locked = self.fb.lock().unwrap();
+        *locked = Framebuffer::Initialized(fb);
     }
 
     pub fn shutdown(&self) {
@@ -73,13 +77,14 @@ impl VncServer {
 struct VncConnection {
     stream: TcpStream,
     addr: SocketAddr,
+    fb: Arc<Mutex<Framebuffer>>,
     log: Logger,
     //state: Rfb::RfbState,
 }
 
 impl VncConnection {
-    fn new(stream: TcpStream, addr: SocketAddr, log: Logger) -> Self {
-        VncConnection { stream, addr, log }
+    fn new(stream: TcpStream, addr: SocketAddr, fb: Arc<Mutex<Framebuffer>>, log: Logger) -> Self {
+        VncConnection { stream, addr, fb, log }
     }
 
     fn process(&mut self) {
@@ -125,9 +130,18 @@ impl VncConnection {
         info!(self.log, "END: Initialization\n");
 
         loop {
-            let r = Rectangle::new(0, 0, 1024, 748, Encoding::Raw);
-            let fbu = FramebufferUpdate::new(vec![r]);
-            fbu.write_to(&mut self.stream).unwrap();
+            let locked = self.fb.lock().unwrap();
+            match &*locked {
+                Framebuffer::Uninitialized => {
+
+                    let r = Rectangle::new(0, 0, 1024, 748, Encoding::Raw);
+                    let fbu = FramebufferUpdate::new(vec![r]);
+                    fbu.write_to(&mut self.stream).unwrap();
+                },
+                Framebuffer::Initialized(fb) => {
+                    unimplemented!()
+                },
+            }
         }
     }
 }
