@@ -1,6 +1,6 @@
-I recently saw my VNC server code, new code in propolis-server, hit a segfault and die, seemingly when writing a FramebufferUpdate message to a TcpStream from inside a tokio task.
+I recently saw my VNC server code, some new code in propolis-server, hit a segfault and die when a client connects to the server and begins to receive framebuffer data.
 
-It died because of a bad address, `0xfffffc7fe16fd7b8`:
+The server died because of a bad address, `0xfffffc7fe16fd7b8`:
 ```
 > ::status
 debugging core file of propolis-server (64-bit) from atrium
@@ -43,7 +43,7 @@ _ZN15propolis_server3vnc6server9VncServer5start28_$u7b$$u7b$closure$u7d$$u7d$28_
 ...
 ```
 
-This code is from a tokio task trying to a write FramebufferUpdate message to a TcpStream
+This code is from a tokio task trying to a write FramebufferUpdate message to a TcpStream between the server and the client. 
 I took a look at the assembly of the function where it died to get a better
 sense of what it was doing (I used the command `dis` instead of `::dis` because
 mdb didn't like the dollar signs
@@ -77,8 +77,8 @@ program died:
     _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:   48 89 bd 90 fc cf  movq   %rdi,0xffffffffffcffc90(%rbp)
 ```
 
-The first thing to remember is that mdb uses AT&T syntax, not Intel. So this
-instruction is saying: note about AT&T syntax vs intel): get the address out of
+The first thing to remember is that mdb uses AT&T syntax (thus the order of arguments for the `mov` is `src, dest`). So this
+instruction is saying: get the address out of
 the base pointer (`%rbp`), add `0xffffffffffcffc90` to it, get the value at the
 resulting address and store it in the `%rdi` register.
 
@@ -166,7 +166,7 @@ Instruction `+0x4` creates the stack, and it's grabbing quite a bit of memory: `
                 3146416  
 ```
 
-In parallel, I tried to reproduce the SIGSEGV by making a minimal example using this code outside of propolis on my macbook. I didn't see a segfault, but I did see a stack overflow:
+In parallel with looking at the propolis-server core file, I tried to reproduce the SIGSEGV by making a minimal example using this code outside of propolis on my macbook. I didn't see a segfault, but I did see a stack overflow:
 
 ```
 thread 'tokio-runtime-worker' has overflowed its stack
@@ -174,4 +174,4 @@ fatal runtime error: stack overflow
 zsh: abort      cargo run
 ```
 
-At this point, I went to look to see if something in the code I wrote might be allocating something too big on the stack. And sure enough, I was allocating a pretty large array for some placeholder framebuffer data. Changing the line to use `vec!` or a `Box` fixed both the segfault on illumos and the stack overflow on my mac.
+It seemed likely that something was causing tokio to try to allocate a stack bigger than it should. At this point, I went to look to see if something in the code I wrote might be allocating something too big on the stack. And sure enough, I was allocating a pretty large array for some placeholder framebuffer data. Changing the line to use `vec!` or a `Box` fixed both the segfault on illumos and the stack overflow on my mac.
