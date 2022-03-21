@@ -1,8 +1,11 @@
-I recently saw my VNC server code, some new code in propolis-server, hit a segfault and die when a client connects to the server and begins to receive framebuffer data.
+I recently saw my VNC server code in propolis-server, crash due to a segfault.
+This would happen after a client connected to it, and the server started to
+send framebuffer data.
 
 The server died because of a bad address, `0xfffffc7fe16fd7b8`:
 ```
 > ::status
+::status
 debugging core file of propolis-server (64-bit) from atrium
 initial argv: /home/jordan/propolis/target/debug/propolis-server run confs/example-server.con
 threading model: native threads
@@ -40,47 +43,42 @@ This was the top of the stack:
 _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb()
 _ZN15propolis_server3vnc6server13VncConnection7process17h02cddf854b238788E+0xf35()
 _ZN15propolis_server3vnc6server9VncServer5start28_$u7b$$u7b$closure$u7d$$u7d$28_$u7b$$u7b$closure$u7d$$u7d$17h35db5cb5736f03e5E+0x19e()
+_ZN97_$LT$core..future..from_generator..GenFuture$LT$T$GT$$u20$as$u20$core..future..future..Future$GT$4poll17h76747e47c50d6ff3E+0x50()
+_ZN5tokio7runtime4task4core18CoreStage$LT$T$GT$4poll28_$u7b$$u7b$closure$u7d$$u7d$17h47b7370aa914d74aE+0xde()
+_ZN5tokio4loom3std11unsafe_cell19UnsafeCell$LT$T$GT$8with_mut17hc438ab5cef3086b9E+0x31()
 ...
 ```
 
-This code is from a tokio task trying to a write FramebufferUpdate message to a TcpStream between the server and the client. 
-I took a look at the assembly of the function where it died to get a better
-sense of what it was doing (I used the command `dis` instead of `::dis` because
-mdb didn't like the dollar signs
-in the symbol name):
+This code is from a tokio task trying to a write FramebufferUpdate message to a
+TcpStream between the server and the client.  I took a look at the assembly of
+the function where it died to get a better sense of what it was doing:
 
 
 ```
-jordan@atrium ~/propolis $ dis -F '_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E' ./target/debug/propolis-server
-disassembly for ./target/debug/propolis-server
-
-_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E()
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E:       55                 pushq  %rbp
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x1:   48 89 e5           movq   %rsp,%rbp
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x4:   48 81 ec c0 03 30  subq   $0x3003c0,%rsp
-                                                                                                                                                 00 
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:   48 89 bd 90 fc cf  movq   %rdi,0xffffffffffcffc90(%rbp)
-                                                                                                                                                 ff 
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x12:  48 89 b5 98 fc cf  movq   %rsi,0xffffffffffcffc98(%rbp)
-                                                                                                                                                 ff 
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x19:  48 89 bd 00 ff ff  movq   %rdi,0xffffffffffffff00(%rbp)
-
+> <rip::dis
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E:  pushq  %rbp
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+1:movq   %rsp,%rbp
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+4:subq   $0x3002b0,%rsp
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:      movq   %rdi,0xffffffffffcffd98(%rbp)
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x12:     movq   %rsi,0xffffffffffcffda0(%rbp)
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x19:     movq   %rdi,-0xd8(%rbp)
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x20:     movq   %rsi,-0xd0(%rbp)
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0x27:     movb   $0x0,0xffffffffffcffddf(%rbp)
 ...
-
 ```
 
 One thing that jumped out at me here is a bunch of suspicious looking addresses
 that start with many `f`s, similar to the address that caused the segmentation
 fault.  Then I looked more closely at the specific instruction where the
-program died:
+program died (`+0xb`):
 ```
-    _ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:   48 89 bd 90 fc cf  movq   %rdi,0xffffffffffcffc90(%rbp)
+_ZN99_$LT$propolis_server..vnc..rfb..FramebufferUpdate$u20$as$u20$propolis_server..vnc..rfb..Message$GT$8write_to17h31cde3ba3d358797E+0xb:      movq   %rdi,0xffffffffffcffd98(%rbp)
 ```
 
-The first thing to remember is that mdb uses AT&T syntax (thus the order of arguments for the `mov` is `src, dest`). So this
-instruction is saying: get the address out of
-the base pointer (`%rbp`), add `0xffffffffffcffc90` to it, get the value at the
-resulting address and store it in the `%rdi` register.
+The first thing to remember is that mdb uses AT&T syntax (thus the order of
+arguments for the `mov` is `src, dest`). So this instruction is saying: load the
+value in rdi, and store it at the address calculated from the value of the
+base pointer (rbp) plus `0xffffffffffcffd98`.
 
 I took a look at the register state:
 ```
@@ -117,7 +115,8 @@ Then calculated the address as the instruction that caused the fault did:
                 fffffc7fe16fd7b8
 ```
 
-Sure enough, that's the garbage address that caused the SIGSEGV. I took a look at the memory mappings of the program around that address:
+Sure enough, that's the garbage address that caused the SIGSEGV. I took a look
+at the memory mappings of the program around that address:
 
 ```
 > ::mappings
@@ -150,7 +149,10 @@ fffffc7fe46b5000 fffffc7fe46b7000             2000 /lib/amd64/ld.so.1
 
 ...
 
-Not surprisingly, `0xfffffc7fe16fd7b8` is not mapped. It looks like if it were, it would be in a region of anonymous memory, presumably for tokio's stack. At this point, I took a closer look at the assembly again to see where the stack was being setup:
+Not surprisingly, `0xfffffc7fe16fd7b8` is not mapped. It looks like if it were,
+it would be in a region of anonymous memory, presumably for tokio's stack. At
+this point, I took a closer look at the assembly again to see where the stack
+was being setup:
 
 ```
 > <rip::dis                           
@@ -166,7 +168,9 @@ Instruction `+0x4` creates the stack, and it's grabbing quite a bit of memory: `
                 3146416  
 ```
 
-In parallel with looking at the propolis-server core file, I tried to reproduce the SIGSEGV by making a minimal example using this code outside of propolis on my macbook. I didn't see a segfault, but I did see a stack overflow:
+In parallel with looking at the propolis-server core file, I tried to reproduce
+the SIGSEGV by making a minimal example using this code outside of propolis on
+my macbook. I didn't see a segfault, but I did see a stack overflow:
 
 ```
 thread 'tokio-runtime-worker' has overflowed its stack
@@ -174,4 +178,4 @@ fatal runtime error: stack overflow
 zsh: abort      cargo run
 ```
 
-It seemed likely that something was causing tokio to try to allocate a stack bigger than it should. At this point, I went to look to see if something in the code I wrote might be allocating something too big on the stack. And sure enough, I was allocating a pretty large array for some placeholder framebuffer data. Changing the line to use `vec!` or a `Box` fixed both the segfault on illumos and the stack overflow on my mac.
+It seemed likely that something was causing tokio to try to allocate a stack bigger than it should. At this point, I went to look to see if something in the code I wrote might be allocating something too big on the stack. And sure enough, I was allocating a pretty large array for some placeholder framebuffer data (with the intent of cleaning this code up later). Changing the line to use `vec!` or a `Box` fixed both the segfault on illumos and the stack overflow on my mac.
