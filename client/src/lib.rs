@@ -126,6 +126,12 @@ impl Client {
         self.get(path, None).await
     }
 
+    /// Start VNC
+    pub async fn instance_vnc(&self, id: Uuid) -> Result<(), Error> {
+        let path = format!("http://{}/instances/{}/vnc", self.address, id);
+        self.get(path, None).await
+    }
+
     /// Gets instance UUID, by name.
     pub async fn instance_get_uuid(&self, name: &str) -> Result<Uuid, Error> {
         let path = format!("http://{}/instances/{}/uuid", self.address, name);

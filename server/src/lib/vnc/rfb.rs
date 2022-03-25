@@ -267,6 +267,7 @@ pub struct Rectangle {
     width: u16,
     height: u16,
     encoding: Encoding,
+    pixels: Vec<u8>,
 }
 
 impl Message for Rectangle {
@@ -282,13 +283,29 @@ impl Message for Rectangle {
         let e: i32 = self.encoding.into();
         writer.write_all(&e.to_be_bytes());
 
+        writer.write_all(&self.pixels)?;
+
         Ok(())
     }
 }
 
 impl Rectangle {
-    pub fn new(x: u16, y: u16, w: u16, h: u16, e: Encoding) -> Self {
-        Rectangle { x_pos: x, y_pos: y, width: w, height: h, encoding: e }
+    pub fn new(
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        e: Encoding,
+        pixels: Vec<u8>,
+    ) -> Self {
+        Rectangle {
+            x_pos: x,
+            y_pos: y,
+            width: w,
+            height: h,
+            encoding: e,
+            pixels,
+        }
     }
 }
 
@@ -301,31 +318,17 @@ impl Message for FramebufferUpdate {
         unimplemented!()
     }
     fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
-        println!("1");
         writer.write_all(&[ServerMessageType::FramebufferUpdate.into()])?;
 
         // 1 byte of padding
-        println!("2");
         writer.write_all(&[0])?;
 
         let num_rectangles: u16 = self.rectangles.len().try_into().unwrap();
-        println!("3");
         writer.write_all(&num_rectangles.to_be_bytes())?;
 
         for r in &self.rectangles {
-            println!("4");
             r.write_to(writer)?;
         }
-
-        // TODO: not generic
-        const len: usize = 1024 * 768 * 4;
-        //let mut pixels = Box::new([0 as u8; len]);
-        let mut pixels = vec![0u8; len];
-        for i in 0..len {
-            pixels[i] = 0xff;
-        }
-        println!("5");
-        writer.write_all(&pixels)?;
 
         Ok(())
     }

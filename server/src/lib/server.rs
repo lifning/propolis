@@ -93,7 +93,7 @@ pub struct Context {
     pub(crate) migrate_task: Mutex<Option<migrate::MigrateTask>>,
     config: Config,
     log: Logger,
-    vnc_server: Mutex<VncServer>,
+    vnc_server: Arc<Mutex<VncServer>>,
 }
 
 impl Context {
@@ -104,7 +104,7 @@ impl Context {
             migrate_task: Mutex::new(None),
             config,
             log,
-            vnc_server: Mutex::new(vnc_server),
+            vnc_server: Arc::new(Mutex::new(vnc_server)),
         }
     }
 }
@@ -271,7 +271,8 @@ async fn instance_ensure(
     }));
 
     let mut com1 = None;
-    let mut framebuffer = None;
+    let mut ramfb: Option<Arc<propolis::hw::qemu::ramfb::RamFb>> = None;
+    let mut rt_handle = None;
 
     // Initialize (some) of the instance's hardware.
     //
@@ -468,7 +469,9 @@ async fn instance_ensure(
                 }
             }
 
-            framebuffer = Some(init.initialize_fwcfg(properties.vcpus)?);
+            let ramfb_id = init.initialize_fwcfg(properties.vcpus)?;
+            ramfb = inv.get_concrete(ramfb_id);
+            rt_handle = disp.handle();
             init.initialize_cpus()?;
             Ok(())
         })
@@ -479,8 +482,20 @@ async fn instance_ensure(
             ))
         })?;
 
+    let vnc_hdl = Arc::clone(&server_context.vnc_server);
+    let (addr, w, h) = ramfb.as_ref().unwrap().get_fb_info();
+    let fb = crate::vnc::server::RamFb::new(addr, w as usize, h as usize);
     let mut vnc = server_context.vnc_server.lock().await;
-    vnc.initialize_fb(framebuffer.unwrap());
+    vnc.initialize_fb(fb).await;
+    let rt = rt_handle.unwrap().clone();
+    let hdl = Arc::clone(&vnc_hdl);
+    ramfb.unwrap().set_notifier(Box::new(move |config, is_valid| {
+        let h = Arc::clone(&hdl);
+        rt.block_on(async move {
+            let mut vnc = h.lock().await;
+            vnc.update(config, is_valid).await;
+        });
+    }));
     drop(vnc);
 
     // Save the newly created instance in the server's context.
@@ -764,6 +779,33 @@ async fn instance_serial_task(
 
 #[endpoint {
     method = GET,
+    path = "/instances/{instance_id}/vnc",
+}]
+async fn instance_vnc(
+    rqctx: Arc<RequestContext<Context>>,
+    path_params: Path<api::InstancePathParams>,
+) -> Result<HttpResponseOk<()>, HttpError> {
+    let mut context = rqctx.context().context.lock().await;
+    let context = context.as_mut().ok_or_else(|| {
+        HttpError::for_internal_error(
+            "Server not initialized (no instance)".to_string(),
+        )
+    })?;
+    if path_params.into_inner().instance_id != context.properties.id {
+        return Err(HttpError::for_internal_error(
+            "UUID mismatch (path did not match struct)".to_string(),
+        ));
+    }
+
+    let actx = context.instance.async_ctx();
+    let vnc_server = rqctx.context().vnc_server.lock().await;
+    vnc_server.set_async_ctx(actx).await;
+
+    Ok(HttpResponseOk(()))
+}
+
+#[endpoint {
+    method = GET,
     path = "/instances/{instance_id}/serial",
 }]
 async fn instance_serial(
@@ -988,5 +1030,6 @@ pub fn api() -> ApiDescription<Context> {
     api.register(instance_serial_detach).unwrap();
     api.register(instance_migrate_start).unwrap();
     api.register(instance_migrate_status).unwrap();
+    api.register(instance_vnc).unwrap();
     api
 }

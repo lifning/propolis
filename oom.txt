@@ -1,0 +1,62 @@
+
+NAME
+  memstat - display memory usage summary
+
+SYNOPSIS
+  ::memstat 
+
+ATTRIBUTES
+
+  Target: kvm
+  Module: genunix
+  Interface Stability: Unstable
+
+> ::memstat
+Page Summary                Pages                MB  %Tot
+------------     ----------------  ----------------  ----
+Kernel                     705192              2754    8%
+Boot pages                    125                 0    0%
+ZFS File Data              740383              2892    9%
+VMM Memory                6566400             25650   79%
+Anon                       159480               622    2%
+Exec and libs                6159                24    0%
+Page cache                   3443                13    0%
+Free (cachelist)            49163               192    1%
+Free (freelist)            129104               504    2%
+
+Total                     8359449             32654
+Physical                  8359448             32654
+> 
+> 
+
+
+
+jordan@rodman:~/propolis$ bunyan propolis-log.json 
+[2022-03-25T04:54:27.924615301Z]  INFO: propolis-server/vnc-server/15001 on rodman: vnc-server: starting...
+[2022-03-25T04:54:27.924892547Z]  INFO: propolis-server/15001 on rodman: Starting server...
+[2022-03-25T04:54:30.753539221Z]  INFO: propolis-server/15001 on rodman: accepted connection (local_addr=127.0.0.1:8000, remote_addr=127.0.0.1:37684)
+[2022-03-25T04:54:30.914016842Z]  INFO: propolis-server/15001 on rodman: request completed (req_id=5906842c-3e02-45d2-8600-0fb9680746d2, uri=/instances/2571fa9e-3c1e-4625-97b0-1ea09c8737a5, method=PUT, remote_addr=127.0.0.1:37684, local_addr=127.0.0.1:8000, error_message_external="Internal Server Error", response_code=500)
+    error_message_internal: Cannot build instance: Not enough space (os error 12)
+
+
+
+jordan@rodman:~/propolis$ df -h
+Filesystem             Size   Used  Available Capacity  Mounted on
+rpool/ROOT/helios      899G  1.73G    885.11G     1%    /
+/devices                  0      0          0     0%    /devices
+/dev                      0      0          0     0%    /dev
+ctfs                      0      0          0     0%    /system/contract
+proc                      0      0          0     0%    /proc
+mnttab                    0      0          0     0%    /etc/mnttab
+swap                  6.66G   308K      6.66G     1%    /etc/svc/volatile
+objfs                     0      0          0     0%    /system/object
+bootfs                    0      0          0     0%    /system/boot
+sharefs                   0      0          0     0%    /etc/dfs/sharetab
+/usr/lib/libc/libc_hwcap2.so.1
+                     886.84G  1.73G    885.11G     1%    /lib/libc.so.1
+fd                        0      0          0     0%    /dev/fd
+swap                  6.66G    32K      6.66G     1%    /tmp
+swap                  6.66G    40K      6.66G     1%    /var/run
+rpool                  899G    24K    885.11G     1%    /rpool
+rpool/home             899G    24K    885.11G     1%    /home
+rpool/home/jordan      899G  3.75G    885.11G     1%    /home/jordan

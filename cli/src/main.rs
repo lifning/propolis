@@ -78,6 +78,12 @@ enum Command {
         name: String,
     },
 
+    /// Expose VM over vnc
+    Vnc {
+        /// Instance name
+        name: String,
+    },
+
     /// Transition the instance to a new state
     State {
         /// Instance name
@@ -189,6 +195,24 @@ async fn new_instance(
         .instance_ensure(&request)
         .await
         .with_context(|| anyhow!("failed to create instance"))?;
+
+    Ok(())
+}
+
+async fn get_vnc(client: &Client, name: String) -> anyhow::Result<()> {
+    // Grab the Instance UUID
+    let id = client
+        .instance_get_uuid(&name)
+        .await
+        .with_context(|| anyhow!("failed to get instance UUID"))?;
+
+    // Get the rest of the Instance properties
+    let _ = client
+        .instance_vnc(id)
+        .await
+        .with_context(|| anyhow!("failed to get instance properties"))?;
+
+    println!("starting vnc for vm={}", id);
 
     Ok(())
 }
@@ -472,6 +496,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         }
+        Command::Vnc { name } => get_vnc(&client, name).await?,
         Command::Get { name } => get_instance(&client, name).await?,
         Command::State { name, state } => {
             put_instance(&client, name, state).await?
