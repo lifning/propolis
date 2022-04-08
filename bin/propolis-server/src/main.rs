@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use propolis_server::server::MetricsEndpointConfig;
 use propolis_server::vnc::setup_vnc;
-use propolis_server::{config, server};
+use propolis_server::{config, server, mock_server};
 
 #[derive(Debug, Parser)]
 #[clap(about, version)]
@@ -41,6 +41,10 @@ enum Args {
             action
         )]
         vnc_addr: SocketAddr,
+
+        /// If true, run a mock server which does not actually spawn instances
+        #[structopt(short, long)]
+        mock: bool,
     },
 }
 
@@ -67,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     match args {
         Args::OpenApi => run_openapi()
             .map_err(|e| anyhow!("Cannot generate OpenAPI spec: {}", e)),
-        Args::Run { cfg, propolis_addr, metric_addr, vnc_addr } => {
+        Args::Run { cfg, propolis_addr, metric_addr, vnc_addr, mock } => {
             let config = config::parse(&cfg)?;
 
             // Dropshot configuration.
@@ -93,28 +97,47 @@ async fn main() -> anyhow::Result<()> {
                 imc
             });
 
-            let context = server::DropshotEndpointContext::new(
-                config,
-                vnc_server,
-                use_reservoir,
-                log.new(slog::o!()),
-                metric_config,
-            );
+            if mock {
+                let context =
+                    mock_server::MockContext::new(config, log.new(slog::o!()));
+                info!(log, "Starting mock server...");
+                let server = HttpServerStarter::new(
+                    &config_dropshot,
+                    mock_server::api(),
+                    context,
+                    &log,
+                )
+                .map_err(|error| {
+                    anyhow!("Failed to start mock server: {}", error)
+                })?
+                .start();
+                server.await.map_err(|e| {
+                    anyhow!("Mock server exited with an error: {}", e)
+                })
+            } else {
+                let context = server::DropshotEndpointContext::new(
+                    config,
+                    vnc_server,
+                    use_reservoir,
+                    log.new(slog::o!()),
+                    metric_config,
+                );
 
-            info!(log, "Starting server...");
+                info!(log, "Starting server...");
 
-            let server = HttpServerStarter::new(
-                &config_dropshot,
-                server::api(),
-                context,
-                &log,
-            )
-            .map_err(|error| anyhow!("Failed to start server: {}", error))?
-            .start();
+                let server = HttpServerStarter::new(
+                    &config_dropshot,
+                    server::api(),
+                    context,
+                    &log,
+                )
+                .map_err(|error| anyhow!("Failed to start server: {}", error))?
+                .start();
 
-            let server_res = join!(server, vnc_server_hdl.start()).0;
-            server_res
-                .map_err(|e| anyhow!("Server exited with an error: {}", e))
+                let server_res = join!(server, vnc_server_hdl.start()).0;
+                server_res
+                    .map_err(|e| anyhow!("Server exited with an error: {}", e))
+            }
         }
     }
 }
