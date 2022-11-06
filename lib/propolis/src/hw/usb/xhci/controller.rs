@@ -80,35 +80,47 @@ impl PciXhci {
             Reserved => ro.fill(0),
 
             // Capability registers
-
             Cap(CapabilityLength) => {
                 // TODO: write offset to operational registers
                 // should be cap registers + any space for extended capabilities
                 ro.write_u8(0);
             }
             Cap(HciVersion) => {
-                todo!("hci version");
+                // xHCI Version 1.2.0
+                ro.write_u16(0x0120);
             }
-            Cap(HcsParameters1) => {
-                todo!("hcs params 1");
+            Cap(HcStructuralParameters1) => {
+                // TODO: set values
+                let hcs_params1 = bits::HcStructuralParameters1(0);
+                ro.write_u32(hcs_params1.0);
             }
-            Cap(HcsParameters2) => {
-                todo!("hcs params 2");
+            Cap(HcStructuralParameters2) => {
+                // TODO: set values
+                let hcs_params2 = bits::HcStructuralParameters2(0);
+                ro.write_u32(hcs_params2.0);
             }
-            Cap(HcsParameters3) => {
-                todo!("hcs params 3");
+            Cap(HcStructuralParameters3) => {
+                // TODO: set values
+                let hcs_params3 = bits::HcStructuralParameters3(0);
+                ro.write_u32(hcs_params3.0);
             }
-            Cap(HccParameters1) => {
-                todo!("hcc params 1");
+            Cap(HcCapabilityParameters1) => {
+                // TODO: set values
+                let hcc_params1 = bits::HcCapabilityParameters1(0);
+                ro.write_u32(hcc_params1.0);
             }
-            Cap(HccParameters2) => {
-                todo!("hcc params 2");
+            Cap(HcCapabilityParameters2) => {
+                // TODO: set values
+                let hcc_params2 = bits::HcCapabilityParameters2(0);
+                ro.write_u32(hcc_params2.0);
             }
             Cap(DoorbellOffset) => {
-                todo!("doorbell offset");
+                // TODO: write valid doorbell offset
+                ro.write_u32(0);
             }
             Cap(RuntimeRegisterSpaceOffset) => {
-                todo!("runtime offset");
+                // TODO: write valid runtime register space offset
+                ro.write_u32(0);
             }
         }
     }

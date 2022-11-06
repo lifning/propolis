@@ -60,11 +60,11 @@ pub enum Registers {
 pub enum CapabilityRegisters {
     CapabilityLength,
     HciVersion,
-    HcsParameters1,
-    HcsParameters2,
-    HcsParameters3,
-    HccParameters1,
-    HccParameters2,
+    HcStructuralParameters1,
+    HcStructuralParameters2,
+    HcStructuralParameters3,
+    HcCapabilityParameters1,
+    HcCapabilityParameters2,
     DoorbellOffset,
     RuntimeRegisterSpaceOffset,
 }
@@ -122,13 +122,13 @@ lazy_static! {
             (Cap(CapabilityLength), 1),
             (Reserved, 1),
             (Cap(HciVersion), 2),
-            (Cap(HcsParameters1), 4),
-            (Cap(HcsParameters2), 4),
-            (Cap(HcsParameters3), 4),
-            (Cap(HccParameters1), 4),
+            (Cap(HcStructuralParameters1), 4),
+            (Cap(HcStructuralParameters2), 4),
+            (Cap(HcStructuralParameters3), 4),
+            (Cap(HcCapabilityParameters1), 4),
             (Cap(DoorbellOffset), 4),
             (Cap(RuntimeRegisterSpaceOffset), 4),
-            (Cap(HccParameters2), 4),
+            (Cap(HcCapabilityParameters2), 4),
         ];
 
         RegMap::create_packed(
