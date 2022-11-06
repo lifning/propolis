@@ -10,6 +10,18 @@ use crate::inventory::Entity;
 use super::bits;
 use super::registers::*;
 
+/// The number of USB2 ports the controller supports.
+const NUM_USB2_PORTS: u8 = 4;
+
+/// The number of USB3 ports the controller supports.
+const NUM_USB3_PORTS: u8 = 4;
+
+/// Max number of device slots the controller supports.
+const MAX_DEVICE_SLOTS: u8 = 64;
+
+/// Max number of interrupters the controller supports.
+const NUM_INTRS: u16 = 1024;
+
 /// An emulated USB Host Controller attached over PCI
 pub struct PciXhci {
     /// PCI device state
@@ -32,6 +44,8 @@ impl PciXhci {
 
         let pci_state = pci_builder
             // .add_bar_mmio64(pci::BarN::BAR0, 0x2000)
+            // Place MSI-X in BAR4
+            .add_cap_msix(pci::BarN::BAR4, NUM_INTRS)
             .add_custom_cfg(bits::USB_PCI_CFG_OFFSET, bits::USB_PCI_CFG_REG_SZ)
             .finish();
 
@@ -90,27 +104,31 @@ impl PciXhci {
                 ro.write_u16(0x0120);
             }
             Cap(HcStructuralParameters1) => {
-                // TODO: set values
-                let hcs_params1 = bits::HcStructuralParameters1(0);
+                let hcs_params1 = bits::HcStructuralParameters1(0)
+                    .with_max_slots(MAX_DEVICE_SLOTS)
+                    .with_max_intrs(NUM_INTRS)
+                    .with_max_ports(NUM_USB2_PORTS + NUM_USB3_PORTS);
                 ro.write_u32(hcs_params1.0);
             }
             Cap(HcStructuralParameters2) => {
-                // TODO: set values
-                let hcs_params2 = bits::HcStructuralParameters2(0);
+                let hcs_params2 = bits::HcStructuralParameters2(0)
+                    .with_ist_as_frame(true)
+                    .with_iso_sched_threshold(0b111);
                 ro.write_u32(hcs_params2.0);
             }
             Cap(HcStructuralParameters3) => {
-                // TODO: set values
                 let hcs_params3 = bits::HcStructuralParameters3(0);
                 ro.write_u32(hcs_params3.0);
             }
             Cap(HcCapabilityParameters1) => {
-                // TODO: set values
-                let hcc_params1 = bits::HcCapabilityParameters1(0);
+                let hcc_params1 =
+                    bits::HcCapabilityParameters1(0).with_ac64(true).with_xecp(
+                        /* TODO: set valid extended capabilities offset */
+                        0,
+                    );
                 ro.write_u32(hcc_params1.0);
             }
             Cap(HcCapabilityParameters2) => {
-                // TODO: set values
                 let hcc_params2 = bits::HcCapabilityParameters2(0);
                 ro.write_u32(hcc_params2.0);
             }
