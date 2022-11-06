@@ -5,6 +5,7 @@
 use crate::util::regmap::RegMap;
 
 use super::bits;
+use super::controller::{NUM_USB2_PORTS, NUM_USB3_PORTS};
 
 use lazy_static::lazy_static;
 
@@ -50,7 +51,7 @@ lazy_static! {
 pub enum Registers {
     Reserved,
     Cap(CapabilityRegisters),
-    // Op(OperationalRegisters),
+    Op(OperationalRegisters),
 }
 
 /// eXtensible Host Controller Capability Registers
@@ -113,12 +114,21 @@ pub enum RuntimeRegisters {
     Interrupter(u16, InterrupterRegisters),
 }
 
+pub struct XhcRegMap {
+    pub map: RegMap<Registers>,
+    pub cap_len: usize,
+    pub op_len: usize,
+}
+
 lazy_static! {
-    pub static ref XHC_REGS: RegMap<Registers> = {
+    pub static ref XHC_REGS: XhcRegMap = {
         use CapabilityRegisters::*;
+        use OperationalRegisters::*;
         use Registers::*;
 
-        let layout = [
+        // TODO: replace with into_iter() method call when migrated to 2021 edition
+
+        let cap_layout = IntoIterator::into_iter([
             (Cap(CapabilityLength), 1),
             (Reserved, 1),
             (Cap(HciVersion), 2),
@@ -129,12 +139,45 @@ lazy_static! {
             (Cap(DoorbellOffset), 4),
             (Cap(RuntimeRegisterSpaceOffset), 4),
             (Cap(HcCapabilityParameters2), 4),
-        ];
+        ]);
 
-        RegMap::create_packed(
-            bits::XHC_CAP_BASE_REG_SZ,
-            &layout,
-            Some(Reserved),
-        )
+        let op_layout = IntoIterator::into_iter([
+            (Op(UsbCommand), 4),
+            (Op(UsbStatus), 4),
+            (Op(PageSize), 4),
+            (Reserved, 8),
+            (Op(DeviceNotificationControl), 4),
+            (Op(CommandRingControlRegister), 8),
+            (Reserved, 16),
+            (Op(DeviceContextBaseAddressArrayPointerRegister), 8),
+            (Op(Configure), 4),
+            (Reserved, 964),
+        ]);
+        // Add the port registers
+        let num_ports = NUM_USB2_PORTS + NUM_USB3_PORTS;
+        let op_layout = op_layout.chain((0..num_ports).flat_map(|i| {
+            use PortRegisters::*;
+            [
+                (Op(OperationalRegisters::Port(i, PortStatusControl)), 4),
+                (Op(OperationalRegisters::Port(i, PortPowerManagementStatusControl)), 4),
+                (Op(OperationalRegisters::Port(i, PortLinkInfo)), 4),
+                (Op(OperationalRegisters::Port(i, PortHardwareLpmControl)), 4),
+            ]
+        }));
+
+        // Stash the lengths for later use.
+        let cap_len = cap_layout.clone().map(|(_, sz)| sz).sum();
+        let op_len = op_layout.clone().map(|(_, sz)| sz).sum();
+
+        let layout = cap_layout.chain(op_layout);
+        XhcRegMap {
+            map: RegMap::create_packed_iter(
+                bits::XHC_CAP_BASE_REG_SZ,
+                layout,
+                Some(Reserved),
+            ),
+            cap_len,
+            op_len,
+        }
     };
 }

@@ -11,10 +11,10 @@ use super::bits;
 use super::registers::*;
 
 /// The number of USB2 ports the controller supports.
-const NUM_USB2_PORTS: u8 = 4;
+pub(super) const NUM_USB2_PORTS: u8 = 4;
 
 /// The number of USB3 ports the controller supports.
-const NUM_USB3_PORTS: u8 = 4;
+pub(super) const NUM_USB3_PORTS: u8 = 4;
 
 /// Max number of device slots the controller supports.
 const MAX_DEVICE_SLOTS: u8 = 64;
@@ -140,6 +140,11 @@ impl PciXhci {
                 // TODO: write valid runtime register space offset
                 ro.write_u32(0);
             }
+
+            // Operational registers
+            Op(_) => {
+                todo!("xhci: read from operational register");
+            }
         }
     }
 
@@ -153,6 +158,11 @@ impl PciXhci {
 
             // Capability registers are all read-only; ignore any writes
             Cap(_) => {}
+
+            // Operational registers
+            Op(_) => {
+                todo!("xhci: write to operational register");
+            }
         }
     }
 }
@@ -187,12 +197,11 @@ impl pci::Device for PciXhci {
     fn bar_rw(&self, bar: pci::BarN, mut rwo: RWOp) {
         assert_eq!(bar, pci::BarN::BAR0);
 
-        XHC_REGS.process(
-            &mut rwo,
-            |id: &Registers, rwo: RWOp<'_, '_>| match rwo {
+        XHC_REGS.map.process(&mut rwo, |id: &Registers, rwo: RWOp<'_, '_>| {
+            match rwo {
                 RWOp::Read(ro) => self.reg_read(*id, ro),
                 RWOp::Write(wo) => self.reg_write(*id, wo),
-            },
-        )
+            }
+        })
     }
 }
