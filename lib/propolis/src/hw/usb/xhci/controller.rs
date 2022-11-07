@@ -1,6 +1,6 @@
 //! Emulated USB Host Controller
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::common::{RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
@@ -22,10 +22,19 @@ const MAX_DEVICE_SLOTS: u8 = 64;
 /// Max number of interrupters the controller supports.
 const NUM_INTRS: u16 = 1024;
 
+
+struct XhciState {
+    /// USB Command Register
+    usb_cmd: bits::UsbCommand,
+}
+
 /// An emulated USB Host Controller attached over PCI
 pub struct PciXhci {
     /// PCI device state
     pci_state: pci::DeviceState,
+
+    /// Controller state
+    state: Mutex<XhciState>,
 }
 
 impl PciXhci {
@@ -49,7 +58,11 @@ impl PciXhci {
             .add_custom_cfg(bits::USB_PCI_CFG_OFFSET, bits::USB_PCI_CFG_REG_SZ)
             .finish();
 
-        Arc::new(Self { pci_state })
+        let state = Mutex::new(XhciState {
+            usb_cmd: bits::UsbCommand(0),
+        });
+
+        Arc::new(Self { pci_state, state })
     }
 
     /// Handle read of register in USB-specific PCI configuration space
@@ -88,6 +101,7 @@ impl PciXhci {
     /// Handle read of memory-mapped host controller register
     fn reg_read(&self, id: Registers, ro: &mut ReadOp) {
         use CapabilityRegisters::*;
+        use OperationalRegisters::*;
         use Registers::*;
 
         match id {
@@ -142,8 +156,30 @@ impl PciXhci {
             }
 
             // Operational registers
-            Op(_) => {
-                todo!("xhci: read from operational register");
+            Op(UsbCommand) => {
+                let state = self.state.lock().unwrap();
+                ro.write_u32(state.usb_cmd.0);
+            }
+            Op(UsbStatus) => {
+
+            }
+            Op(PageSize) => {
+
+            }
+            Op(DeviceNotificationControl) => {
+
+            }
+            Op(CommandRingControlRegister) => {
+
+            }
+            Op(DeviceContextBaseAddressArrayPointerRegister) => {
+
+            }
+            Op(Configure) => {
+
+            }
+            Op(Port(..)) => {
+
             }
         }
     }
