@@ -1,63 +1,57 @@
 //! Implementation of a mock Propolis server
 
+use dropshot::channel;
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::HttpError;
 use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
 use dropshot::HttpResponseUpdatedNoContent;
-use dropshot::Path;
 use dropshot::RequestContext;
 use dropshot::TypedBody;
-use futures::future::Fuse;
-use futures::{FutureExt, SinkExt, StreamExt};
-use hyper::upgrade::{self, Upgraded};
-use hyper::{header, Body, Response, StatusCode};
-use slog::{error, info, o, Logger};
-use std::borrow::Cow;
-use std::io::{Error, ErrorKind};
-use std::ops::Range;
+use dropshot::WebsocketConnection;
+use futures::SinkExt;
+use slog::{error, info, Logger};
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{oneshot, watch, Mutex};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
-use tokio_tungstenite::tungstenite::{
-    self, handshake, protocol::Role, Message,
-};
+use tokio::sync::{watch, Mutex};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{protocol::Role, Message};
 use tokio_tungstenite::WebSocketStream;
-use uuid::Uuid;
 
-use propolis::bhyve_api;
-use propolis::hw::pci;
-use propolis::hw::uart::LpcUart;
-use propolis::instance::Instance;
+#[derive(Debug, Eq, PartialEq, Error)]
+pub enum Error {
+    #[error("Failed to send simulated state change update through channel")]
+    TransitionSendFail,
+    #[error("Cannot request any new mock instance state once it is stopped/destroyed/failed")]
+    TerminalState,
+}
+
 use propolis_client::handmade::api;
 
 use crate::config::Config;
-use crate::initializer::{build_instance, MachineInitializer};
-use crate::migrate;
-use crate::serial::Serial;
+use crate::spec::{SlotType, slot_to_pci_path};
 
 /// ed instance properties
 pub struct InstanceContext {
-    pub state: propolis::instance::State,
+    pub state: api::InstanceState,
     pub generation: u64,
     pub properties: api::InstanceProperties,
-    state_watcher_rx: watch::Receiver<StateChange>,
-    state_watcher_tx: watch::Sender<StateChange>,
+    state_watcher_rx: watch::Receiver<api::InstanceStateMonitorResponse>,
+    state_watcher_tx: watch::Sender<api::InstanceStateMonitorResponse>,
 }
 
 impl InstanceContext {
     pub fn new(properties: api::InstanceProperties) -> Self {
         let (state_watcher_tx, state_watcher_rx) =
-            watch::channel(StateChange {
+            watch::channel(api::InstanceStateMonitorResponse {
                 gen: 0,
-                state: propolis::instance::State::Initialize,
+                state: api::InstanceState::Creating,
             });
         Self {
-            state: propolis::instance::State::Initialize,
+            state: api::InstanceState::Creating,
             generation: 0,
             properties,
             state_watcher_rx,
@@ -70,40 +64,36 @@ impl InstanceContext {
     /// Returns an error if the state transition is invalid.
     pub fn set_target_state(
         &mut self,
-        target: propolis::instance::ReqState,
-    ) -> Result<(), propolis::instance::TransitionError> {
-        use propolis::instance::ReqState;
-        use propolis::instance::State;
-        use propolis::instance::TransitionError;
-
-        if matches!(self.state, State::Halt | State::Destroy) {
-            // Cannot request any state once the target is halt/destroy
-            return Err(TransitionError::Terminal);
-        }
-        if self.state == State::Reset && target == ReqState::Run {
-            // Requesting a run when already on the road to reboot is an
-            // immediate success.
-            return Ok(());
-        }
-        match target {
-            ReqState::Run | ReqState::Reset => {
-                self.generation += 1;
-                self.state = State::Run;
-                let result = self.state_watcher_tx.send(StateChange {
-                    gen: self.generation,
-                    state: self.state,
-                });
-                assert!(
-                    result.is_ok(),
-                    "Failed to send simulated state change update"
-                );
+        target: api::InstanceStateRequested,
+    ) -> Result<(), Error> {
+        match self.state {
+            api::InstanceState::Stopped | api::InstanceState::Destroyed | api::InstanceState::Failed => {
+                // Cannot request any state once the target is halt/destroy
+                Err(Error::TerminalState)
             }
-            ReqState::Halt => self.state = State::Halt,
-            ReqState::StartMigrate => {
-                unimplemented!("migration not yet implemented")
+            api::InstanceState::Rebooting if matches!(target, api::InstanceStateRequested::Run) => {
+                // Requesting a run when already on the road to reboot is an
+                // immediate success.
+                Ok(())
+            }
+            _ => match target {
+                api::InstanceStateRequested::Run | api::InstanceStateRequested::Reboot => {
+                    self.generation += 1;
+                    self.state = api::InstanceState::Running;
+                    self.state_watcher_tx.send(api::InstanceStateMonitorResponse {
+                        gen: self.generation,
+                        state: self.state.clone(),
+                    }).map_err(|_| Error::TransitionSendFail)
+                }
+                api::InstanceStateRequested::Stop => {
+                    self.state = api::InstanceState::Stopped;
+                    Ok(())
+                }
+                api::InstanceStateRequested::MigrateStart => {
+                    unimplemented!("migration not yet implemented")
+                }
             }
         }
-        Ok(())
     }
 }
 
@@ -122,37 +112,24 @@ impl Context {
 
 #[endpoint {
     method = PUT,
-    path = "/instances/{instance_id}",
+    path = "/instance",
 }]
 async fn instance_ensure(
     rqctx: Arc<RequestContext<Context>>,
-    path_params: Path<api::InstancePathParams>,
     request: TypedBody<api::InstanceEnsureRequest>,
 ) -> Result<HttpResponseCreated<api::InstanceEnsureResponse>, HttpError> {
     let server_context = rqctx.context();
     let request = request.into_inner();
-    let instance_id = path_params.into_inner().instance_id;
     let (properties, nics, disks, cloud_init_bytes) = (
         request.properties,
         request.nics,
         request.disks,
         request.cloud_init_bytes,
     );
-    if instance_id != properties.id {
-        return Err(HttpError::for_internal_error(
-            "UUID mismatch (path did not match struct)".to_string(),
-        ));
-    }
 
     // Handle an already-initialized instance
     let mut instance = server_context.instance.lock().await;
     if let Some(instance) = &*instance {
-        if instance.properties.id != instance_id {
-            return Err(HttpError::for_internal_error(format!(
-                "Server already initialized with ID {}",
-                instance.properties.id
-            )));
-        }
         if instance.properties != properties {
             return Err(HttpError::for_internal_error(
                 "Cannot update running server".to_string(),
@@ -166,8 +143,8 @@ async fn instance_ensure(
     // Perform some basic validation of the requested properties
     for nic in &nics {
         info!(server_context.log, "Creating NIC: {:#?}", nic);
-        slot_to_bdf(nic.slot, SlotType::NIC).map_err(|e| {
-            let err = Error::new(
+        slot_to_pci_path(nic.slot, SlotType::Nic).map_err(|e| {
+            let err = IoError::new(
                 ErrorKind::InvalidData,
                 format!("Cannot parse vnic PCI: {}", e),
             );
@@ -180,8 +157,8 @@ async fn instance_ensure(
 
     for disk in &disks {
         info!(server_context.log, "Creating Disk: {:#?}", disk);
-        slot_to_bdf(disk.slot, SlotType::Disk).map_err(|e| {
-            let err = Error::new(
+        slot_to_pci_path(disk.slot, SlotType::Disk).map_err(|e| {
+            let err = IoError::new(
                 ErrorKind::InvalidData,
                 format!("Cannot parse disk PCI: {}", e),
             );
@@ -195,15 +172,15 @@ async fn instance_ensure(
 
     if let Some(cloud_init_bytes) = &cloud_init_bytes {
         info!(server_context.log, "Creating cloud-init disk");
-        slot_to_bdf(api::Slot(0), SlotType::CloudInit).map_err(|e| {
-            let err = Error::new(ErrorKind::InvalidData, e.to_string());
+        slot_to_pci_path(api::Slot(0), SlotType::CloudInit).map_err(|e| {
+            let err = IoError::new(ErrorKind::InvalidData, e.to_string());
             HttpError::for_internal_error(format!(
                 "Cannot build instance: {}",
                 err
             ))
         })?;
         base64::decode(&cloud_init_bytes).map_err(|e| {
-            let err = Error::new(ErrorKind::InvalidInput, e.to_string());
+            let err = IoError::new(ErrorKind::InvalidInput, e.to_string());
             HttpError::for_internal_error(format!(
                 "Cannot build instance: {}",
                 err
@@ -218,34 +195,10 @@ async fn instance_ensure(
 
 #[endpoint {
     method = GET,
-    path = "/instances/{instance_id}/uuid",
-    unpublished = true,
-}]
-async fn instance_get_uuid(
-    rqctx: Arc<RequestContext<Context>>,
-    path_params: Path<api::InstanceNameParams>,
-) -> Result<HttpResponseOk<Uuid>, HttpError> {
-    let instance = rqctx.context().instance.lock().await;
-    let instance = instance.as_ref().ok_or_else(|| {
-        HttpError::for_internal_error(
-            "Server not initialized (no instance)".to_string(),
-        )
-    })?;
-    if path_params.into_inner().instance_id != instance.properties.name {
-        return Err(HttpError::for_internal_error(
-            "Instance name mismatch (path did not match struct)".to_string(),
-        ));
-    }
-    Ok(HttpResponseOk(instance.properties.id))
-}
-
-#[endpoint {
-    method = GET,
-    path = "/instances/{instance_id}",
+    path = "/instance",
 }]
 async fn instance_get(
     rqctx: Arc<RequestContext<Context>>,
-    path_params: Path<api::InstancePathParams>,
 ) -> Result<HttpResponseOk<api::InstanceGetResponse>, HttpError> {
     let instance = rqctx.context().instance.lock().await;
     let instance = instance.as_ref().ok_or_else(|| {
@@ -253,14 +206,9 @@ async fn instance_get(
             "Server not initialized (no instance)".to_string(),
         )
     })?;
-    if path_params.into_inner().instance_id != instance.properties.id {
-        return Err(HttpError::for_internal_error(
-            "UUID mismatch (path did not match struct)".to_string(),
-        ));
-    }
     let instance_info = api::Instance {
         properties: instance.properties.clone(),
-        state: propolis_to_api_state(instance.state),
+        state: instance.state.clone(),
         disks: vec![],
         nics: vec![],
     };
@@ -269,11 +217,10 @@ async fn instance_get(
 
 #[endpoint {
     method = GET,
-    path = "/instances/{instance_id}/state-monitor",
+    path = "/instance/state-monitor",
 }]
 async fn instance_state_monitor(
     rqctx: Arc<RequestContext<Context>>,
-    path_params: Path<api::InstancePathParams>,
     request: TypedBody<api::InstanceStateMonitorRequest>,
 ) -> Result<HttpResponseOk<api::InstanceStateMonitorResponse>, HttpError> {
     let (mut state_watcher, gen) = {
@@ -283,12 +230,6 @@ async fn instance_state_monitor(
                 "Server not initialized (no instance)".to_string(),
             )
         })?;
-        let path_params = path_params.into_inner();
-        if path_params.instance_id != instance.properties.id {
-            return Err(HttpError::for_internal_error(
-                "UUID mismatch (path did not match struct)".to_string(),
-            ));
-        }
         let gen = request.into_inner().gen;
         let state_watcher = instance.state_watcher_rx.clone();
         (state_watcher, gen)
@@ -299,7 +240,7 @@ async fn instance_state_monitor(
         if gen <= last.gen {
             let response = api::InstanceStateMonitorResponse {
                 gen: last.gen,
-                state: propolis_to_api_state(last.state),
+                state: last.state,
             };
             return Ok(HttpResponseOk(response));
         }
@@ -309,11 +250,10 @@ async fn instance_state_monitor(
 
 #[endpoint {
     method = PUT,
-    path = "/instances/{instance_id}/state",
+    path = "/instance/state",
 }]
 async fn instance_state_put(
     rqctx: Arc<RequestContext<Context>>,
-    path_params: Path<api::InstancePathParams>,
     request: TypedBody<api::InstanceStateRequested>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let mut instance = rqctx.context().instance.lock().await;
@@ -322,16 +262,35 @@ async fn instance_state_put(
             "Server not initialized (no instance)".to_string(),
         )
     })?;
-    if path_params.into_inner().instance_id != instance.properties.id {
-        return Err(HttpError::for_internal_error(
-            "UUID mismatch (path did not match struct)".to_string(),
-        ));
-    }
-    let requested_state = api_to_propolis_state(request.into_inner());
+    let requested_state = request.into_inner();
     instance.set_target_state(requested_state).map_err(|err| {
         HttpError::for_internal_error(format!("Failed to transition: {}", err))
     })?;
     Ok(HttpResponseUpdatedNoContent {})
+}
+
+#[channel {
+    protocol = WEBSOCKETS,
+    path = "/instance/serial",
+}]
+async fn instance_serial(
+    _rqctx: Arc<RequestContext<Context>>,
+    websock: WebsocketConnection,
+) -> dropshot::WebsocketChannelResult {
+    let config =
+        WebSocketConfig { max_send_queue: Some(4096), ..Default::default() };
+    let mut ws_stream = WebSocketStream::from_raw_socket(
+        websock.into_inner(),
+        Role::Server,
+        Some(config),
+    )
+        .await;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+        ws_stream.send(Message::binary("asdf\n")).await?;
+    }
 }
 
 /// Returns a Dropshot [`ApiDescription`] object to launch a mock Propolis
@@ -339,9 +298,9 @@ async fn instance_state_put(
 pub fn api() -> ApiDescription<Context> {
     let mut api = ApiDescription::new();
     api.register(instance_ensure).unwrap();
-    api.register(instance_get_uuid).unwrap();
     api.register(instance_get).unwrap();
     api.register(instance_state_monitor).unwrap();
     api.register(instance_state_put).unwrap();
+    api.register(instance_serial).unwrap();
     api
 }

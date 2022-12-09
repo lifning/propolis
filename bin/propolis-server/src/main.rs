@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
             if mock {
                 let context =
-                    mock_server::MockContext::new(config, log.new(slog::o!()));
+                    mock_server::Context::new(config, log.new(slog::o!()));
                 info!(log, "Starting mock server...");
                 let server = HttpServerStarter::new(
                     &config_dropshot,
