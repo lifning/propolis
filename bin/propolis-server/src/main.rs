@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use propolis_server::server::MetricsEndpointConfig;
 use propolis_server::vnc::setup_vnc;
-use propolis_server::{config, server, mock_server};
+use propolis_server::{config, mock_server, server};
 
 #[derive(Debug, Parser)]
 #[clap(about, version)]
@@ -43,6 +43,7 @@ enum Args {
         vnc_addr: SocketAddr,
 
         /// If true, run a mock server which does not actually spawn instances
+        /// (i.e. to test with a facsimile of the API on unsupported platforms)
         #[structopt(short, long)]
         mock: bool,
     },
