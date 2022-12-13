@@ -1,6 +1,5 @@
 //! Implementation of a mock Propolis server
 
-use dropshot::channel;
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::HttpError;
@@ -10,13 +9,17 @@ use dropshot::HttpResponseUpdatedNoContent;
 use dropshot::RequestContext;
 use dropshot::TypedBody;
 use dropshot::WebsocketConnection;
+use dropshot::{channel, Query};
 use futures::SinkExt;
 use slog::{error, info, Logger};
+use std::collections::VecDeque;
+use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
 use std::io::{Error as IoError, ErrorKind};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{protocol::Role, Message};
 use tokio_tungstenite::WebSocketStream;
@@ -29,31 +32,64 @@ pub enum Error {
     TerminalState,
 }
 
+use propolis::chardev;
+use propolis::chardev::{SinkNotifier, SourceNotifier};
 use propolis_client::handmade::api;
 
 use crate::config::Config;
-use crate::spec::{SlotType, slot_to_pci_path};
+use crate::serial::history_buffer::SerialHistoryOffset;
+use crate::serial::{Serial, SerialTask};
+use crate::spec::{slot_to_pci_path, SlotType};
 
-/// ed instance properties
+/// simulated instance properties
 pub struct InstanceContext {
     pub state: api::InstanceState,
     pub generation: u64,
     pub properties: api::InstanceProperties,
+    serial: Arc<Serial<MockUart>>,
+    serial_task: SerialTask,
     state_watcher_rx: watch::Receiver<api::InstanceStateMonitorResponse>,
     state_watcher_tx: watch::Sender<api::InstanceStateMonitorResponse>,
 }
 
 impl InstanceContext {
-    pub fn new(properties: api::InstanceProperties) -> Self {
+    pub fn new(properties: api::InstanceProperties, log: &Logger) -> Self {
         let (state_watcher_tx, state_watcher_rx) =
             watch::channel(api::InstanceStateMonitorResponse {
                 gen: 0,
                 state: api::InstanceState::Creating,
             });
+        let mock_uart = Arc::new(MockUart::new(&properties.name));
+        let sink_size = NonZeroUsize::new(64).unwrap();
+        let source_size = NonZeroUsize::new(1024).unwrap();
+        let serial = Arc::new(Serial::new(mock_uart, sink_size, source_size));
+        let serial_clone = serial.clone();
+
+        let (websocks_ch, websocks_recv) = mpsc::channel(1);
+        let (close_ch, close_recv) = oneshot::channel();
+
+        let log = log.new(slog::o!("component" => "serial task"));
+        let task = tokio::spawn(async move {
+            if let Err(e) = super::serial::instance_serial_task(
+                websocks_recv,
+                close_recv,
+                serial_clone,
+                log.clone(),
+            )
+            .await
+            {
+                error!(log, "Spawning serial task failed: {}", e);
+            }
+        });
+
+        let serial_task = SerialTask { task, close_ch, websocks_ch };
+
         Self {
             state: api::InstanceState::Creating,
             generation: 0,
             properties,
+            serial,
+            serial_task,
             state_watcher_rx,
             state_watcher_tx,
         }
@@ -67,23 +103,30 @@ impl InstanceContext {
         target: api::InstanceStateRequested,
     ) -> Result<(), Error> {
         match self.state {
-            api::InstanceState::Stopped | api::InstanceState::Destroyed | api::InstanceState::Failed => {
+            api::InstanceState::Stopped
+            | api::InstanceState::Destroyed
+            | api::InstanceState::Failed => {
                 // Cannot request any state once the target is halt/destroy
                 Err(Error::TerminalState)
             }
-            api::InstanceState::Rebooting if matches!(target, api::InstanceStateRequested::Run) => {
+            api::InstanceState::Rebooting
+                if matches!(target, api::InstanceStateRequested::Run) =>
+            {
                 // Requesting a run when already on the road to reboot is an
                 // immediate success.
                 Ok(())
             }
             _ => match target {
-                api::InstanceStateRequested::Run | api::InstanceStateRequested::Reboot => {
+                api::InstanceStateRequested::Run
+                | api::InstanceStateRequested::Reboot => {
                     self.generation += 1;
                     self.state = api::InstanceState::Running;
-                    self.state_watcher_tx.send(api::InstanceStateMonitorResponse {
-                        gen: self.generation,
-                        state: self.state.clone(),
-                    }).map_err(|_| Error::TransitionSendFail)
+                    self.state_watcher_tx
+                        .send(api::InstanceStateMonitorResponse {
+                            gen: self.generation,
+                            state: self.state.clone(),
+                        })
+                        .map_err(|_| Error::TransitionSendFail)
                 }
                 api::InstanceStateRequested::Stop => {
                     self.state = api::InstanceState::Stopped;
@@ -92,7 +135,7 @@ impl InstanceContext {
                 api::InstanceStateRequested::MigrateStart => {
                     unimplemented!("migration not yet implemented")
                 }
-            }
+            },
         }
     }
 }
@@ -189,7 +232,7 @@ async fn instance_ensure(
         info!(server_context.log, "cloud-init disk created");
     }
 
-    *instance = Some(InstanceContext::new(properties));
+    *instance = Some(InstanceContext::new(properties, &server_context.log));
     Ok(HttpResponseCreated(api::InstanceEnsureResponse { migrate: None }))
 }
 
@@ -269,13 +312,15 @@ async fn instance_state_put(
     Ok(HttpResponseUpdatedNoContent {})
 }
 
+// TODO: mock the "Serial" struct itself instead?
 #[channel {
     protocol = WEBSOCKETS,
     path = "/instance/serial",
 }]
 async fn instance_serial(
-    _rqctx: Arc<RequestContext<Context>>,
+    rqctx: Arc<RequestContext<Context>>,
     websock: WebsocketConnection,
+    query: Query<api::InstanceSerialConsoleStreamRequest>,
 ) -> dropshot::WebsocketChannelResult {
     let config =
         WebSocketConfig { max_send_queue: Some(4096), ..Default::default() };
@@ -284,12 +329,157 @@ async fn instance_serial(
         Role::Server,
         Some(config),
     )
-        .await;
+    .await;
 
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
-    loop {
-        interval.tick().await;
-        ws_stream.send(Message::binary("asdf\n")).await?;
+    let instance_mtx = rqctx.context().instance.lock().await;
+    if instance_mtx.as_ref().unwrap().state != api::InstanceState::Running {
+        ws_stream.send(Message::Close(None)).await?;
+        return Err("Instance isn't running!".into());
+    }
+
+    let serial = instance_mtx.as_ref().unwrap().serial.clone();
+
+    let byte_offset = SerialHistoryOffset::try_from(&query.into_inner()).ok();
+    if let Some(mut byte_offset) = byte_offset {
+        loop {
+            let (data, offset) = serial.history_vec(byte_offset, None).await?;
+            if data.is_empty() {
+                break;
+            }
+            ws_stream.send(Message::Binary(data)).await?;
+            byte_offset = SerialHistoryOffset::FromStart(offset);
+        }
+    }
+
+    instance_mtx
+        .as_ref()
+        .unwrap()
+        .serial_task
+        .websocks_ch
+        .send(ws_stream)
+        .await
+        .map_err(|e| format!("Serial socket hand-off failed: {}", e).into())
+}
+
+#[endpoint {
+    method = GET,
+    path = "/instance/serial/history",
+}]
+async fn instance_serial_history_get(
+    rqctx: Arc<RequestContext<Context>>,
+    query: Query<api::InstanceSerialConsoleHistoryRequest>,
+) -> Result<HttpResponseOk<api::InstanceSerialConsoleHistoryResponse>, HttpError>
+{
+    let query_params = query.into_inner();
+    let byte_offset = SerialHistoryOffset::try_from(&query_params)?;
+    let max_bytes = query_params.max_bytes.map(|x| x as usize);
+
+    let ctx = rqctx.context();
+    let (data, end) = ctx
+        .instance
+        .lock()
+        .await
+        .as_ref()
+        .ok_or(HttpError::for_internal_error(
+            "No mock instance instantiated".to_string(),
+        ))?
+        .serial
+        .history_vec(byte_offset, max_bytes)
+        .await
+        .map_err(|e| HttpError::for_bad_request(None, e.to_string()))?;
+
+    Ok(HttpResponseOk(api::InstanceSerialConsoleHistoryResponse {
+        data,
+        last_byte_offset: end as u64,
+    }))
+}
+
+// (ahem) mock *thou* art.
+struct MockUart {
+    buf: std::sync::Mutex<VecDeque<u8>>,
+}
+
+impl MockUart {
+    fn new(name: &str) -> Self {
+        let mut buf = VecDeque::with_capacity(1024);
+        #[rustfmt::skip]
+        let gerunds = [
+            "Loading", "Reloading", "Advancing", "Reticulating", "Defeating",
+            "Spoiling", "Cooking", "Destroying", "Resenting", "Introducing",
+            "Reiterating", "Blasting", "Tolling", "Delivering", "Engendering",
+            "Establishing",
+        ];
+        #[rustfmt::skip]
+        let nouns = [
+            "canon", "browsers", "meta", "splines", "villains",
+            "plot", "books", "evidence", "decisions", "chaos",
+            "points", "processors", "bells", "value", "gender",
+            "shots",
+        ];
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut hasher);
+        let mut entropy = hasher.finish();
+        buf.extend(
+            format!(
+                "This is simulated serial console output for {}.\r\n",
+                name
+            )
+            .as_bytes(),
+        );
+        while entropy != 0 {
+            let gerund = gerunds[entropy as usize % gerunds.len()];
+            entropy /= gerunds.len() as u64;
+            let noun = nouns[entropy as usize % nouns.len()];
+            entropy /= nouns.len() as u64;
+            buf.extend(
+                format!(
+                    "{} {}... {}[\x1b[92m 0K \x1b[m]\r\n",
+                    gerund,
+                    noun,
+                    " ".repeat(40 - gerund.len() - noun.len())
+                )
+                .as_bytes(),
+            );
+        }
+        buf.extend(
+            format!(
+                "\x1b[2J\x1b[HOS/478 ({name}) (ttyl)\r\n\r\n{name} login: ",
+                name = name
+            )
+            .as_bytes(),
+        );
+        Self { buf: std::sync::Mutex::new(buf) }
+    }
+}
+
+impl chardev::Sink for MockUart {
+    fn write(&self, data: u8) -> bool {
+        self.buf.lock().unwrap().push_back(data);
+        true
+    }
+
+    fn set_notifier(&self, _f: Option<SinkNotifier>) {
+        //todo!()
+    }
+}
+
+impl chardev::Source for MockUart {
+    fn read(&self) -> Option<u8> {
+        self.buf.lock().unwrap().pop_front()
+    }
+
+    fn discard(&self, count: usize) -> usize {
+        let mut buf = self.buf.lock().unwrap();
+        let end = buf.len().min(count);
+        buf.drain(0..end).count()
+    }
+
+    fn set_autodiscard(&self, _active: bool) {
+        //todo!()
+    }
+
+    fn set_notifier(&self, _f: Option<SourceNotifier>) {
+        //todo!()
     }
 }
 
@@ -302,5 +492,6 @@ pub fn api() -> ApiDescription<Context> {
     api.register(instance_state_monitor).unwrap();
     api.register(instance_state_put).unwrap();
     api.register(instance_serial).unwrap();
+    api.register(instance_serial_history_get).unwrap();
     api
 }
