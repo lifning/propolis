@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::{RWOp, ReadOp, WriteOp};
+use crate::common::{GuestAddr, RWOp, ReadOp, WriteOp, PAGE_SIZE};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
 use crate::inventory::Entity;
@@ -22,10 +22,26 @@ const MAX_DEVICE_SLOTS: u8 = 64;
 /// Max number of interrupters the controller supports.
 const NUM_INTRS: u16 = 1024;
 
-
 struct XhciState {
     /// USB Command Register
     usb_cmd: bits::UsbCommand,
+
+    /// USB Status Register
+    usb_sts: bits::UsbStatus,
+
+    /// Device Notification Control Register
+    dnctrl: bits::DeviceNotificationControl,
+
+    /// Device Context Base Address Array Pointer (DCBAAP)
+    ///
+    /// Points to an array of address pointers referencing the device context
+    /// structures for each attached device.
+    ///
+    /// See xHCI 1.2 Section 5.4.6
+    dev_ctx_table_base: Option<GuestAddr>,
+
+    /// Configure Register
+    config: bits::Configure,
 }
 
 /// An emulated USB Host Controller attached over PCI
@@ -58,8 +74,17 @@ impl PciXhci {
             .add_custom_cfg(bits::USB_PCI_CFG_OFFSET, bits::USB_PCI_CFG_REG_SZ)
             .finish();
 
+        // The controller is initially halted and asserts CNR (controller not ready)
+        let usb_sts = bits::UsbStatus(0)
+            .with_host_controller_halted(true)
+            .with_controller_not_ready(true);
+
         let state = Mutex::new(XhciState {
             usb_cmd: bits::UsbCommand(0),
+            usb_sts,
+            dnctrl: bits::DeviceNotificationControl::new([0]),
+            dev_ctx_table_base: None,
+            config: bits::Configure(0),
         });
 
         Arc::new(Self { pci_state, state })
@@ -127,7 +152,10 @@ impl PciXhci {
             Cap(HcStructuralParameters2) => {
                 let hcs_params2 = bits::HcStructuralParameters2(0)
                     .with_ist_as_frame(true)
-                    .with_iso_sched_threshold(0b111);
+                    .with_iso_sched_threshold(0b111)
+                    // We don't need any scratchpad buffers
+                    .with_max_scratchpad_bufs(0)
+                    .with_scratchpad_restore(false);
                 ro.write_u32(hcs_params2.0);
             }
             Cap(HcStructuralParameters3) => {
@@ -161,26 +189,37 @@ impl PciXhci {
                 ro.write_u32(state.usb_cmd.0);
             }
             Op(UsbStatus) => {
-
+                let state = self.state.lock().unwrap();
+                ro.write_u32(state.usb_sts.0);
             }
             Op(PageSize) => {
-
+                // Report supported page sizes (we only support 1).
+                // bit n = 1, if 2^(n+12) is a supported page size
+                let shift = PAGE_SIZE.trailing_zeros() - 12;
+                ro.write_u32(1 << shift);
             }
             Op(DeviceNotificationControl) => {
-
+                let state = self.state.lock().unwrap();
+                ro.write_u32(state.dnctrl.data[0]);
             }
             Op(CommandRingControlRegister) => {
-
+                // Most of these fields read as 0, except for CRR
+                let crcr = bits::CommandRingControl(0)
+                    .with_command_ring_running(
+                        /* TODO: processing commands */ false,
+                    );
+                ro.write_u64(crcr.0);
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
-
+                let state = self.state.lock().unwrap();
+                let addr = state.dev_ctx_table_base.unwrap_or(GuestAddr(0)).0;
+                ro.write_u64(addr);
             }
             Op(Configure) => {
-
+                let state = self.state.lock().unwrap();
+                ro.write_u32(state.config.0);
             }
-            Op(Port(..)) => {
-
-            }
+            Op(Port(..)) => {}
         }
     }
 

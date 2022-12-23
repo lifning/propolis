@@ -133,12 +133,14 @@ bitstruct! {
 }
 
 impl HcStructuralParameters2 {
+    #[inline]
     pub fn max_scratchpad_bufs(&self) -> u16 {
         let lo = self.max_scratchpad_bufs_lo() as u16 | 0b11111;
         let hi = self.max_scratchpad_bufs_hi() as u16 | 0b11111;
         (hi << 5) | lo
     }
 
+    #[inline]
     pub fn with_max_scratchpad_bufs(self, max: u16) -> Self {
         let lo = max & 0b11111;
         let hi = (max >> 5) & 0b11111;
@@ -408,5 +410,165 @@ bitstruct! {
 
         /// Reserved
         pub reserved3: u32 = 17..32;
+    }
+}
+
+bitstruct! {
+    /// Representation of the USB Status (USBSTS) register.
+    ///
+    /// See xHCI 1.2 Section 5.4.2
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct UsbStatus(pub u32) {
+        /// Host Controller Halted (HCH)
+        ///
+        /// This bit is set to 0 whenever the R/S bit is set to 1. It is set to 1
+        /// when the controller has stopped executing due to the R/S bit being cleared.
+        pub host_controller_halted: bool = 0;
+
+        /// Reserved
+        reserved: u8 = 1;
+
+        /// Host System Error (HSE)
+        ///
+        /// Indicates an error condition preventing continuing normal operation.
+        pub host_system_error: bool = 2;
+
+        /// Event Interrupt (EINT)
+        ///
+        /// The controller sets this bit to 1 when the IP bit of any interrupter
+        /// goes from 0 to 1.
+        pub event_interrupt: bool = 3;
+
+        /// Port Change Detect (PCD)
+        ///
+        /// The controller sets this bit to 1 when any port has a change bit flip
+        /// from 0 to 1.
+        pub port_change_detect: bool = 4;
+
+        /// Reserved
+        reserved2: u8 = 5..8;
+
+        /// Save State Status (SSS)
+        ///
+        /// A write to the CSS bit in the USBCMD register causes this bit to flip to
+        /// 1. The controller shall clear this bit to 0 when the Save State operation
+        /// has completed.
+        pub save_state_status: bool = 8;
+
+        /// Restore State Status (RSS)
+        ///
+        /// A write to the CRS bit in the USBCMD register causes this bit to flip to
+        /// 1. The controller shall clear this bit to 0 when the Restore State operation
+        /// has completed.
+        pub restore_state_status: bool = 9;
+
+        /// Save/Restore Error (SRE)
+        ///
+        /// Indicates that the controller has detected an error condition
+        /// during a Save or Restore State operation.
+        pub save_restore_error: bool = 10;
+
+        /// Controller Not Ready (CNR)
+        ///
+        /// Indicates that the controller is not ready to accept doorbell
+        /// or runtime register writes.
+        pub controller_not_ready: bool = 11;
+
+        /// Host Controller Error (HCE)
+        ///
+        /// Indicates if the controller has encountered an internal error
+        /// that requires a reset to recover.
+        pub host_controller_error: bool = 12;
+
+        /// Reserved
+        reserved3: u32 = 13..32;
+    }
+}
+
+/// Representation of the Device Notification Control (DNCTRL) register.
+///
+/// Bits: 0-15 Notification Enable (N0-N15)
+///
+/// When set to 1, the controller shall generate a Device Notification Event
+/// when a Device Notification Transaction Packet matching the set bit is received.
+///
+/// See xHCI 1.2 Section 5.4.4
+pub type DeviceNotificationControl = bitvec::BitArr!(for 16, in u32);
+
+bitstruct! {
+    /// Representation of the Command Ring Control (CRCR) register.
+    ///
+    /// See xHCI 1.2 Section 5.4.5
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct CommandRingControl(pub u64) {
+        /// Ring Cycle State (RCS)
+        ///
+        /// Indicates the Consumer Cycle State (CCS) flag for the TRB
+        /// referenced by the Command Ring Pointer (CRP).
+        pub ring_cycle_state: bool = 0;
+
+        /// Command Stop (CS)
+        ///
+        /// When set to 1, the controller shall stop the Command Ring operation
+        /// after the currently executing command has completed.
+        pub command_stop: bool = 1;
+
+        /// Command Abort (CA)
+        ///
+        /// When set to 1, the controller shall abort the currently executing
+        /// command and stop the Command Ring operation.
+        pub command_abort: bool = 2;
+
+        /// Command Ring Running (CRR)
+        ///
+        /// This bit is set to 1 if the R/S bit is 1 and software submitted
+        /// a Host Controller Command.
+        pub command_ring_running: bool = 3;
+
+        /// Reserved
+        reserved: u8 = 4..6;
+
+        /// Command Ring Pointer (CRP)
+        ///
+        /// The high order bits of the initial value of the Command Ring Dequeue Pointer.
+        command_ring_pointer_: u64 = 6..64;
+    }
+}
+
+impl CommandRingControl {
+    /// The Command Ring Dequeue Pointer.
+    #[inline]
+    pub fn command_ring_pointer(&self) -> u64 {
+        self.command_ring_pointer_() << 6
+    }
+}
+
+bitstruct! {
+    /// Representation of the Configure (CONFIG) register.
+    ///
+    /// See xHCI 1.2 Section 5.4.7
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Configure(pub u32) {
+        /// Max Device Slots Enabled (MaxSlotsEn)
+        ///
+        /// The maximum number of enabled device slots.
+        /// Valid values are 0 to MaxSlots.
+        pub max_device_slots_enabled: u8 = 0..8;
+
+        /// U3 Entry Enable (U3E)
+        ///
+        /// When set to 1, the controller shall assert the PLC flag
+        /// when a Root hub port enters U3 state.
+        pub u3_entry_enable: bool = 8;
+
+        /// Configuration Information Enable (CIE)
+        ///
+        /// When set to 1, the software shall initialize the
+        /// Configuration Value, Interface Number, and Alternate Setting
+        /// fields in the Input Control Context.
+        pub configuration_information_enable: bool = 9;
+
+        /// Reserved
+        reserved: u32 = 10..32;
     }
 }
