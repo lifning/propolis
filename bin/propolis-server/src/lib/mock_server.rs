@@ -159,7 +159,7 @@ impl Context {
     path = "/instance",
 }]
 async fn instance_ensure(
-    rqctx: Arc<RequestContext<Context>>,
+    rqctx: RequestContext<Arc<Context>>,
     request: TypedBody<api::InstanceEnsureRequest>,
 ) -> Result<HttpResponseCreated<api::InstanceEnsureResponse>, HttpError> {
     let server_context = rqctx.context();
@@ -244,7 +244,7 @@ async fn instance_ensure(
     path = "/instance",
 }]
 async fn instance_get(
-    rqctx: Arc<RequestContext<Context>>,
+    rqctx: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseOk<api::InstanceGetResponse>, HttpError> {
     let instance = rqctx.context().instance.lock().await;
     let instance = instance.as_ref().ok_or_else(|| {
@@ -266,7 +266,7 @@ async fn instance_get(
     path = "/instance/state-monitor",
 }]
 async fn instance_state_monitor(
-    rqctx: Arc<RequestContext<Context>>,
+    rqctx: RequestContext<Arc<Context>>,
     request: TypedBody<api::InstanceStateMonitorRequest>,
 ) -> Result<HttpResponseOk<api::InstanceStateMonitorResponse>, HttpError> {
     let (mut state_watcher, gen) = {
@@ -299,7 +299,7 @@ async fn instance_state_monitor(
     path = "/instance/state",
 }]
 async fn instance_state_put(
-    rqctx: Arc<RequestContext<Context>>,
+    rqctx: RequestContext<Arc<Context>>,
     request: TypedBody<api::InstanceStateRequested>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
     let mut instance = rqctx.context().instance.lock().await;
@@ -321,9 +321,9 @@ async fn instance_state_put(
     path = "/instance/serial",
 }]
 async fn instance_serial(
-    rqctx: Arc<RequestContext<Context>>,
-    websock: WebsocketConnection,
+    rqctx: RequestContext<Arc<Context>>,
     query: Query<api::InstanceSerialConsoleStreamRequest>,
+    websock: WebsocketConnection,
 ) -> dropshot::WebsocketChannelResult {
     let config =
         WebSocketConfig { max_send_queue: Some(4096), ..Default::default() };
@@ -369,7 +369,7 @@ async fn instance_serial(
     path = "/instance/serial/history",
 }]
 async fn instance_serial_history_get(
-    rqctx: Arc<RequestContext<Context>>,
+    rqctx: RequestContext<Arc<Context>>,
     query: Query<api::InstanceSerialConsoleHistoryRequest>,
 ) -> Result<HttpResponseOk<api::InstanceSerialConsoleHistoryResponse>, HttpError>
 {
@@ -488,7 +488,7 @@ impl chardev::Source for MockUart {
 
 /// Returns a Dropshot [`ApiDescription`] object to launch a mock Propolis
 /// server.
-pub fn api() -> ApiDescription<Context> {
+pub fn api() -> ApiDescription<Arc<Context>> {
     let mut api = ApiDescription::new();
     api.register(instance_ensure).unwrap();
     api.register(instance_get).unwrap();
