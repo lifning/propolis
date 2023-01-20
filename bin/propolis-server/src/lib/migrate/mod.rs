@@ -200,7 +200,7 @@ struct Device {
 ///This will attempt to upgrade the given HTTP request to a `propolis-migrate`
 /// connection and begin the migration in a separate task.
 pub async fn source_start(
-    rqctx: Arc<RequestContext<DropshotEndpointContext>>,
+    rqctx: RequestContext<Arc<DropshotEndpointContext>>,
     migration_id: Uuid,
 ) -> Result<Response<Body>, MigrateError> {
     // Create a new log context for the migration
@@ -270,7 +270,7 @@ pub async fn source_start(
 /// we've successfully established the connection, we can begin the migration
 /// process (destination-side).
 pub(crate) async fn dest_initiate(
-    rqctx: &Arc<RequestContext<DropshotEndpointContext>>,
+    rqctx: &RequestContext<Arc<DropshotEndpointContext>>,
     controller: Arc<VmController>,
     migrate_info: api::InstanceMigrateInitiateRequest,
 ) -> Result<api::InstanceMigrateInitiateResponse, MigrateError> {
