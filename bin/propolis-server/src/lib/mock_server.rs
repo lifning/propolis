@@ -1,5 +1,6 @@
 //! Implementation of a mock Propolis server
 
+use base64::Engine;
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::HttpError;
@@ -222,13 +223,15 @@ async fn instance_ensure(
                 err
             ))
         })?;
-        base64::decode(&cloud_init_bytes).map_err(|e| {
-            let err = IoError::new(ErrorKind::InvalidInput, e.to_string());
-            HttpError::for_internal_error(format!(
-                "Cannot build instance: {}",
-                err
-            ))
-        })?;
+        base64::engine::general_purpose::STANDARD
+            .decode(&cloud_init_bytes)
+            .map_err(|e| {
+                let err = IoError::new(ErrorKind::InvalidInput, e.to_string());
+                HttpError::for_internal_error(format!(
+                    "Cannot build instance: {}",
+                    err
+                ))
+            })?;
         info!(server_context.log, "cloud-init disk created");
     }
 
