@@ -1,10 +1,9 @@
 //! Copyright 2021 Oxide Computer Company
 //!
-//! Support for framing messages in the propolis/bhyve live
-//! migration protocol.  Frames are defined by a 5-byte header
-//! consisting of a 32-bit length (unsigned little endian)
-//! followed by a tag byte indicating the frame type, and then
-//! the frame data.  The length field includes the header.
+//! Support for encoding messages in the propolis/bhyve live
+//! migration protocol. Messages are serialized to binary and
+//! wrapped in Binary websocket frames with a trailing byte
+//! indicating the message type.
 //!
 //! As defined in RFD0071, most messages are either serialized
 //! structures or blobs, while the structures involved in the
@@ -20,12 +19,12 @@
 //! for that.
 
 use super::MigrateError;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use slog::error;
 use std::convert::TryFrom;
 use thiserror::Error;
-use tokio_util::codec;
+use tokio_tungstenite::tungstenite;
 
 /// Migration protocol errors.
 #[derive(Debug, Error)]
@@ -35,8 +34,8 @@ pub enum ProtocolError {
     InvalidMessageType(u8),
 
     /// The message received on the wire wasn't the expected length
-    #[error("unexpected message length")]
-    UnexpectedMessageLen,
+    #[error("unexpected message length {1} for type {0:?}")]
+    UnexpectedMessageLen(u8, usize),
 
     /// Encountered an I/O error on the transport
     #[error("I/O error: {0}")]
@@ -49,6 +48,18 @@ pub enum ProtocolError {
     /// Received non-UTF8 string
     #[error("non-UTF8 string: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+
+    /// Nothing, not even a tag byte
+    #[error("received empty message with no discriminant")]
+    EmptyMessage,
+
+    /// An error occurred in the underlying websocket transport
+    #[error("error occurred in websocket layer: {0}")]
+    WebsocketError(tokio_tungstenite::tungstenite::Error),
+
+    /// All our codec's messages should be tungstenite::Message::Binary
+    #[error("received empty message with no discriminant")]
+    UnexpectedWebsocketMessage(tungstenite::Message),
 }
 
 /// Message represents the different frame types for messages
@@ -77,7 +88,7 @@ pub(crate) enum Message {
 /// identifying frame types.  They are an implementation detail of
 /// the wire format, and not used elsewhere.  However, they must be
 /// kept in bijection with Message, above.
-#[derive(PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 enum MessageType {
     Okay,
@@ -113,246 +124,120 @@ impl From<&Message> for MessageType {
     }
 }
 
-/// `LiveMigrationEncoder` implements the `Encoder` & `Decoder`
-/// traits for transforming a stream of bytes to/from migration
-/// protocol messages.
-pub(crate) struct LiveMigrationFramer {
-    log: slog::Logger,
-}
-
-impl LiveMigrationFramer {
-    /// Creates a new LiveMigrationFramer, which represents the
-    /// right to encode and decode messages.
-    pub fn new(log: slog::Logger) -> LiveMigrationFramer {
-        LiveMigrationFramer { log }
-    }
-    /// Writes the header at the start of the frame.  Also reserves enough space
-    /// in the destination buffer for the complete message.
-    fn put_header(&mut self, tag: MessageType, len: usize, dst: &mut BytesMut) {
-        let len = len + 5;
-        if dst.remaining_mut() < len {
-            dst.reserve(len - dst.remaining_mut());
-        }
-        dst.put_u32_le(len as u32);
-        dst.put_u8(tag.into());
-    }
-
-    // Writes a (`start`, `end`) pair into the buffer.
-    fn put_start_end(&mut self, start: u64, end: u64, dst: &mut BytesMut) {
-        dst.put_u64_le(start);
-        dst.put_u64_le(end);
-    }
-
-    // Writes a vector of bytes representing a bitmap into the buffer.
-    fn put_bitmap(&mut self, bitmap: &[u8], dst: &mut BytesMut) {
-        dst.put(bitmap);
-    }
-
-    // Retrieves a (`start`, `end`) pair from the buffer.  Ensures
-    // valid length, and returns the length minus the size of the
-    // pair.
-    fn get_start_end(
-        &mut self,
-        len: usize,
-        src: &mut BytesMut,
-    ) -> Result<(usize, u64, u64), ProtocolError> {
-        if len < 16 {
-            error!(self.log, "short message reading start end: {len}");
-            return Err(ProtocolError::UnexpectedMessageLen);
-        }
-        let start = src.get_u64_le();
-        let end = src.get_u64_le();
-        Ok((len - 16, start, end))
-    }
-
-    // Retrieves a bitmap from the buffer.  Validates that enough
-    // bytes are in the buffer to satisfy the request.
-    fn get_bitmap(
-        &mut self,
-        len: usize,
-        src: &mut BytesMut,
-    ) -> Result<Vec<u8>, ProtocolError> {
-        let remaining = src.remaining();
-        if remaining < len {
-            error!(self.log, "short message reading bitmap (remaining: {remaining} len: {len}");
-            return Err(ProtocolError::UnexpectedMessageLen);
-        }
-        let v = src[..len].to_vec();
-        src.advance(len);
-        Ok(v.to_vec())
-    }
-}
-
-impl codec::Encoder<Message> for LiveMigrationFramer {
+impl std::convert::TryInto<tungstenite::Message> for Message {
     type Error = ProtocolError;
-
-    // Encodes each message according to its type.
-    fn encode(
-        &mut self,
-        m: Message,
-        dst: &mut BytesMut,
-    ) -> Result<(), Self::Error> {
-        let tag = (&m).into();
-        match m {
-            Message::Okay => {
-                self.put_header(tag, 0, dst);
-            }
+    fn try_into(self) -> Result<tungstenite::Message, ProtocolError> {
+        let mut dst = Vec::new();
+        let tag = MessageType::from(&self) as u8;
+        match self {
+            Message::Okay | Message::MemDone => {}
             Message::Error(e) => {
                 let serialized = ron::ser::to_string(&e)?;
-                let bytes = serialized.into_bytes();
-                self.put_header(tag, bytes.len(), dst);
-                dst.put(&bytes[..]);
+                dst.extend(serialized.as_bytes());
             }
-            Message::Serialized(s) => {
-                let bytes = s.into_bytes();
-                self.put_header(tag, bytes.len(), dst);
-                dst.put(&bytes[..]);
+            Message::Serialized(s) => dst.put_slice(s.as_bytes()),
+            Message::Blob(bytes) | Message::Page(bytes) => {
+                dst.put_slice(&bytes);
             }
-            Message::Blob(bytes) => {
-                self.put_header(tag, bytes.len(), dst);
-                dst.put(&bytes[..]);
+            Message::MemQuery(start, end) | Message::MemEnd(start, end) => {
+                dst.put_u64_le(start);
+                dst.put_u64_le(end);
             }
-            Message::Page(page) => {
-                self.put_header(tag, page.len(), dst);
-                dst.put(&page[..]);
+            Message::MemOffer(start, end, bitmap)
+            | Message::MemFetch(start, end, bitmap)
+            | Message::MemXfer(start, end, bitmap) => {
+                dst.put_u64_le(start);
+                dst.put_u64_le(end);
+                dst.put_slice(&bitmap);
             }
-            Message::MemQuery(start, end) => {
-                self.put_header(tag, 8 + 8, dst);
-                self.put_start_end(start, end, dst);
-            }
-            Message::MemOffer(start, end, bitmap) => {
-                self.put_header(tag, 8 + 8 + bitmap.len(), dst);
-                self.put_start_end(start, end, dst);
-                self.put_bitmap(&bitmap, dst);
-            }
-            Message::MemEnd(start, end) => {
-                self.put_header(tag, 8 + 8, dst);
-                self.put_start_end(start, end, dst);
-            }
-            Message::MemFetch(start, end, bitmap) => {
-                self.put_header(tag, 8 + 8 + bitmap.len(), dst);
-                self.put_start_end(start, end, dst);
-                self.put_bitmap(&bitmap, dst);
-            }
-            Message::MemXfer(start, end, bitmap) => {
-                self.put_header(tag, 8 + 8 + bitmap.len(), dst);
-                self.put_start_end(start, end, dst);
-                self.put_bitmap(&bitmap, dst);
-            }
-            Message::MemDone => {
-                self.put_header(tag, 0, dst);
-            }
-        };
-        Ok(())
+        }
+        // tag at the end so we can pop it later (& so u64's align nicely)
+        dst.push(tag);
+        Ok(tungstenite::Message::Binary(dst))
     }
 }
 
-impl codec::Decoder for LiveMigrationFramer {
-    type Item = Message;
+// Retrieves a (`start`, `end`) pair from the buffer, ensuring valid length.
+fn get_start_end(tag: MessageType, src: &mut Bytes) -> Result<(u64, u64), ProtocolError> {
+    if src.len() < 16 {
+        return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+    }
+    let start = src.get_u64_le();
+    let end = src.get_u64_le();
+    Ok((start, end))
+}
+
+impl std::convert::TryInto<Message> for tungstenite::Message {
     type Error = ProtocolError;
-
-    // Decodes each message according to the header length and type
-    // indicated by the tag byte.
-    fn decode(
-        &mut self,
-        src: &mut BytesMut,
-    ) -> Result<Option<Self::Item>, Self::Error> {
-        // Each message is prepended with a 5 octet header.  The
-        // first four of those contain a 32-bit little-endian frame
-        // size and the fifth is a tag field.  Check whether the
-        // underlying transport has produced at least 5 bytes for
-        // that header.
-        if src.remaining() < 5 {
-            return Ok(None);
+    fn try_into(self) -> Result<Message, ProtocolError> {
+        match self {
+            tungstenite::Message::Binary(mut v) => {
+                // If the tag byte is absent or invalid, don't bother looking at the message.
+                let tag_byte = v.pop()
+                    .ok_or(ProtocolError::EmptyMessage)?;
+                let tag = MessageType::try_from(tag_byte)
+                    .map_err(|_| ProtocolError::InvalidMessageType(tag_byte))?;
+                let mut src = Bytes::from(v);
+                // At this point, we have a valid message of a known type, and
+                // the remaining bytes are the message contents.
+                // Attempt decode and return the received message.
+                let m = match tag {
+                    MessageType::Okay => {
+                        if src.len() != 0 {
+                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                        }
+                        Message::Okay
+                    }
+                    MessageType::Error => {
+                        let e = ron::de::from_str(std::str::from_utf8(&src)?)?;
+                        Message::Error(e)
+                    }
+                    MessageType::Serialized => {
+                        let s = std::str::from_utf8(&src)?.to_string();
+                        Message::Serialized(s)
+                    }
+                    MessageType::Blob => Message::Blob(src.to_vec()),
+                    MessageType::Page => {
+                        if src.len() != 4096 {
+                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                        }
+                        Message::Page(src.to_vec())
+                    }
+                    MessageType::MemQuery => {
+                        let (start, end) = get_start_end(tag, &mut src)?;
+                        Message::MemQuery(start, end)
+                    }
+                    MessageType::MemOffer => {
+                        let (start, end) = get_start_end(tag, &mut src)?;
+                        let bitmap = src.to_vec();
+                        Message::MemOffer(start, end, bitmap)
+                    }
+                    MessageType::MemEnd => {
+                        let (start, end) = get_start_end(tag, &mut src)?;
+                        Message::MemEnd(start, end)
+                    }
+                    MessageType::MemFetch => {
+                        let (start, end) = get_start_end(tag, &mut src)?;
+                        let bitmap = src.to_vec();
+                        Message::MemFetch(start, end, bitmap)
+                    }
+                    MessageType::MemXfer => {
+                        let (start, end) = get_start_end(tag, &mut src)?;
+                        let bitmap = src.to_vec();
+                        Message::MemXfer(start, end, bitmap)
+                    }
+                    MessageType::MemDone => {
+                        if src.len() != 0 {
+                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                        }
+                        Message::MemDone
+                    }
+                };
+                Ok(m)
+            }
+            x => Err(ProtocolError::UnexpectedWebsocketMessage(x)),
         }
-        // Extract the frame header.  If the tag byte is invalid,
-        // don't bother looking at the frame size.
-        let tag = MessageType::try_from(src[4])
-            .map_err(|_| ProtocolError::InvalidMessageType(src[4]))?;
-        let len = u32::from_le_bytes([src[0], src[1], src[2], src[3]]) as usize;
-        if len < 5 {
-            error!(self.log, "decode: length too short for header {len}");
-            return Err(ProtocolError::UnexpectedMessageLen);
-        }
-        // The frame header looks valid; ensure we have read the entire
-        // message.
-        if src.remaining() < len {
-            src.reserve(len - src.remaining());
-            return Ok(None);
-        }
-        // At this point, we have a valid message of the specified length.
-        // Advance past the frame header, attempt decode and return the
-        // received message.
-        src.advance(5);
-        let len = len - 5;
-        let m = match tag {
-            MessageType::Okay => {
-                assert_eq!(len, 0);
-                Message::Okay
-            }
-            MessageType::Error => {
-                let e = ron::de::from_str(std::str::from_utf8(&src[..len])?)?;
-                src.advance(len);
-                Message::Error(e)
-            }
-            MessageType::Serialized => {
-                let s = std::str::from_utf8(&src[..len])?.to_string();
-                src.advance(len);
-                Message::Serialized(s)
-            }
-            MessageType::Blob => {
-                let v = src[..len].to_vec();
-                src.advance(len);
-                Message::Blob(v)
-            }
-            MessageType::Page => {
-                if len != 4096 {
-                    error!(
-                        self.log,
-                        "decode: invalid length for `Page` message (len)"
-                    );
-                    return Err(ProtocolError::UnexpectedMessageLen);
-                }
-                let p = src[..len].to_vec();
-                src.advance(len);
-                Message::Page(p)
-            }
-            MessageType::MemQuery => {
-                let (_, start, end) = self.get_start_end(len, src)?;
-                Message::MemQuery(start, end)
-            }
-            MessageType::MemOffer => {
-                let (len, start, end) = self.get_start_end(len, src)?;
-                let bitmap = self.get_bitmap(len, src)?;
-                Message::MemOffer(start, end, bitmap)
-            }
-            MessageType::MemEnd => {
-                let (_, start, end) = self.get_start_end(len, src)?;
-                Message::MemEnd(start, end)
-            }
-            MessageType::MemFetch => {
-                let (len, start, end) = self.get_start_end(len, src)?;
-                let bitmap = self.get_bitmap(len, src)?;
-                Message::MemFetch(start, end, bitmap)
-            }
-            MessageType::MemXfer => {
-                let (len, start, end) = self.get_start_end(len, src)?;
-                let bitmap = self.get_bitmap(len, src)?;
-                Message::MemXfer(start, end, bitmap)
-            }
-            MessageType::MemDone => {
-                assert_eq!(len, 0);
-                Message::MemDone
-            }
-        };
-        Ok(Some(m))
     }
-}
-
-#[cfg(test)]
-fn test_framer() -> LiveMigrationFramer {
-    let log = slog::Logger::root(slog::Discard, slog::o!());
-    LiveMigrationFramer::new(log)
 }
 
 #[cfg(test)]
@@ -408,7 +293,6 @@ mod live_migration_encoder_tests {
 #[cfg(test)]
 mod encoder_tests {
     use super::*;
-    use tokio_util::codec::Encoder;
 
     #[test]
     fn encode_okay() {
@@ -587,7 +471,6 @@ mod live_migration_decoder_tests {
 #[cfg(test)]
 mod decoder_tests {
     use super::*;
-    use tokio_util::codec::Decoder;
 
     #[test]
     fn decode_bad_tag_fails() {

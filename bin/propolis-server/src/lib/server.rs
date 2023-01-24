@@ -16,7 +16,6 @@ use dropshot::{
     TypedBody, WebsocketConnection,
 };
 use futures::SinkExt;
-use hyper::{Body, Response};
 use oximeter::types::ProducerRegistry;
 use propolis_client::{
     handmade::api,
@@ -764,28 +763,35 @@ async fn instance_serial(
 // instance to the source instance as part of the HTTP connection upgrade used to
 // establish the migration link. We don't actually want this exported via OpenAPI
 // clients.
-#[endpoint {
-    method = PUT,
-    path = "/instance/migrate/start",
+#[channel {
+    protocol = WEBSOCKETS,
+    path = "/instance/migrate/{migration_id}/start",
     unpublished = true,
 }]
 async fn instance_migrate_start(
     rqctx: RequestContext<Arc<DropshotEndpointContext>>,
-    request: TypedBody<api::InstanceMigrateStartRequest>,
-) -> Result<Response<Body>, HttpError> {
-    let migration_id = request.into_inner().migration_id;
-    crate::migrate::source_start(rqctx, migration_id).await.map_err(Into::into)
+    path_params: Path<api::InstanceMigrateStartRequest>,
+    websock: WebsocketConnection,
+) -> dropshot::WebsocketChannelResult {
+    let migration_id = path_params.into_inner().migration_id;
+    let conn = WebSocketStream::from_raw_socket(
+        websock.into_inner(),
+        Role::Server,
+        None,
+    ).await;
+    crate::migrate::source_start(rqctx, migration_id, conn).await?;
+    Ok(())
 }
 
 #[endpoint {
     method = GET,
-    path = "/instance/migrate/status"
+    path = "/instance/migrate/{migration_id}/status"
 }]
 async fn instance_migrate_status(
     rqctx: RequestContext<Arc<DropshotEndpointContext>>,
-    request: TypedBody<api::InstanceMigrateStatusRequest>,
+    path_params: Path<api::InstanceMigrateStatusRequest>,
 ) -> Result<HttpResponseOk<api::InstanceMigrateStatusResponse>, HttpError> {
-    let migration_id = request.into_inner().migration_id;
+    let migration_id = path_params.into_inner().migration_id;
     let vm = rqctx.context().vm().await?;
     vm.migrate_status(migration_id).map_err(Into::into).map(|state| {
         HttpResponseOk(api::InstanceMigrateStatusResponse { state })

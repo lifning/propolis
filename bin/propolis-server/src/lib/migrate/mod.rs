@@ -2,12 +2,16 @@ use std::sync::Arc;
 
 use bit_field::BitField;
 use dropshot::{HttpError, RequestContext};
-use hyper::{header, Body, Method, Response, StatusCode};
+use futures::{SinkExt, StreamExt};
 use propolis::migrate::MigrateStateError;
 use propolis_client::handmade::api::{self, MigrationState};
 use serde::{Deserialize, Serialize};
 use slog::{error, info, o};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::{tungstenite, WebSocketStream};
 use uuid::Uuid;
 
 use crate::{
@@ -138,6 +142,12 @@ impl From<hyper::Error> for MigrateError {
     }
 }
 
+impl From<tokio_tungstenite::tungstenite::Error> for MigrateError {
+    fn from(err: tokio_tungstenite::tungstenite::Error) -> MigrateError {
+        MigrateError::Http(err.to_string())
+    }
+}
+
 impl From<codec::ProtocolError> for MigrateError {
     fn from(err: codec::ProtocolError) -> Self {
         MigrateError::Codec(err.to_string())
@@ -199,10 +209,11 @@ struct Device {
 ///
 ///This will attempt to upgrade the given HTTP request to a `propolis-migrate`
 /// connection and begin the migration in a separate task.
-pub async fn source_start(
+pub async fn source_start<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     rqctx: RequestContext<Arc<DropshotEndpointContext>>,
     migration_id: Uuid,
-) -> Result<Response<Body>, MigrateError> {
+    mut conn: WebSocketStream<T>,
+) -> Result<(), MigrateError> {
     // Create a new log context for the migration
     let log = rqctx.log.new(o!(
         "migration_id" => migration_id.to_string(),
@@ -217,50 +228,34 @@ pub async fn source_start(
     .map_err(|_| MigrateError::InstanceNotInitialized)?;
 
     let src_protocol = MIGRATION_PROTOCOL_STR;
-    let mut request = rqctx.request.lock().await;
-    controller.request_migration_from(migration_id, || {
-        // Check this is a valid migration request
-        if !request
-            .headers()
-            .get(header::CONNECTION)
-            .and_then(|hv| hv.to_str().ok())
-            .map(|hv| hv.eq_ignore_ascii_case("upgrade"))
-            .unwrap_or(false)
-        {
-            return Err(MigrateError::UpgradeExpected);
+
+    match conn.next().await {
+        Some(Ok(tungstenite::Message::Text(dst_protocol))) => {
+            // TODO: improve "negotiation"
+            if !dst_protocol.eq_ignore_ascii_case(src_protocol) {
+                error!(
+                    log,
+                    "incompatible with destination instance provided protocol ({})",
+                    dst_protocol
+                );
+                return Err(MigrateError::incompatible(src_protocol, &dst_protocol));
+            }
+
+            // Complete the negotiation with our own version string so that the
+            // destination knows we're ready
+            conn.send(tungstenite::Message::Text(src_protocol.to_string()))
+                .await?;
         }
-
-        let dst_protocol = request
-            .headers()
-            .get(header::UPGRADE)
-            .ok_or(MigrateError::UpgradeExpected)
-            .map(|hv| hv.to_str().ok())?
-            .ok_or_else(|| {
-                MigrateError::incompatible(src_protocol, "<unknown>")
-            })?;
-
-        // TODO: improve "negotiation"
-        if !dst_protocol.eq_ignore_ascii_case(MIGRATION_PROTOCOL_STR) {
-            error!(
-                log,
-                "incompatible with destination instance provided protocol ({})",
-                dst_protocol
-            );
-            return Err(MigrateError::incompatible(src_protocol, dst_protocol));
+        x => {
+            conn.send(tungstenite::Message::Close(Some(CloseFrame { code: CloseCode::Protocol, reason: "did not begin with version handshake.".into() })))
+                .await?;
+            error!(log, "destination side did not begin migration version handshake: {:?}", x);
+            return Err(MigrateError::Initiate);
         }
+    }
 
-        // Grab the future for plucking out the upgraded socket
-        Ok(hyper::upgrade::on(&mut *request))
-    })?;
-
-    // Complete the request with an HTTP 101 response so that the
-    // destination knows we're ready
-    Ok(Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS)
-        .header(header::CONNECTION, "upgrade")
-        .header(header::UPGRADE, src_protocol)
-        .body(Body::empty())
-        .unwrap())
+    controller.request_migration_from(migration_id, conn)?;
+    Ok(())
 }
 
 /// Initiate a migration to the given source instance.
@@ -284,75 +279,48 @@ pub(crate) async fn dest_initiate(
     ));
     info!(log, "Migration Destination");
 
-    let runtime_hdl = tokio::runtime::Handle::current();
+    // Build upgrade request to the source instance
+    // (we do this by hand because it's hidden from the OpenAPI spec)
+    // TODO(#165): https
+    // TODO: We need to make sure the src_addr is a valid target
+    let src_migrate_url = format!(
+        "http://{}/instance/migrate/{}/start",
+        migrate_info.src_addr,
+        migration_id,
+    );
+    info!(log, "Begin migration"; "src_migrate_url" => &src_migrate_url);
+    let (mut conn, _) = tokio_tungstenite::connect_async(src_migrate_url).await?;
+
+    let dst_protocol = MIGRATION_PROTOCOL_STR;
+    conn.send(tungstenite::Message::Text(dst_protocol.to_string())).await?;
+    match conn.next().await {
+        Some(Ok(tungstenite::Message::Text(src_protocol))) => {
+            // TODO: improve "negotiation"
+            if !src_protocol.eq_ignore_ascii_case(dst_protocol) {
+                error!(
+                    log,
+                    "incompatible with source's provided protocol ({})",
+                    src_protocol
+                );
+                return Err(MigrateError::incompatible(&src_protocol, dst_protocol));
+            }
+        }
+        x => {
+            conn.send(tungstenite::Message::Close(Some(CloseFrame { code: CloseCode::Protocol, reason: "did not respond to version handshake.".into() })))
+                .await?;
+            error!(
+                log,
+                "source instance failed to negotiate protocol version: {:?}",
+                x
+            );
+            return Err(MigrateError::Initiate);
+        }
+    }
+
     tokio::runtime::Handle::current()
         .spawn_blocking(move || -> Result<(), MigrateError> {
-            controller.request_migration_into(migration_id, || {
-                // TODO(#165): https
-                // TODO: We need to make sure the src_addr is a valid target
-                let src_migrate_url = format!(
-                    "http://{}/instance/migrate/start",
-                    migrate_info.src_addr
-                );
-                info!(log, "Begin migration";
-                      "src_migrate_url" => &src_migrate_url);
-
-                let body = Body::from(
-                    serde_json::to_string(&api::InstanceMigrateStartRequest {
-                        migration_id,
-                    })
-                    .unwrap(),
-                );
-
-                // Build upgrade request to the source instance
-                let dst_protocol = MIGRATION_PROTOCOL_STR;
-                let req = hyper::Request::builder()
-                    .method(Method::PUT)
-                    .uri(src_migrate_url)
-                    .header(header::CONNECTION, "upgrade")
-                    // TODO: move to constant
-                    .header(header::UPGRADE, dst_protocol)
-                    .body(body)
-                    .unwrap();
-
-                // Kick off the request
-                let res = runtime_hdl.block_on(async move {
-                    hyper::Client::new().request(req).await
-                })?;
-
-                if res.status() != StatusCode::SWITCHING_PROTOCOLS {
-                    error!(
-                        log,
-                        "source instance failed to switch protocols: {}",
-                        res.status()
-                    );
-                    return Err(MigrateError::Initiate);
-                }
-                let src_protocol = res
-                    .headers()
-                    .get(header::UPGRADE)
-                    .ok_or(MigrateError::UpgradeExpected)
-                    .map(|hv| hv.to_str().ok())?
-                    .ok_or_else(|| {
-                        MigrateError::incompatible("<unknown>", dst_protocol)
-                    })?;
-
-                // TODO: improve "negotiation"
-                if !src_protocol.eq_ignore_ascii_case(dst_protocol) {
-                    error!(
-                        log,
-                        "incompatible with source's provided protocol ({})",
-                        src_protocol
-                    );
-                    return Err(MigrateError::incompatible(
-                        src_protocol,
-                        dst_protocol,
-                    ));
-                }
-
-                // Now co-opt the socket for the migration protocol
-                Ok(hyper::upgrade::on(res))
-            })?;
+            // Now start using the websocket for the migration protocol
+            controller.request_migration_into(migration_id, conn)?;
             Ok(())
         })
         .await
