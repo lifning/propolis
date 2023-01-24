@@ -129,8 +129,8 @@ vte = "0.10.1"
 
 [workspace.dependencies.crucible-client-types]
 git = "https://github.com/oxidecomputer/crucible"
-rev = "0e2bea7741c6bdc34e8e08addb941ee31e4ac9ec"
+rev = "3a463f8fedb65139b5d45af9da147409f8cd5972"
 
 [workspace.dependencies.crucible]
 git = "https://github.com/oxidecomputer/crucible"
-rev = "0e2bea7741c6bdc34e8e08addb941ee31e4ac9ec"
+rev = "3a463f8fedb65139b5d45af9da147409f8cd5972"

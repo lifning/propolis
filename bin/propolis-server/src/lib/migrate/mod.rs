@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bit_field::BitField;
 use dropshot::{HttpError, RequestContext};
-use hyper::{header, Body, Method, Response, StatusCode};
+use hyper::{header, Body, Method, Response, StatusCode, http};
 use propolis::migrate::MigrateStateError;
 use propolis_client::handmade::api::{self, MigrationState};
 use serde::{Deserialize, Serialize};
@@ -217,10 +217,10 @@ pub async fn source_start(
     .map_err(|_| MigrateError::InstanceNotInitialized)?;
 
     let src_protocol = MIGRATION_PROTOCOL_STR;
-    let mut request = rqctx.request.lock().await;
     controller.request_migration_from(migration_id, || {
         // Check this is a valid migration request
-        if !request
+        if !rqctx
+            .request
             .headers()
             .get(header::CONNECTION)
             .and_then(|hv| hv.to_str().ok())
@@ -230,7 +230,8 @@ pub async fn source_start(
             return Err(MigrateError::UpgradeExpected);
         }
 
-        let dst_protocol = request
+        let dst_protocol = rqctx
+            .request
             .headers()
             .get(header::UPGRADE)
             .ok_or(MigrateError::UpgradeExpected)
@@ -250,6 +251,9 @@ pub async fn source_start(
         }
 
         // Grab the future for plucking out the upgraded socket
+        let mut request = todo!("is such a thing even possible from here \
+        now that dropshot's obscured the orig. request?");
+
         Ok(hyper::upgrade::on(&mut *request))
     })?;
 
