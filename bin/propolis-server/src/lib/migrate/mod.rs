@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use slog::{error, info, o};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 use uuid::Uuid;
 
@@ -209,7 +209,9 @@ struct Device {
 ///
 ///This will attempt to upgrade the given HTTP request to a `propolis-migrate`
 /// connection and begin the migration in a separate task.
-pub async fn source_start<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+pub async fn source_start<
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+>(
     rqctx: RequestContext<Arc<DropshotEndpointContext>>,
     migration_id: Uuid,
     mut conn: WebSocketStream<T>,
@@ -238,7 +240,10 @@ pub async fn source_start<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
                     "incompatible with destination instance provided protocol ({})",
                     dst_protocol
                 );
-                return Err(MigrateError::incompatible(src_protocol, &dst_protocol));
+                return Err(MigrateError::incompatible(
+                    src_protocol,
+                    &dst_protocol,
+                ));
             }
 
             // Complete the negotiation with our own version string so that the
@@ -247,8 +252,11 @@ pub async fn source_start<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
                 .await?;
         }
         x => {
-            conn.send(tungstenite::Message::Close(Some(CloseFrame { code: CloseCode::Protocol, reason: "did not begin with version handshake.".into() })))
-                .await?;
+            conn.send(tungstenite::Message::Close(Some(CloseFrame {
+                code: CloseCode::Protocol,
+                reason: "did not begin with version handshake.".into(),
+            })))
+            .await?;
             error!(log, "destination side did not begin migration version handshake: {:?}", x);
             return Err(MigrateError::Initiate);
         }
@@ -285,11 +293,11 @@ pub(crate) async fn dest_initiate(
     // TODO: We need to make sure the src_addr is a valid target
     let src_migrate_url = format!(
         "http://{}/instance/migrate/{}/start",
-        migrate_info.src_addr,
-        migration_id,
+        migrate_info.src_addr, migration_id,
     );
     info!(log, "Begin migration"; "src_migrate_url" => &src_migrate_url);
-    let (mut conn, _) = tokio_tungstenite::connect_async(src_migrate_url).await?;
+    let (mut conn, _) =
+        tokio_tungstenite::connect_async(src_migrate_url).await?;
 
     let dst_protocol = MIGRATION_PROTOCOL_STR;
     conn.send(tungstenite::Message::Text(dst_protocol.to_string())).await?;
@@ -302,16 +310,21 @@ pub(crate) async fn dest_initiate(
                     "incompatible with source's provided protocol ({})",
                     src_protocol
                 );
-                return Err(MigrateError::incompatible(&src_protocol, dst_protocol));
+                return Err(MigrateError::incompatible(
+                    &src_protocol,
+                    dst_protocol,
+                ));
             }
         }
         x => {
-            conn.send(tungstenite::Message::Close(Some(CloseFrame { code: CloseCode::Protocol, reason: "did not respond to version handshake.".into() })))
-                .await?;
+            conn.send(tungstenite::Message::Close(Some(CloseFrame {
+                code: CloseCode::Protocol,
+                reason: "did not respond to version handshake.".into(),
+            })))
+            .await?;
             error!(
                 log,
-                "source instance failed to negotiate protocol version: {:?}",
-                x
+                "source instance failed to negotiate protocol version: {:?}", x
             );
             return Err(MigrateError::Initiate);
         }

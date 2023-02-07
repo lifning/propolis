@@ -675,7 +675,9 @@ impl VmController {
     ///
     /// On success, clients may query the instance's migration status to
     /// determine how the migration has progressed.
-    pub fn request_migration_from<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    pub fn request_migration_from<
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    >(
         &self,
         migration_id: Uuid,
         conn: WebSocketStream<T>,
@@ -705,10 +707,7 @@ impl VmController {
                     inner.migration_state =
                         Some((migration_id, ApiMigrationState::Sync));
                     inner.external_request_queue.push_back(
-                        self.launch_source_migration_task(
-                            migration_id,
-                            conn,
-                        ),
+                        self.launch_source_migration_task(migration_id, conn),
                     );
                     self.worker_state.cv.notify_one();
                     Ok(())
@@ -723,7 +722,9 @@ impl VmController {
     /// Launches a task that will execute a live migration out of this VM.
     /// Returns a state change request message to queue to the state driver,
     /// which will coordinate with this task to run the migration.
-    fn launch_source_migration_task<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    fn launch_source_migration_task<
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    >(
         &self,
         migration_id: Uuid,
         conn: WebSocketStream<T>,
@@ -780,7 +781,9 @@ impl VmController {
     ///
     /// On success, clients may query the instance's migration status to
     /// determine how the migration has progressed.
-    pub fn request_migration_into<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    pub fn request_migration_into<
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    >(
         &self,
         migration_id: Uuid,
         conn: WebSocketStream<T>,
@@ -802,10 +805,7 @@ impl VmController {
                     inner.migration_state =
                         Some((migration_id, ApiMigrationState::Sync));
                     inner.external_request_queue.push_back(
-                        self.launch_target_migration_task(
-                            migration_id,
-                            conn,
-                        ),
+                        self.launch_target_migration_task(migration_id, conn),
                     );
                     self.worker_state.cv.notify_one();
                     Ok(())
@@ -832,7 +832,9 @@ impl VmController {
     /// Launches a task that will execute a live migration into this VM.
     /// Returns a state change request message to queue to the state driver,
     /// which will coordinate with this task to run the migration.
-    fn launch_target_migration_task<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    fn launch_target_migration_task<
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    >(
         &self,
         migration_id: Uuid,
         conn: WebSocketStream<T>,

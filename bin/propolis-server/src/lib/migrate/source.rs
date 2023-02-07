@@ -68,12 +68,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         response_rx: tokio::sync::mpsc::Receiver<MigrateSourceResponse>,
         conn: WebSocketStream<T>,
     ) -> Self {
-        Self {
-            vm_controller,
-            command_tx,
-            response_rx,
-            conn,
-        }
+        Self { vm_controller, command_tx, response_rx, conn }
     }
 
     fn log(&self) -> &slog::Logger {

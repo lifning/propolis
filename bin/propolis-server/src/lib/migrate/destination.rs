@@ -1,9 +1,9 @@
-use std::convert::TryInto;
 use bitvec::prelude as bv;
-use futures::{ SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use propolis::common::GuestAddr;
 use propolis::migrate::{MigrateCtx, MigrateStateError, Migrator};
 use slog::{error, info, warn};
+use std::convert::TryInto;
 use std::io;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};

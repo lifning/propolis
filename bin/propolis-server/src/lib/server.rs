@@ -778,7 +778,8 @@ async fn instance_migrate_start(
         websock.into_inner(),
         Role::Server,
         None,
-    ).await;
+    )
+    .await;
     crate::migrate::source_start(rqctx, migration_id, conn).await?;
     Ok(())
 }

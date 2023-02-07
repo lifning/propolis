@@ -158,7 +158,10 @@ impl std::convert::TryInto<tungstenite::Message> for Message {
 }
 
 // Retrieves a (`start`, `end`) pair from the buffer, ensuring valid length.
-fn get_start_end(tag: MessageType, src: &mut Bytes) -> Result<(u64, u64), ProtocolError> {
+fn get_start_end(
+    tag: MessageType,
+    src: &mut Bytes,
+) -> Result<(u64, u64), ProtocolError> {
     if src.len() < 16 {
         return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
     }
@@ -173,8 +176,7 @@ impl std::convert::TryInto<Message> for tungstenite::Message {
         match self {
             tungstenite::Message::Binary(mut v) => {
                 // If the tag byte is absent or invalid, don't bother looking at the message.
-                let tag_byte = v.pop()
-                    .ok_or(ProtocolError::EmptyMessage)?;
+                let tag_byte = v.pop().ok_or(ProtocolError::EmptyMessage)?;
                 let tag = MessageType::try_from(tag_byte)
                     .map_err(|_| ProtocolError::InvalidMessageType(tag_byte))?;
                 let mut src = Bytes::from(v);
@@ -184,7 +186,10 @@ impl std::convert::TryInto<Message> for tungstenite::Message {
                 let m = match tag {
                     MessageType::Okay => {
                         if src.len() != 0 {
-                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                            return Err(ProtocolError::UnexpectedMessageLen(
+                                tag as u8,
+                                src.len(),
+                            ));
                         }
                         Message::Okay
                     }
@@ -199,7 +204,10 @@ impl std::convert::TryInto<Message> for tungstenite::Message {
                     MessageType::Blob => Message::Blob(src.to_vec()),
                     MessageType::Page => {
                         if src.len() != 4096 {
-                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                            return Err(ProtocolError::UnexpectedMessageLen(
+                                tag as u8,
+                                src.len(),
+                            ));
                         }
                         Message::Page(src.to_vec())
                     }
@@ -228,7 +236,10 @@ impl std::convert::TryInto<Message> for tungstenite::Message {
                     }
                     MessageType::MemDone => {
                         if src.len() != 0 {
-                            return Err(ProtocolError::UnexpectedMessageLen(tag as u8, src.len()));
+                            return Err(ProtocolError::UnexpectedMessageLen(
+                                tag as u8,
+                                src.len(),
+                            ));
                         }
                         Message::MemDone
                     }
@@ -241,196 +252,110 @@ impl std::convert::TryInto<Message> for tungstenite::Message {
 }
 
 #[cfg(test)]
-mod live_migration_encoder_tests {
-    use super::*;
-
-    #[test]
-    fn put_header() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.put_header(MessageType::Okay, 0, &mut bytes);
-        assert_eq!(&bytes[..], &[5, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn put_header_nonzero_tag() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.put_header(MessageType::Error, 0, &mut bytes);
-        assert_eq!(&bytes[..], &[5, 0, 0, 0, 1]);
-    }
-
-    #[test]
-    fn put_start_end() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.put_start_end(1, 2, &mut bytes);
-        assert_eq!(
-            &bytes[..],
-            &[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]
-        );
-    }
-
-    #[test]
-    fn put_empty_bitmap() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        let v = Vec::new();
-        encoder.put_bitmap(&v, &mut bytes);
-        assert!(&bytes[..].is_empty());
-    }
-
-    #[test]
-    fn put_bitmap() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        let v = vec![0b1100_0000];
-        encoder.put_bitmap(&v, &mut bytes);
-        assert_eq!(&bytes[..], &[0b1100_0000]);
-    }
-}
-
-#[cfg(test)]
 mod encoder_tests {
     use super::*;
+    use std::convert::TryInto;
+    use tokio_tungstenite::tungstenite;
+
+    fn encode(m: Message) -> Vec<u8> {
+        if let tungstenite::Message::Binary(bytes) = m.try_into().unwrap() {
+            return bytes;
+        } else {
+            panic!();
+        }
+    }
 
     #[test]
     fn encode_okay() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        let okay = Message::Okay;
-        encoder.encode(okay, &mut bytes).ok();
-        assert_eq!(&bytes[..], &[5, 0, 0, 0, MessageType::Okay as u8]);
+        let bytes = encode(Message::Okay);
+        assert_eq!(&bytes[..], &[MessageType::Okay as u8]);
     }
 
     #[test]
     fn encode_error() {
-        let mut bytes = BytesMut::new();
         let error = MigrateError::Initiate;
-        let mut encoder = test_framer();
-        encoder.encode(Message::Error(error), &mut bytes).ok();
-        assert_eq!(&bytes[..5], &[13, 0, 0, 0, MessageType::Error as u8]);
-        assert_eq!(&bytes[5..], br#"Initiate"#);
+        let mut bytes = encode(Message::Error(error));
+        assert_eq!(bytes.pop(), Some(MessageType::Error as u8));
+        assert_eq!(&bytes[..], br#"Initiate"#);
     }
 
     #[test]
     fn encode_serialized() {
-        let mut bytes = BytesMut::new();
         let obj = String::from("this is an object");
-        let mut encoder = test_framer();
-        encoder.encode(Message::Serialized(obj), &mut bytes).ok();
-        assert_eq!(
-            &bytes[..5],
-            &[17 + 5, 0, 0, 0, MessageType::Serialized as u8]
-        );
-        assert_eq!(&bytes[5..], b"this is an object");
+        let mut bytes = encode(Message::Serialized(obj));
+        assert_eq!(bytes.pop(), Some(MessageType::Serialized as u8));
+        assert_eq!(&bytes[..], b"this is an object");
     }
 
     #[test]
     fn encode_empty_blob() {
-        let mut bytes = BytesMut::new();
         let empty = Vec::new();
-        let mut encoder = test_framer();
-        encoder.encode(Message::Blob(empty), &mut bytes).ok();
-        assert_eq!(&bytes[..], &[5, 0, 0, 0, MessageType::Blob as u8]);
+        let bytes = encode(Message::Blob(empty));
+        assert_eq!(&bytes[..], &[MessageType::Blob as u8]);
     }
 
     #[test]
     fn encode_blob() {
-        let mut bytes = BytesMut::new();
-        let empty = vec![1, 2, 3, 4];
-        let mut encoder = test_framer();
-        encoder.encode(Message::Blob(empty), &mut bytes).ok();
-        assert_eq!(
-            &bytes[..],
-            &[9, 0, 0, 0, MessageType::Blob as u8, 1, 2, 3, 4]
-        );
+        let nonempty = vec![1, 2, 3, 4];
+        let bytes = encode(Message::Blob(nonempty));
+        assert_eq!(&bytes[..], &[1, 2, 3, 4, MessageType::Blob as u8]);
     }
 
     #[test]
     fn encode_page() {
-        let mut bytes = BytesMut::new();
         let page = [0u8; 4096];
-        let mut encoder = test_framer();
-        encoder.encode(Message::Page(page.to_vec()), &mut bytes).ok();
-        assert_eq!(
-            &bytes[..5],
-            [5, 0b0001_0000, 0, 0, MessageType::Page as u8]
-        );
-        assert!(&bytes[5..].iter().all(|&x| x == 0));
+        let mut bytes = encode(Message::Page(page.to_vec()));
+        assert_eq!(bytes.pop(), Some(MessageType::Page as u8));
+        assert_eq!(bytes, page);
     }
 
     #[test]
     fn encode_mem_query() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.encode(Message::MemQuery(1, 2), &mut bytes).ok();
-        assert_eq!(&bytes[..5], &[21, 0, 0, 0, MessageType::MemQuery as u8]);
-        assert_eq!(&bytes[5..5 + 8], &[1, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[5 + 8..], &[2, 0, 0, 0, 0, 0, 0, 0]);
+        let mut bytes = encode(Message::MemQuery(1, 2));
+        assert_eq!(bytes.pop(), Some(MessageType::MemQuery as u8));
+        assert_eq!(&bytes[..8], &[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..], &[2, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn encode_mem_offer() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder
-            .encode(Message::MemOffer(0, 0x8000, vec![0b1010_0101]), &mut bytes)
-            .ok();
-        assert_eq!(&bytes[..5], [22, 0, 0, 0, MessageType::MemOffer as u8]);
-        assert_eq!(&bytes[5..5 + 8], &[0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            &bytes[5 + 8..5 + 8 + 8],
-            &[0, 0b1000_0000, 0, 0, 0, 0, 0, 0]
-        );
-        assert_eq!(&bytes[5 + 8 + 8..], &[0b1010_0101]);
+        let mut bytes = encode(Message::MemOffer(0, 0x8000, vec![0b1010_0101]));
+        assert_eq!(bytes.pop(), Some(MessageType::MemOffer as u8));
+        assert_eq!(&bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..8 + 8], &[0, 0b1000_0000, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8 + 8..], &[0b1010_0101]);
     }
 
     #[test]
     fn encode_mem_end() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.encode(Message::MemEnd(0, 8 * 4096), &mut bytes).ok();
-        assert_eq!(&bytes[..5], [21, 0, 0, 0, MessageType::MemEnd as u8]);
-        assert_eq!(&bytes[5..5 + 8], &[0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            &bytes[5 + 8..5 + 8 + 8],
-            &[0, 0b1000_0000, 0, 0, 0, 0, 0, 0]
-        );
+        let mut bytes = encode(Message::MemEnd(0, 8 * 4096));
+        assert_eq!(bytes.pop(), Some(MessageType::MemEnd as u8));
+        assert_eq!(&bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..], &[0, 0b1000_0000, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn encode_mem_fetch() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder
-            .encode(Message::MemFetch(0, 0x4000, vec![0b0000_0101]), &mut bytes)
-            .ok();
-        assert_eq!(&bytes[..5], [22, 0, 0, 0, MessageType::MemFetch as u8]);
-        assert_eq!(&bytes[5..5 + 8], &[0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[5 + 8..5 + 8 + 8], &[0, 0x40, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[5 + 8 + 8..], &[0b0000_0101]);
+        let mut bytes = encode(Message::MemFetch(0, 0x4000, vec![0b0000_0101]));
+        assert_eq!(bytes.pop(), Some(MessageType::MemFetch as u8));
+        assert_eq!(&bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..8 + 8], &[0, 0x40, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8 + 8..], &[0b0000_0101]);
     }
 
     #[test]
     fn encode_mem_xfer() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder
-            .encode(Message::MemXfer(0, 0x8000, vec![0b1010_0101]), &mut bytes)
-            .ok();
-        assert_eq!(&bytes[..5], [22, 0, 0, 0, MessageType::MemXfer as u8]);
-        assert_eq!(&bytes[5..5 + 8], &[0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[5 + 8..5 + 8 + 8], &[0, 0x80, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&bytes[5 + 8 + 8..], &[0b1010_0101]);
+        let mut bytes = encode(Message::MemXfer(0, 0x8000, vec![0b1010_0101]));
+        assert_eq!(bytes.pop(), Some(MessageType::MemXfer as u8));
+        assert_eq!(&bytes[..8], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8..8 + 8], &[0, 0x80, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&bytes[8 + 8..], &[0b1010_0101]);
     }
 
     #[test]
     fn encode_mem_done() {
-        let mut bytes = BytesMut::new();
-        let mut encoder = test_framer();
-        encoder.encode(Message::MemDone, &mut bytes).ok();
-        assert_eq!(&bytes[..], [5, 0, 0, 0, MessageType::MemDone as u8]);
+        let bytes = encode(Message::MemDone);
+        assert_eq!(&bytes[..], [MessageType::MemDone as u8]);
     }
 }
 
@@ -439,158 +364,109 @@ mod live_migration_decoder_tests {
     use super::*;
 
     #[test]
-    fn get_start_end() {
-        let mut bytes = BytesMut::new();
-        bytes.put_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
-        let mut decoder = test_framer();
-        let (_, start, end) =
-            decoder.get_start_end(bytes.remaining(), &mut bytes).unwrap();
+    fn get_start_end_ok() {
+        let one_two = &[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0];
+        let mut bytes = bytes::Bytes::from_static(one_two);
+        let (start, end) =
+            super::get_start_end(MessageType::MemFetch, &mut bytes).unwrap();
         assert_eq!(start, 1);
         assert_eq!(end, 2);
     }
 
     #[test]
-    fn get_bitmap_empty() {
-        let mut bytes = BytesMut::new();
-        let mut decoder = test_framer();
-        let bitmap = decoder.get_bitmap(0, &mut bytes).unwrap();
-        assert_eq!(bitmap.len(), 0);
-    }
-
-    #[test]
-    fn get_bitmap_exact() {
-        let mut bytes = BytesMut::with_capacity(1);
-        bytes.put_u8(0b1111_0000);
-        let mut decoder = test_framer();
-        let bitmap = decoder.get_bitmap(1, &mut bytes).unwrap();
-        assert_eq!(bitmap.len(), 1);
-        assert_eq!(bitmap[0], 0b1111_0000);
+    fn get_start_end_err() {
+        let one_tw = &[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
+        let mut bytes = bytes::Bytes::from_static(one_tw);
+        assert!(
+            super::get_start_end(MessageType::MemFetch, &mut bytes).is_err()
+        );
     }
 }
 
 #[cfg(test)]
 mod decoder_tests {
     use super::*;
+    use std::convert::TryInto;
+    use tokio_tungstenite::tungstenite;
 
     #[test]
     fn decode_bad_tag_fails() {
-        let mut bytes = BytesMut::with_capacity(5);
-        bytes.put_slice(&[5, 0, 0, 0, 222]);
-        let mut decoder = test_framer();
-        assert!(decoder.decode(&mut bytes).is_err());
+        let bytes = vec![222];
+        let res: Result<Message, _> =
+            tungstenite::Message::Binary(bytes).try_into();
+        assert!(res.is_err());
     }
 
     #[test]
-    fn decode_short() {
-        let mut bytes = BytesMut::with_capacity(5);
-        bytes.put_slice(&[5, 0, 0]);
-        let mut decoder = test_framer();
-        assert!(matches!(decoder.decode(&mut bytes), Ok(None)));
-        bytes.put_slice(&[0, 0]);
-        assert!(matches!(decoder.decode(&mut bytes), Ok(Some(Message::Okay))));
+    fn decode_nonbinary_fails() {
+        let res: Result<Message, _> =
+            tungstenite::Message::Text(String::new()).try_into();
+        assert!(res.is_err());
     }
 
     #[test]
-    fn decode_bad_length_fails() {
-        let mut bytes = BytesMut::with_capacity(5);
-        bytes.put_slice(&[3, 0, 0, 0, 0]);
-        let mut decoder = test_framer();
-        assert!(decoder.decode(&mut bytes).is_err());
+    fn decode_tagless_fails() {
+        let res: Result<Message, _> =
+            tungstenite::Message::Binary(vec![]).try_into();
+        assert!(res.is_err());
     }
 
     #[test]
     fn decode_error() {
-        let mut bytes = BytesMut::with_capacity(16);
-        bytes.put_slice(&[16, 0, 0, 0, MessageType::Error as u8]);
-        bytes.put_slice(&br#"Http("foo")"#[..]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
+        let mut bytes = br#"Http("foo")"#.to_vec();
+        bytes.push(MessageType::Error as u8);
         let expected = MigrateError::Http("foo".into());
-        assert!(
-            matches!(decoded, Ok(Some(Message::Error(e))) if e == expected)
-        );
-    }
-
-    #[test]
-    fn decode_two_errors() {
-        let mut bytes = BytesMut::with_capacity(16 * 2);
-        bytes.put_slice(&[16, 0, 0, 0, MessageType::Error as u8]);
-        bytes.put_slice(&br#"Http("foo")"#[..]);
-        bytes.put_slice(&[16, 0, 0, 0, MessageType::Error as u8]);
-        bytes.put_slice(&br#"Http("bar")"#[..]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        let expected = MigrateError::Http("foo".into());
-        assert!(
-            matches!(decoded, Ok(Some(Message::Error(e))) if e == expected)
-        );
-        let decoded = decoder.decode(&mut bytes);
-        let expected = MigrateError::Http("bar".into());
-        assert!(
-            matches!(decoded, Ok(Some(Message::Error(e))) if e == expected)
-        );
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::Error(e) if e == expected));
     }
 
     #[test]
     fn decode_blob() {
-        let mut bytes = BytesMut::with_capacity(9);
-        bytes.put_slice(&[9, 0, 0, 0, MessageType::Blob as u8]);
-        bytes.put_slice(&b"asdf"[..]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(
-            matches!(decoded, Ok(Some(Message::Blob(b))) if b == b"asdf".to_vec())
-        );
+        let mut bytes = b"asdf".to_vec();
+        bytes.push(MessageType::Blob as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::Blob(b) if b == b"asdf".to_vec()));
     }
 
     #[test]
     fn decode_page() {
-        let mut bytes = BytesMut::with_capacity(5 + 4096);
-        bytes.put_slice(&[5, 0x10, 0, 0, MessageType::Page as u8]);
-        let page = [0u8; 4096];
-        bytes.put_slice(&page[..]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::Page(p)))
+        let mut bytes = vec![0u8; 4096];
+        bytes.push(MessageType::Page as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::Page(p)
             if p.iter().all(|&b| b == 0)));
     }
 
     #[test]
     fn decode_mem_query() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8);
-        bytes.put_slice(&[5 + 8 + 8, 0, 0, 0, MessageType::MemQuery as u8]);
-        bytes.put_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[2, 0, 0, 0, 0, 0, 0, 0]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemQuery(start, end)))
+        let mut bytes = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[2, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.push(MessageType::MemQuery as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemQuery(start, end)
             if start == 1 && end == 2));
     }
 
     #[test]
     fn decode_mem_offer() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8 + 1);
-        bytes.put_slice(&[5 + 8 + 8 + 1, 0, 0, 0, MessageType::MemOffer as u8]);
-        bytes.put_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
-        bytes.put_u8(0b0000_1111);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemOffer(start, end, v)))
+        let mut bytes = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
+        bytes.push(0b0000_1111);
+        bytes.push(MessageType::MemOffer as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemOffer(start, end, v)
             if start == 0 && end == 0x8000 && v == vec![0b0000_1111]));
     }
 
     #[test]
     fn decode_mem_offer_long_bitmap() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8 + 2);
-        bytes.put_slice(&[5 + 8 + 8 + 2, 0, 0, 0, MessageType::MemOffer as u8]);
-        bytes.put_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
-        bytes.put_u8(0b0000_1111);
-        bytes.put_u8(0b0000_1010);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemOffer(start, end, v)))
+        let mut bytes = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
+        bytes.push(0b0000_1111);
+        bytes.push(0b0000_1010);
+        bytes.push(MessageType::MemOffer as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemOffer(start, end, v)
             if start == 0 &&
                 end == 0x8000 &&
                 v == vec![0b0000_1111, 0b0000_1010]));
@@ -598,50 +474,40 @@ mod decoder_tests {
 
     #[test]
     fn decode_mem_end() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8);
-        bytes.put_slice(&[5 + 8 + 8, 0, 0, 0, MessageType::MemEnd as u8]);
-        bytes.put_slice(&[0, 0x40, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[0, 0x40 + 0x80, 0, 0, 0, 0, 0, 0]);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemEnd(start, end)))
+        let mut bytes = vec![0, 0x40, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[0, 0x40 + 0x80, 0, 0, 0, 0, 0, 0]);
+        bytes.push(MessageType::MemEnd as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemEnd(start, end)
             if start == 0x4000 && end == 0xC000));
     }
 
     #[test]
     fn decode_mem_fetch() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8 + 1);
-        bytes.put_slice(&[5 + 8 + 8 + 1, 0, 0, 0, MessageType::MemFetch as u8]);
-        bytes.put_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
-        bytes.put_u8(0b0000_1111);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemFetch(start, end, v)))
+        let mut bytes = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
+        bytes.push(0b0000_1111);
+        bytes.push(MessageType::MemFetch as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemFetch(start, end, v)
             if start == 0 && end == 0x8000 && v == vec![0b0000_1111]));
     }
 
     #[test]
     fn decode_mem_xfer() {
-        let mut bytes = BytesMut::with_capacity(5 + 8 + 8 + 1);
-        bytes.put_slice(&[5 + 8 + 8 + 1, 0, 0, 0, MessageType::MemXfer as u8]);
-        bytes.put_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-        bytes.put_slice(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
-        bytes.put_u8(0b0000_1111);
-        let mut decoder = test_framer();
-        let decoded = decoder.decode(&mut bytes);
-        assert!(matches!(decoded, Ok(Some(Message::MemXfer(start, end, v)))
+        let mut bytes = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend(&[0, 0x80, 0, 0, 0, 0, 0, 0]);
+        bytes.push(0b0000_1111);
+        bytes.push(MessageType::MemXfer as u8);
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemXfer(start, end, v)
             if start == 0 && end == 0x8000 && v == vec![0b0000_1111]));
     }
 
     #[test]
     fn decode_mem_done() {
-        let mut bytes = BytesMut::with_capacity(5);
-        bytes.put_slice(&[5, 0, 0, 0, MessageType::MemDone as u8]);
-        let mut decoder = test_framer();
-        assert!(matches!(
-            decoder.decode(&mut bytes),
-            Ok(Some(Message::MemDone))
-        ));
+        let bytes = vec![MessageType::MemDone as u8];
+        let decoded = tungstenite::Message::Binary(bytes).try_into().unwrap();
+        assert!(matches!(decoded, Message::MemDone));
     }
 }
