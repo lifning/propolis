@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::migrate::codec;
+use crate::migrate::codec::Message;
 use crate::migrate::memx;
 use crate::migrate::preamble::Preamble;
 use crate::migrate::{
@@ -96,6 +97,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         self.device_state().await?;
         self.arch_state().await?;
         self.ram_pull().await?;
+        self.server_state().await?;
         self.finish().await?;
         self.end();
         Ok(())
@@ -285,6 +287,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         let m = self.read_msg().await?;
         info!(self.log(), "ram_pull: got done {:?}", m);
         Ok(())
+    }
+
+    async fn server_state(&mut self) -> Result<(), MigrateError> {
+        self.update_state(MigrationState::Server).await;
+        let remote_addr = match self.read_msg().await? {
+            Message::Serialized(s) => {
+                ron::from_str(&s).map_err(codec::ProtocolError::from)?
+            }
+            _ => return Err(MigrateError::UnexpectedMessage),
+        };
+        let com1_history =
+            self.vm_controller.com1().export_history(remote_addr).await?;
+        self.send_msg(codec::Message::Serialized(com1_history)).await?;
+        // TODO: tell serial console thread to inform websock clients
+        self.read_ok().await
     }
 
     async fn finish(&mut self) -> Result<(), MigrateError> {

@@ -1,19 +1,23 @@
 //! Routines to expose a connection to an instance's serial port.
 
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::migrate::MigrateError;
 use crate::serial::history_buffer::{HistoryBuffer, SerialHistoryOffset};
 use futures::future::Fuse;
 use futures::stream::SplitSink;
 use futures::{FutureExt, SinkExt, StreamExt};
 use hyper::upgrade::Upgraded;
 use propolis::chardev::{pollers, Sink, Source};
-use slog::{info, Logger};
+use propolis::migrate::MigrateStateError;
+use propolis_client::handmade::api::InstanceSerialConsoleControlMessage;
+use slog::{info, warn, Logger};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, RwLock as AsyncRwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock as AsyncRwLock};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::{
     frame::coding::CloseCode, CloseFrame,
@@ -45,20 +49,32 @@ pub enum SerialTaskError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Error while waiting for notification: {0}")]
+    OneshotRecv(#[from] oneshot::error::RecvError),
+
+    #[error("JSON marshalling error while processing control message: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+pub enum SerialTaskControlMessage {
+    Stopping,
+    Migration { destination: SocketAddr, from_start: u64 },
 }
 
 pub struct SerialTask {
     /// Handle to attached serial session
     pub task: JoinHandle<()>,
-    /// Oneshot channel used to signal the task to terminate gracefully
-    pub close_ch: oneshot::Sender<()>,
+    /// Channel used to signal the task to terminate gracefully or notify
+    /// clients of a migration
+    pub control_ch: mpsc::Sender<SerialTaskControlMessage>,
     /// Channel used to send new client connections to the streaming task
     pub websocks_ch: mpsc::Sender<WebSocketStream<Upgraded>>,
 }
 
 pub async fn instance_serial_task<Device: Sink + Source>(
     mut websocks_recv: mpsc::Receiver<WebSocketStream<Upgraded>>,
-    mut close_recv: oneshot::Receiver<()>,
+    mut control_recv: mpsc::Receiver<SerialTaskControlMessage>,
     serial: Arc<Serial<Device>>,
     log: Logger,
 ) -> Result<(), SerialTaskError> {
@@ -125,8 +141,9 @@ pub async fn instance_serial_task<Device: Sink + Source>(
             ),
         };
 
-        let recv_ch_fut = recv_ch.recv().fuse();
+        let input_recv_ch_fut = recv_ch.recv().fuse();
         let new_ws_recv = websocks_recv.recv().fuse();
+        let control_recv_fut = control_recv.recv().fuse();
 
         tokio::select! {
             // Poll in the order written
@@ -135,15 +152,35 @@ pub async fn instance_serial_task<Device: Sink + Source>(
             // It's important we always poll the close channel first
             // so that a constant stream of incoming/outgoing messages
             // don't cause us to ignore it
-            _ = &mut close_recv => {
+            message = control_recv_fut => {
                 probes::serial_close_recv!(|| {});
-                // Gracefully close the connections to any clients
-                for ws in ws_sinks.into_iter().zip(ws_streams) {
-                    let mut ws = ws.0.reunite(ws.1).unwrap();
-                    let _ = ws.close(Some(CloseFrame {
-                        code: CloseCode::Away,
-                        reason: "VM stopped".into(),
-                    })).await;
+                match message {
+                    Some(SerialTaskControlMessage::Stopping) | None => {
+                        // Gracefully close the connections to any clients
+                        for ws in ws_sinks.into_iter().zip(ws_streams) {
+                            let mut ws = ws.0.reunite(ws.1).unwrap();
+                            let _ = ws.close(Some(CloseFrame {
+                                code: CloseCode::Away,
+                                reason: "VM stopped".into(),
+                            })).await;
+                        }
+                    }
+                    Some(SerialTaskControlMessage::Migration { destination, from_start }) => {
+                        let mut failures = 0;
+                        for mut sink in ws_sinks {
+                            if sink.send(Message::Text(serde_json::to_string(
+                                &InstanceSerialConsoleControlMessage::Migrating {
+                                    destination,
+                                    from_start,
+                                }
+                            )?)).await.is_err() {
+                                failures += 1;
+                            }
+                        }
+                        if failures > 0 {
+                            warn!(log, "Failed to send migration info to {} connected clients.", failures);
+                        }
+                    }
                 }
                 info!(log, "Terminating serial task");
                 break;
@@ -201,7 +238,7 @@ pub async fn instance_serial_task<Device: Sink + Source>(
             // the UART. This needs to be checked before `ws_recv` so that
             // "close" messages can be processed and their indicated
             // sinks/streams removed before they are polled again.
-            pair = recv_ch_fut => {
+            pair = input_recv_ch_fut => {
                 probes::serial_inject_uart!(|| {});
                 if let Some((i, msg)) = pair {
                     match msg {
@@ -231,7 +268,12 @@ pub async fn instance_serial_task<Device: Sink + Source>(
 
 /// Represents a serial connection into the VM.
 pub struct Serial<Device: Sink + Source> {
-    uart: Arc<Device>,
+    uart: watch::Receiver<Arc<Device>>,
+    // used during migration. not an AsyncRwLock so we don't deadlock
+    // & so we don't have to spawn a future during Drop::drop.
+    uart_replace: watch::Sender<Arc<Device>>,
+
+    pub task_control_ch: Mutex<Option<mpsc::Sender<SerialTaskControlMessage>>>,
 
     sink_poller: Arc<pollers::SinkBuffer>,
     source_poller: Arc<pollers::SourceBuffer>,
@@ -264,19 +306,30 @@ impl<Device: Sink + Source> Serial<Device> {
         sink_poller.attach(uart.as_ref());
         source_poller.attach(uart.as_ref());
         uart.set_autodiscard(false);
+        let (uart_replace, uart) = watch::channel(uart);
 
-        Serial { uart, sink_poller, source_poller, history }
+        let task_control_ch = Default::default();
+
+        Serial {
+            uart,
+            uart_replace,
+            task_control_ch,
+            sink_poller,
+            source_poller,
+            history,
+        }
     }
 
     pub async fn read_source(&self, buf: &mut [u8]) -> Option<usize> {
-        let bytes_read =
-            self.source_poller.read(buf, self.uart.as_ref()).await?;
+        let uart = self.uart.borrow().clone();
+        let bytes_read = self.source_poller.read(buf, uart.as_ref()).await?;
         self.history.write().await.consume(&buf[..bytes_read]);
         Some(bytes_read)
     }
 
     pub async fn write_sink(&self, buf: &[u8]) -> Option<usize> {
-        self.sink_poller.write(buf, self.uart.as_ref()).await
+        let uart = self.uart.borrow().clone();
+        self.sink_poller.write(buf, uart.as_ref()).await
     }
 
     pub(crate) async fn history_vec(
@@ -286,10 +339,50 @@ impl<Device: Sink + Source> Serial<Device> {
     ) -> Result<(Vec<u8>, usize), history_buffer::Error> {
         self.history.read().await.contents_vec(byte_offset, max_bytes)
     }
+
+    pub(crate) async fn export_history(
+        &self,
+        destination: SocketAddr,
+    ) -> Result<String, MigrateError> {
+        let read_hist = self.history.read().await;
+        let from_start = read_hist.bytes_from_start() as u64;
+        let encoded = ron::to_string(&*read_hist)
+            .map_err(|e| MigrateError::Codec(e.to_string()))?;
+        drop(read_hist);
+        if let Some(ch) = self.task_control_ch.lock().await.as_ref() {
+            ch.send(SerialTaskControlMessage::Migration {
+                destination,
+                from_start,
+            })
+            .await
+            .map_err(|_| MigrateError::InvalidInstanceState)?;
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) async fn import(
+        &self,
+        serialized_hist: &str,
+        uart: Arc<Device>,
+    ) -> Result<(), MigrateError> {
+        self.sink_poller.attach(uart.as_ref());
+        self.source_poller.attach(uart.as_ref());
+        uart.set_autodiscard(false);
+        self.uart_replace.send(uart).map_err(|_| {
+            MigrateError::DeviceState(MigrateStateError::ImportFailed(
+                "could not replace uart handle in serial thread".to_string(),
+            ))
+        })?;
+        let decoded = ron::from_str(serialized_hist)
+            .map_err(|e| MigrateError::Codec(e.to_string()))?;
+        let mut write_hist = self.history.write().await;
+        *write_hist = decoded;
+        Ok(())
+    }
 }
 
 impl<Device: Sink + Source> Drop for Serial<Device> {
     fn drop(&mut self) {
-        self.uart.set_autodiscard(true);
+        self.uart.borrow().set_autodiscard(true);
     }
 }

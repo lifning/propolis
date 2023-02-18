@@ -1000,6 +1000,7 @@
           "Arch",
           "Resume",
           "RamPull",
+          "Server",
           "Finish",
           "Error"
         ]
