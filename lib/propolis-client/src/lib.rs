@@ -63,3 +63,109 @@ mod _compat_impls {
         }
     }
 }
+
+#[cfg(feature = "generated")]
+pub mod helpers {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::{Error, Message};
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use futures::{future, SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+
+    pub struct PropolisSerialConsoleStream {
+        ws: WebSocketStream<reqwest::Upgraded>,
+    }
+
+    impl PropolisSerialConsoleStream {
+        pub fn new(addr: std::net::SocketAddr, byte_offset: Option<i64>) {
+
+        }
+
+        async fn serial_connect(addr: &std::net::SocketAddr, byte_offset: Option<i64>) -> Result<WebSocketStream<reqwest::Upgraded>> {
+            let client = crate::Client::new(&format!("http://{}", addr));
+            let mut req = client.instance_serial();
+
+            match byte_offset {
+                Some(x) if x >= 0 => req = req.from_start(x as u64),
+                Some(x) => req = req.most_recent(-x as u64),
+                None => req = req.most_recent(16384),
+            }
+            let upgraded = req
+                .send()
+                .await
+                .map_err(|e| anyhow!("Failed to upgrade connection: {}", e))?
+                .into_inner();
+            Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
+        }
+    }
+
+    impl futures::Stream for PropolisSerialConsoleStream {
+        type Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.ws.poll_next() {
+                Poll::Ready(Some(Ok(Message::Text(ref json)))) => {
+                    match serde_json::from_str(&json)? {
+                        crate::handmade::InstanceSerialConsoleControlMessage::Migrating {
+                            destination, from_start,
+                        } => {
+                            self.ws = Self::serial_connect(destination, Some(from_start as i64)).await?;
+                        }
+                    }
+                    Poll::Pending
+                }
+                x => x,
+            }
+        }
+    }
+
+    async fn serial(
+        addr: std::net::SocketAddr,
+        byte_offset: Option<i64>,
+    ) -> Result<()> {
+        let mut ws = PropolisSerialConsoleStream::serial_connect(&addr, byte_offset).await?;
+
+        let x = ws.next().await;
+        let (sink, stream) = ws.split();
+
+        loop {
+            tokio::select! {
+                c = wsrx.recv() => {
+                    match c {
+                        None => {
+                            // channel is closed
+                            break;
+                        }
+                        Some(c) => {
+                            ws.send(Message::Binary(c)).await?;
+                        },
+                    }
+                }
+                msg = ws.next() => {
+                    match msg {
+                        Some(Ok(Message::Binary(input))) => {
+                            stdout.write_all(&input).await?;
+                            stdout.flush().await?;
+                        }
+                        Some(Ok(Message::Close(..))) | None => break,
+                        Some(Ok(Message::Text(json))) => {
+                            match serde_json::from_str(&json)? {
+                                InstanceSerialConsoleControlMessage::Migrating {
+                                    destination, from_start,
+                                } => {
+                                    ws = serial_connect(&destination, Some(from_start as i64)).await?;
+                                }
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+}

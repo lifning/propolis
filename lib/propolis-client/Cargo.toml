@@ -19,10 +19,12 @@ thiserror.workspace = true
 uuid = { workspace = true, features = [ "serde", "v4" ] }
 progenitor = { workspace = true, optional = true }
 tokio = { workspace = true, features = [ "net" ], optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 crucible-client-types.workspace = true
 
 [features]
 default = []
-generated = ["progenitor", "tokio"]
+generated = ["progenitor", "tokio", "tokio-tungstenite"]
 generated-migration = ["generated"]
 falcon = []
