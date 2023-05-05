@@ -31,8 +31,8 @@ const DEFAULT_MAX_LENGTH: isize = 16 * 1024;
 /// troubleshooting tools.
 #[derive(Deserialize, Serialize, Clone)]
 pub(crate) struct HistoryBuffer {
-    beginning: Vec<u8>,
-    rolling: VecDeque<u8>,
+    pub(crate) beginning: Vec<u8>,
+    pub(crate) rolling: VecDeque<u8>,
     total_bytes: usize,
     buffer_size: usize,
 }

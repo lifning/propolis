@@ -17,6 +17,7 @@ use crate::migrate::probes;
 use crate::migrate::{
     Device, MigrateError, MigratePhase, MigrateRole, MigrationState, PageIter,
 };
+use crate::serial::history_buffer::HistoryBuffer;
 use crate::vm::{MigrateTargetCommand, VmController};
 
 /// Launches an attempt to migrate into a supplied instance using the supplied
@@ -355,6 +356,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> DestinationProtocol<T> {
             .import(&com1_history)
             .await
             .map_err(|e| MigrateError::Codec(e.to_string()))?;
+
+        {
+            let read_hist: HistoryBuffer = ron::from_str(&com1_history).unwrap();
+            let from_start = read_hist.bytes_from_start() as u64;
+            let rolling_len = read_hist.rolling.len();
+            let beginning_len = read_hist.beginning.len();
+            info!(self.log(), "imported serial buffer: {} bytes from start, beginning len {}, rolling len {}", from_start, beginning_len, rolling_len);
+        }
+
         self.send_msg(codec::Message::Okay).await
     }
 

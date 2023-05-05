@@ -18,6 +18,7 @@ use crate::migrate::probes;
 use crate::migrate::{
     Device, MigrateError, MigratePhase, MigrateRole, MigrationState, PageIter,
 };
+use crate::serial::history_buffer::HistoryBuffer;
 use crate::vm::{MigrateSourceCommand, MigrateSourceResponse, VmController};
 
 pub async fn migrate<T: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -314,6 +315,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> SourceProtocol<T> {
         };
         let com1_history =
             self.vm_controller.com1().export_history(remote_addr).await?;
+        {
+            let read_hist: HistoryBuffer = ron::from_str(&com1_history).unwrap();
+            let from_start = read_hist.bytes_from_start() as u64;
+            let rolling_len = read_hist.rolling.len();
+            let beginning_len = read_hist.beginning.len();
+            info!(self.log(), "exported serial buffer: {} bytes from start, beginning len {}, rolling len {}", from_start, beginning_len, rolling_len);
+        }
         self.send_msg(codec::Message::Serialized(com1_history)).await?;
         self.read_ok().await
     }
