@@ -126,9 +126,7 @@ lazy_static! {
         use OperationalRegisters::*;
         use Registers::*;
 
-        // TODO: replace with into_iter() method call when migrated to 2021 edition
-
-        let cap_layout = IntoIterator::into_iter([
+        let cap_layout = [
             (Cap(CapabilityLength), 1),
             (Reserved, 1),
             (Cap(HciVersion), 2),
@@ -139,9 +137,9 @@ lazy_static! {
             (Cap(DoorbellOffset), 4),
             (Cap(RuntimeRegisterSpaceOffset), 4),
             (Cap(HcCapabilityParameters2), 4),
-        ]);
+        ].into_iter();
 
-        let op_layout = IntoIterator::into_iter([
+        let op_layout = [
             (Op(UsbCommand), 4),
             (Op(UsbStatus), 4),
             (Op(PageSize), 4),
@@ -152,7 +150,7 @@ lazy_static! {
             (Op(DeviceContextBaseAddressArrayPointerRegister), 8),
             (Op(Configure), 4),
             (Reserved, 964),
-        ]);
+        ].into_iter();
         // Add the port registers
         let num_ports = NUM_USB2_PORTS + NUM_USB3_PORTS;
         let op_layout = op_layout.chain((0..num_ports).flat_map(|i| {
