@@ -1212,8 +1212,8 @@ fn setup_instance(
                 "pci-xhci" => {
                     let bdf = bdf.unwrap();
                     let xhci = hw::usb::xhci::PciXhci::create();
-                    inv.register_instance(&xhci, bdf.to_string())?;
-                    chipset.pci_attach(bdf, xhci);
+                    guard.inventory.register_instance(&xhci, &bdf.to_string());
+                    chipset_pci_attach(bdf, xhci);
                 }
                 qemu::pvpanic::DEVICE_NAME => {
                     let enable_isa = dev

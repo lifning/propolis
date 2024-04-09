@@ -2,10 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::{GuestAddr, RWOp, ReadOp, WriteOp, PAGE_SIZE};
+use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp, PAGE_SIZE};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
-use crate::inventory::Entity;
 
 use super::bits;
 use super::registers::*;
@@ -242,13 +241,9 @@ impl PciXhci {
     }
 }
 
-impl Entity for PciXhci {
+impl Lifecycle for PciXhci {
     fn type_name(&self) -> &'static str {
         "pci-xhci"
-    }
-
-    fn reset(&self) {
-        self.pci_state.reset(self);
     }
 }
 
