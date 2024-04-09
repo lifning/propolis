@@ -223,7 +223,7 @@ impl PciXhci {
     }
 
     /// Handle write to memory-mapped host controller register
-    fn reg_write(&self, id: Registers, _wo: &mut WriteOp) {
+    fn reg_write(&self, id: Registers, wo: &mut WriteOp) {
         use Registers::*;
 
         match id {
@@ -234,8 +234,37 @@ impl PciXhci {
             Cap(_) => {}
 
             // Operational registers
-            Op(_) => {
-                todo!("xhci: write to operational register");
+            Op(opreg) => match opreg {
+                OperationalRegisters::UsbCommand => {
+                    let mut state = self.state.lock().unwrap();
+                    state.usb_cmd = bits::UsbCommand(wo.read_u32());
+                    todo!("xhci: execute stored command before overwriting, or execute given command?");
+                }
+                OperationalRegisters::UsbStatus => {
+                    let mut state = self.state.lock().unwrap();
+                    let tmp = bits::UsbStatus(wo.read_u32());
+                    todo!("xhci: opreg write usb status completeness (RW1C - software writes 1 to set value 0)");
+                }
+                // Read-only.
+                OperationalRegisters::PageSize => {}
+                OperationalRegisters::DeviceNotificationControl => {
+                    let mut state = self.state.lock().unwrap();
+                    state.dnctrl.data[0] = wo.read_u32() & 0xFFFFu32;
+                    todo!("xhci: opreg write dev notif ctrl");
+                }
+                OperationalRegisters::CommandRingControlRegister => {
+                    let crcr = bits::CommandRingControl(wo.read_u64());
+                    todo!("xhci: opreg write crcr (and is the 64-bit done all at once?)");
+                }
+                OperationalRegisters::DeviceContextBaseAddressArrayPointerRegister => {
+                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
+                }
+                OperationalRegisters::Configure => {
+                    todo!("xhci: opreg write conf");
+                }
+                OperationalRegisters::Port(i, regs) => {
+                    todo!("xhci: opreg write port {} {:?}", i, regs);
+                }
             }
         }
     }
