@@ -237,13 +237,109 @@ impl PciXhci {
             Op(opreg) => match opreg {
                 OperationalRegisters::UsbCommand => {
                     let mut state = self.state.lock().unwrap();
-                    state.usb_cmd = bits::UsbCommand(wo.read_u32());
-                    todo!("xhci: execute stored command before overwriting, or execute given command?");
+                    let cmd = bits::UsbCommand(wo.read_u32());
+
+                    // xHCI 1.2 Section 5.4.1.1
+                    if cmd.run_stop() && !state.usb_cmd.run_stop() {
+                        if !state.usb_sts.host_controller_halted() {
+                            todo!("xhci: run while not halted: undefined behavior!");
+                        }
+                        state.usb_sts.set_host_controller_halted(false);
+                        todo!("xhci: run");
+                    } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
+                        // TODO: can we *actually* stop on a dime like this?:
+                        state.usb_sts.set_host_controller_halted(true);
+                        todo!("xhci: stop");
+                    }
+
+                    if cmd.host_controller_reset() {
+                        todo!("xhci: host controller reset");
+                    }
+
+                    if cmd.interrupter_enable() {
+                        todo!("xhci: interrupter enable");
+                    }
+
+                    // xHCI 1.2 Section 4.10.2.6
+                    if cmd.host_system_error_enable() {
+                        todo!("xhci: host system error enable");
+                    }
+
+                    // xHCI 1.2 Section 4.23.2
+                    if cmd.controller_save_state() {
+                        if state.usb_sts.save_state_status() {
+                            todo!("xhci: save state while saving: undefined behavior!");
+                        }
+                        if state.usb_sts.host_controller_halted() {
+                            todo!("xhci: save state");
+                        }
+                    }
+                    // xHCI 1.2 Section 4.23.2
+                    if cmd.controller_restore_state() {
+                        if state.usb_sts.save_state_status() {
+                            todo!("xhci: restore state while saving: undefined behavior!");
+                        }
+                        if state.usb_sts.host_controller_halted() {
+                            todo!("xhci: restore state");
+                        }
+                    }
+
+                    // xHCI 1.2 Section 4.14.2
+                    if cmd.enable_wrap_event() {
+                        todo!("xhci: enable wrap event");
+                    }
+
+                    // xHCI 1.2 Section 4.14.2
+                    if cmd.enable_u3_mfindex_stop() {
+                        todo!("xhci: enable u3 mfindex stop");
+                    }
+
+                    // xHCI 1.2 Section 4.23.5.2.2
+                    if cmd.cem_enable() {
+                        todo!("xhci: cem enable");
+                    }
+
+                    // xHCI 1.2 Section 4.11.2.3
+                    if cmd.ete() {
+                        todo!("xhci: extended tbc enable");
+                    }
+
+                    // xHCI 1.2 Section 4.11.2.3
+                    if cmd.tsc_enable() {
+                        todo!("xhci: extended tsc trb status enable");
+                    }
+
+                    if cmd.vtio_enable() {
+                        todo!("xhci: vtio enable");
+                    }
+
+                    // LHCRST is optional, and when it is not implemented, it
+                    // must always return 0 when read.
+                    // CSS and CRS also must always return 0 when read.
+                    state.usb_cmd = cmd
+                        .with_controller_save_state(false)
+                        .with_controller_restore_state(false)
+                        .with_light_host_controller_reset(false);
                 }
+                // xHCI 1.2 Section 5.4.2
                 OperationalRegisters::UsbStatus => {
                     let mut state = self.state.lock().unwrap();
-                    let tmp = bits::UsbStatus(wo.read_u32());
-                    todo!("xhci: opreg write usb status completeness (RW1C - software writes 1 to set value 0)");
+                    // HCH, SSS, RSS, CNR, and HCE are read-only (ignored here).
+                    // HSE, EINT, PCD, and SRE are RW1C (guest writes a 1 to
+                    // clear a field to 0, e.g. to ack an interrupt we gave it).
+                    let sts = bits::UsbStatus(wo.read_u32());
+                    if sts.host_system_error() {
+                        state.usb_sts.set_host_system_error(false);
+                    }
+                    if sts.event_interrupt() {
+                        state.usb_sts.set_event_interrupt(false);
+                    }
+                    if sts.port_change_detect() {
+                        state.usb_sts.set_port_change_detect(false);
+                    }
+                    if sts.save_restore_error() {
+                        state.usb_sts.set_save_restore_error(false);
+                    }
                 }
                 // Read-only.
                 OperationalRegisters::PageSize => {}
@@ -257,9 +353,13 @@ impl PciXhci {
                     todo!("xhci: opreg write crcr (and is the 64-bit done all at once?)");
                 }
                 OperationalRegisters::DeviceContextBaseAddressArrayPointerRegister => {
-                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
+                    let mut state = self.state.lock().unwrap();
+                    state.dev_ctx_table_base = Some(GuestAddr(wo.read_u64()));
+                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit) ((does 64bit require special handling?))");
                 }
                 OperationalRegisters::Configure => {
+                    let mut state = self.state.lock().unwrap();
+                    state.config = bits::Configure(wo.read_u32());
                     todo!("xhci: opreg write conf");
                 }
                 OperationalRegisters::Port(i, regs) => {

@@ -348,6 +348,7 @@ bitstruct! {
         /// Host System Error Enable (HSEE)
         ///
         /// Whether the controller shall assert out-of-band error signaling to the host.
+        /// See xHCI 1.2 Section 4.10.2.6
         pub host_system_error_enable: bool = 3;
 
         /// Reserved
@@ -363,24 +364,28 @@ bitstruct! {
         ///
         /// When set to 1, the controller shall save any internal state.
         /// Always returns 0 when read.
+        /// See xHCI 1.2 Section 4.23.2
         pub controller_save_state: bool = 8;
 
         /// Controller Restore State (CRS)
         ///
         /// When set to 1, the controller shall perform a Restore State operation.
         /// Always returns 0 when read.
+        /// See xHCI 1.2 Section 4.23.2
         pub controller_restore_state: bool = 9;
 
         /// Enable Wrap Event (EWE)
         ///
         /// When set to 1, the controller shall generate an MFINDEX Wrap Event
         /// every time the MFINDEX register transitions from 0x3FFF to 0.
+        /// See xHCI 1.2 Section 4.14.2
         pub enable_wrap_event: bool = 10;
 
         /// Enable U3 MFINDEX Stop (EU3S)
         ///
         /// When set to 1, the controller may stop incrementing MFINDEX if all
         /// Root Hub ports are in the U3, Disconnected, Disabled or Powered-off states.
+        /// See xHCI 1.2 Section 4.14.2
         pub enable_u3_mfindex_stop: bool = 11;
 
         /// Reserved
@@ -390,17 +395,20 @@ bitstruct! {
         ///
         /// When set to 1, a Max Exit Latency Too Large Capability Error may be
         /// returned by a Configure Endpoint Command.
+        /// See xHCI 1.2 Section 4.23.5.2.2
         pub cem_enable: bool = 13;
 
         /// Extended TBC Enable (ETE)
         ///
         /// Indicates whether the controller supports Transfer Burst Count (TBC)
         /// values greate than 4 in isochronous TDs.
+        /// See xHCI 1.2 Section 4.11.2.3
         pub ete: bool = 14;
 
         /// Extended TBC TRB Status Enable (TSC_EN)
         ///
         /// Indicates whether the controller supports the ETC_TSC capability.
+        /// See xHCI 1.2 Section 4.11.2.3
         pub tsc_enable: bool = 15;
 
         /// VTIO Enable (VTIOE)
