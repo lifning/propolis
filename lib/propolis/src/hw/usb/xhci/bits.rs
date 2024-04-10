@@ -580,3 +580,27 @@ bitstruct! {
         reserved: u32 = 10..32;
     }
 }
+
+bitstruct! {
+    /// Representation of a Doorbell Register.
+    ///
+    /// From the guest's perspective, this should be write-only (reads 0).
+    /// See xHCI 1.2 Section 5.6
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct DoorbellRegister(pub u32) {
+        /// Doorbell Target
+        ///
+        /// Written value corresponds to a specific xHC notification.
+        ///
+        /// Values 1..=31 correspond to enqueue pointer updates (see spec).
+        /// Values 0 and 32..=247 are reserved.
+        /// Values 248..=255 are vendor-defined (and we're the vendor).
+        pub db_target: u8 = 0..8;
+
+        /// Reserved
+        reserved: u8 = 8..16;
+
+        /// Doorbell Stream ID
+        pub db_stream_id: u16 = 16..32;
+    }
+}

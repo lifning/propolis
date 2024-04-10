@@ -133,9 +133,9 @@ impl PciXhci {
 
             // Capability registers
             Cap(CapabilityLength) => {
-                // TODO: write offset to operational registers
-                // should be cap registers + any space for extended capabilities
-                ro.write_u8(0);
+                // xHCI 1.2 Section 5.3 (Table 5-9) shows 0x20 bytes of cap regs.
+                // (TODO: expand if implementing extended capabilities?)
+                ro.write_u8(XHC_REGS.cap_len as u8);
             }
             Cap(HciVersion) => {
                 // xHCI Version 1.2.0
@@ -174,8 +174,8 @@ impl PciXhci {
                 ro.write_u32(hcc_params2.0);
             }
             Cap(DoorbellOffset) => {
-                // TODO: write valid doorbell offset
-                ro.write_u32(0);
+                // TODO: is this right
+                ro.write_u32((XHC_REGS.cap_len + XHC_REGS.op_len) as u32);
             }
             Cap(RuntimeRegisterSpaceOffset) => {
                 // TODO: write valid runtime register space offset
@@ -249,6 +249,7 @@ impl PciXhci {
                     } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
                         // TODO: can we *actually* stop on a dime like this?:
                         state.usb_sts.set_host_controller_halted(true);
+                        // TODO: do we stop CRCR too?
                         todo!("xhci: stop");
                     }
 
@@ -313,8 +314,8 @@ impl PciXhci {
                         todo!("xhci: vtio enable");
                     }
 
-                    // LHCRST is optional, and when it is not implemented, it
-                    // must always return 0 when read.
+                    // LHCRST is optional, and when it is not implemented
+                    // (HCCPARAMS1), it must always return 0 when read.
                     // CSS and CRS also must always return 0 when read.
                     state.usb_cmd = cmd
                         .with_controller_save_state(false)

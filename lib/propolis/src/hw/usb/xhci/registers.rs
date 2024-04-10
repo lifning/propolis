@@ -166,6 +166,9 @@ lazy_static! {
         // Stash the lengths for later use.
         let cap_len = cap_layout.clone().map(|(_, sz)| sz).sum();
         let op_len = op_layout.clone().map(|(_, sz)| sz).sum();
+        // TODO: 0th doorbell is Command Ring's and it's a different layout
+        // so maybe define a different struct for it and put it first?
+        let db_len = todo!();
 
         let layout = cap_layout.chain(op_layout);
         XhcRegMap {
