@@ -417,7 +417,7 @@ bitstruct! {
         pub vtio_enable: bool = 16;
 
         /// Reserved
-        pub reserved3: u32 = 17..32;
+        reserved3: u32 = 17..32;
     }
 }
 
@@ -584,7 +584,8 @@ bitstruct! {
 bitstruct! {
     /// Representation of a Doorbell Register.
     ///
-    /// From the guest's perspective, this should be write-only (reads 0).
+    /// Software uses this to notify xHC of work to be done for a Device Slot.
+    /// From the software's perspective, this should be write-only (reads 0).
     /// See xHCI 1.2 Section 5.6
     #[derive(Clone, Copy, Debug, Default)]
     pub struct DoorbellRegister(pub u32) {
@@ -601,6 +602,17 @@ bitstruct! {
         reserved: u8 = 8..16;
 
         /// Doorbell Stream ID
+        ///
+        /// If the endpoint defines Streams:
+        /// - This identifies which the doorbell reference is targeting, and
+        /// - 0, 65535 (No Stream), and 65534 (Prime) are reserved values that
+        ///   software shall not write to this field.
+        ///
+        /// If the endpoint does not define Streams, and a nonzero value is
+        /// written by software, the doorbell reference is ignored.
+        ///
+        /// If this is a doorbell is a Host Controller Command Doorbell rather
+        /// than a Device Context Doorbell, this field shall be cleared to 0.
         pub db_stream_id: u16 = 16..32;
     }
 }

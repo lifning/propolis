@@ -5,7 +5,7 @@
 use crate::util::regmap::RegMap;
 
 use super::bits;
-use super::controller::{NUM_USB2_PORTS, NUM_USB3_PORTS};
+use super::controller::{MAX_DEVICE_SLOTS, NUM_USB2_PORTS, NUM_USB3_PORTS};
 
 use lazy_static::lazy_static;
 
@@ -52,6 +52,7 @@ pub enum Registers {
     Reserved,
     Cap(CapabilityRegisters),
     Op(OperationalRegisters),
+    Doorbell,
 }
 
 /// eXtensible Host Controller Capability Registers
@@ -118,6 +119,7 @@ pub struct XhcRegMap {
     pub map: RegMap<Registers>,
     pub cap_len: usize,
     pub op_len: usize,
+    pub db_len: usize,
 }
 
 lazy_static! {
@@ -163,14 +165,16 @@ lazy_static! {
             ]
         }));
 
+        // TODO: 0th doorbell is Command Ring's and it's a different layout
+        // so maybe define a different struct for it and put it first?
+        let db_layout = (0..MAX_DEVICE_SLOTS).map(|_| (Doorbell, 4));
+
         // Stash the lengths for later use.
         let cap_len = cap_layout.clone().map(|(_, sz)| sz).sum();
         let op_len = op_layout.clone().map(|(_, sz)| sz).sum();
-        // TODO: 0th doorbell is Command Ring's and it's a different layout
-        // so maybe define a different struct for it and put it first?
-        let db_len = todo!();
+        let db_len = db_layout.clone().map(|(_, sz)| sz).sum();
 
-        let layout = cap_layout.chain(op_layout);
+        let layout = cap_layout.chain(op_layout).chain(db_layout);
         XhcRegMap {
             map: RegMap::create_packed_iter(
                 bits::XHC_CAP_BASE_REG_SZ,
@@ -179,6 +183,7 @@ lazy_static! {
             ),
             cap_len,
             op_len,
+            db_len,
         }
     };
 }

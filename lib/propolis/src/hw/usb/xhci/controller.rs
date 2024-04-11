@@ -16,7 +16,7 @@ pub(super) const NUM_USB2_PORTS: u8 = 4;
 pub(super) const NUM_USB3_PORTS: u8 = 4;
 
 /// Max number of device slots the controller supports.
-const MAX_DEVICE_SLOTS: u8 = 64;
+pub(super) const MAX_DEVICE_SLOTS: u8 = 64;
 
 /// Max number of interrupters the controller supports.
 const NUM_INTRS: u16 = 1024;
@@ -219,6 +219,9 @@ impl PciXhci {
                 ro.write_u32(state.config.0);
             }
             Op(Port(..)) => {}
+
+            // Only for software to write, returns 0 when read.
+            Doorbell => ro.write_u32(0),
         }
     }
 
@@ -367,6 +370,8 @@ impl PciXhci {
                     todo!("xhci: opreg write port {} {:?}", i, regs);
                 }
             }
+
+            Doorbell => todo!("xhci: doorbell write"),
         }
     }
 }
