@@ -221,7 +221,7 @@ impl PciXhci {
             Op(Port(..)) => {}
 
             // Only for software to write, returns 0 when read.
-            Doorbell => ro.write_u32(0),
+            Doorbell(_) => ro.write_u32(0),
         }
     }
 
@@ -354,12 +354,12 @@ impl PciXhci {
                 }
                 OperationalRegisters::CommandRingControlRegister => {
                     let crcr = bits::CommandRingControl(wo.read_u64());
-                    todo!("xhci: opreg write crcr (and is the 64-bit done all at once?)");
+                    todo!("xhci: opreg write crcr");
                 }
                 OperationalRegisters::DeviceContextBaseAddressArrayPointerRegister => {
                     let mut state = self.state.lock().unwrap();
                     state.dev_ctx_table_base = Some(GuestAddr(wo.read_u64()));
-                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit) ((does 64bit require special handling?))");
+                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
                 }
                 OperationalRegisters::Configure => {
                     let mut state = self.state.lock().unwrap();
@@ -371,7 +371,7 @@ impl PciXhci {
                 }
             }
 
-            Doorbell => todo!("xhci: doorbell write"),
+            Doorbell(i) => todo!("xhci: doorbell {} write", i),
         }
     }
 }

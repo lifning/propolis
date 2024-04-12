@@ -52,7 +52,7 @@ pub enum Registers {
     Reserved,
     Cap(CapabilityRegisters),
     Op(OperationalRegisters),
-    Doorbell,
+    Doorbell(u8),
 }
 
 /// eXtensible Host Controller Capability Registers
@@ -167,7 +167,7 @@ lazy_static! {
 
         // TODO: 0th doorbell is Command Ring's and it's a different layout
         // so maybe define a different struct for it and put it first?
-        let db_layout = (0..MAX_DEVICE_SLOTS).map(|_| (Doorbell, 4));
+        let db_layout = (0..MAX_DEVICE_SLOTS).map(|i| (Doorbell(i), 4));
 
         // Stash the lengths for later use.
         let cap_len = cap_layout.clone().map(|(_, sz)| sz).sum();
