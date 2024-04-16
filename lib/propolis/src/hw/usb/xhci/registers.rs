@@ -119,7 +119,20 @@ pub struct XhcRegMap {
     pub map: RegMap<Registers>,
     pub cap_len: usize,
     pub op_len: usize,
+    pub run_len: usize,
     pub db_len: usize,
+}
+
+impl XhcRegMap {
+    pub(super) const fn operational_offset(&self) -> usize {
+        self.cap_len
+    }
+    pub(super) const fn runtime_offset(&self) -> usize {
+        self.cap_len + self.op_len
+    }
+    pub(super) const fn doorbell_offset(&self) -> usize {
+        self.cap_len + self.op_len + self.run_len
+    }
 }
 
 lazy_static! {
@@ -128,6 +141,8 @@ lazy_static! {
         use OperationalRegisters::*;
         use Registers::*;
 
+        // xHCI 1.2 Table 5-9
+        // (may be expanded if implementing extended capabilities)
         let cap_layout = [
             (Cap(CapabilityLength), 1),
             (Reserved, 1),
@@ -165,17 +180,24 @@ lazy_static! {
             ]
         }));
 
-        // TODO: 0th doorbell is Command Ring's and it's a different layout
-        // so maybe define a different struct for it and put it first?
-        let db_layout = (0..MAX_DEVICE_SLOTS).map(|i| (Doorbell(i), 4));
+        let run_layout = todo!();
+
+        // +1: 0th doorbell is Command Ring's.
+        // TODO: it's a different layout, define a different variant for it?
+        let db_layout = (0..MAX_DEVICE_SLOTS + 1).map(|i| (Doorbell(i), 4));
 
         // Stash the lengths for later use.
         let cap_len = cap_layout.clone().map(|(_, sz)| sz).sum();
         let op_len = op_layout.clone().map(|(_, sz)| sz).sum();
+        let run_len = run_layout.clone().map(|(_, sz)| sz).sum();
         let db_len = db_layout.clone().map(|(_, sz)| sz).sum();
 
-        let layout = cap_layout.chain(op_layout).chain(db_layout);
-        XhcRegMap {
+        let layout = cap_layout
+            .chain(op_layout)
+            .chain(run_layout)
+            .chain(db_layout);
+
+        let xhc_reg_map = XhcRegMap {
             map: RegMap::create_packed_iter(
                 bits::XHC_CAP_BASE_REG_SZ,
                 layout,
@@ -183,7 +205,21 @@ lazy_static! {
             ),
             cap_len,
             op_len,
+            run_len,
             db_len,
-        }
+        };
+
+        // xHCI 1.2 Table 5-1:
+        // Capability registers must be page-aligned, and they're first.
+        // Operational-registers must be 4-byte-aligned. They follow cap regs.
+        // `cap_len` is a multiple of 4 (32 at time of writing).
+        assert_eq!(xhc_reg_map.operational_offset() % 4, 0);
+        // Runtime registers must be 32-byte-aligned.
+        // Both `cap_len` and `op_len` are (at present, `cap_len` is 1024),
+        // so we can safely put Runtime registers immediately after them.
+        // (Note: if VTIO is implemented, virtual fn's must be *page*-aligned)
+        assert_eq!(xhc_reg_map.runtime_offset() % 32, 0);
+        // Finally, the Doorbell array merely must be 4-byte-aligned.
+        assert_eq!(xhc_reg_map.doorbell_offset() % 4, 0);
     };
 }

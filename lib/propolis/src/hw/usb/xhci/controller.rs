@@ -133,12 +133,12 @@ impl PciXhci {
 
             // Capability registers
             Cap(CapabilityLength) => {
-                // xHCI 1.2 Section 5.3 (Table 5-9) shows 0x20 bytes of cap regs.
-                // (TODO: expand if implementing extended capabilities?)
-                ro.write_u8(XHC_REGS.cap_len as u8);
+                // xHCI 1.2 Section 5.3.1: Used to find the beginning of
+                // operational registers.
+                ro.write_u8(XHC_REGS.operational_offset() as u8);
             }
             Cap(HciVersion) => {
-                // xHCI Version 1.2.0
+                // xHCI 1.2 Section 5.3.2: xHCI Version 1.2.0
                 ro.write_u16(0x0120);
             }
             Cap(HcStructuralParameters1) => {
@@ -174,12 +174,11 @@ impl PciXhci {
                 ro.write_u32(hcc_params2.0);
             }
             Cap(DoorbellOffset) => {
-                // TODO: is this right
-                ro.write_u32((XHC_REGS.cap_len + XHC_REGS.op_len) as u32);
+                // Per layout defined in XhcRegMap.
+                ro.write_u32(XHC_REGS.doorbell_offset() as u32);
             }
             Cap(RuntimeRegisterSpaceOffset) => {
-                // TODO: write valid runtime register space offset
-                ro.write_u32(0);
+                ro.write_u32(XHC_REGS.runtime_offset() as u32);
             }
 
             // Operational registers
