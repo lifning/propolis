@@ -168,6 +168,7 @@ lazy_static! {
             (Op(Configure), 4),
             (Reserved, 964),
         ].into_iter();
+
         // Add the port registers
         let num_ports = NUM_USB2_PORTS + NUM_USB3_PORTS;
         let op_layout = op_layout.chain((0..num_ports).flat_map(|i| {
@@ -215,7 +216,7 @@ lazy_static! {
         // `cap_len` is a multiple of 4 (32 at time of writing).
         assert_eq!(xhc_reg_map.operational_offset() % 4, 0);
         // Runtime registers must be 32-byte-aligned.
-        // Both `cap_len` and `op_len` are (at present, `cap_len` is 1024),
+        // Both `cap_len` and `op_len` are (at present, cap_len is 1024 + 16*8),
         // so we can safely put Runtime registers immediately after them.
         // (Note: if VTIO is implemented, virtual fn's must be *page*-aligned)
         assert_eq!(xhc_reg_map.runtime_offset() % 32, 0);
