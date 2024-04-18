@@ -582,6 +582,136 @@ bitstruct! {
 }
 
 bitstruct! {
+    /// Representation of the Microframe Index (MFINDEX) runtime register.
+    ///
+    /// See xHCI 1.2 Section 5.5.1
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct MicroframeIndex(pub u32) {
+        /// The number of 125-millisecond microframes that have passed,
+        /// only incrementing while [UsbCommand::run_stop] has been set to 1.
+        /// Read-only.
+        pub microframe: u16 = 0..14;
+
+        /// Reserved
+        reserved: u32 = 14..32;
+    }
+}
+
+bitstruct! {
+    /// Representation of the Interrupter Management Register (IMAN).
+    ///
+    /// See xHCI 1.2 Section 5.5.2.1
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct InterrupterManagement(pub u32) {
+        /// Interrupt Pending (IP)
+        ///
+        /// True iff an interrupt is pending for this interrupter. RW1C.
+        /// See xHCI 1.2 Section 4.17.3 for modification rules.
+        pub pending: bool = 0;
+
+        /// Interrupt Enable (IE)
+        ///
+        /// True if this interrupter is capable of generating an interrupt.
+        /// When both this and [interrupt_pending] are true, the interrupter
+        /// shall generate an interrupt when [InterrupterModeration::counter]
+        /// reaches 0.
+        pub enable: bool = 1;
+
+        /// Reserved
+        reserved: u32 = 2..32;
+    }
+}
+
+bitstruct! {
+    /// Representation of the Interrupter Moderation Register (IMOD).
+    ///
+    /// See xHCI 1.2 Section 5.5.2.2
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct InterrupterModeration(pub u32) {
+        /// Interrupt Moderation Interval (IMODI)
+        ///
+        /// Minimum inter-interrupt interval, specified in 250 ms increments.
+        /// 0 disables throttling logic altogether. Default 0x4000 (1 ms).
+        pub interval: u16 = 0..16;
+
+        /// Interrupt Moderation Counter (IMODC)
+        ///
+        /// Loaded with the value of [interval] whenever
+        /// [InterrupterManagement::pending] is cleared to 0, then counts down
+        /// to 0, and then stops. The associated interrupt is signaled when
+        /// this counter is 0, the Event Ring is not empty, both flags in
+        /// [InterrupterManagement] are true, and
+        /// [EventRungDequeuePointer::handler_busy] is false.
+        pub counter: u16 = 16..32;
+    }
+}
+
+bitstruct! {
+    /// Representation of the Event Ring Segment Table Size Register (ERSTSZ)
+    ///
+    /// See xHCI 1.2 Section 5.5.2.3.1
+    // (Note: ERSTSZ, not ersatz -- this is the real deal.)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct EventRingSegmentTableSize(pub u32) {
+        /// Number of valid entries in the Event Ring Segment Table pointed to
+        /// by [EventRingSegmentTableBaseAddress]. The maximum value is defined
+        /// in [HcStructuralParameters2::erst_max].
+        ///
+        /// For secondary interrupters, writing 0 to this field disables the
+        /// Event Ring. Events targeted at this Event Ring while disabled result
+        /// in undefined behavior.
+        ///
+        /// Primary interrupters writing 0 to this field is undefined behavior,
+        /// as the Primary Event Ring cannot be disabled.
+        pub size: u16 = 0..16;
+
+        /// Reserved
+        reserved: u16 = 16..32;
+    }
+}
+
+bitstruct! {
+    /// Representation of the Event Ring Segment Table Base Address Register (ERSTBA)
+    ///
+    /// See xHCI 1.2 Section 5.5.2.3.2
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct EventRingSegmentTableBaseAddress(pub u64) {
+        /// Reserved
+        reserved: u8 = 0..6;
+
+        /// Default 0. Defines the high-order bits (6..=63) of the start address
+        /// of the Event Ring Segment Table.
+        ///
+        /// Writing this register starts the Event Ring State Machine.
+        /// Secondary interrupters may modify the field at any time.
+        /// Primary interrupters  shall not modify this if
+        /// [UsbStatus::host_controller_halted] is true.
+        pub address: u64 = 6..64;
+    }
+}
+
+bitstruct! {
+    /// Representation of the Event Ring Dequeue Pointer Register (ERDP)
+    ///
+    /// See xHCI 1.2 Section 5.5.2.3.2
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct EventRingDequeuePointer(pub u64) {
+        /// Dequeue ERST Segment Index (DESI). Default 0.
+        // TODO: doc
+        pub dequeue_erst_segment_index: u8 = 0..3;
+
+        /// Event Handler Busy (EHB). Default false.
+        // TODO: doc
+        pub handler_busy: bool = 3;
+
+        /// Default 0. Defines the high-order bits (4..=63) of the address of
+        /// the current Event Ring Dequeue Pointer.
+        // TODO: double check spec's wording - is this a pointer or a double-pointer?
+        pub pointer: u64 = 4..64;
+    }
+}
+
+bitstruct! {
     /// Representation of a Doorbell Register.
     ///
     /// Software uses this to notify xHC of work to be done for a Device Slot.

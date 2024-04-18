@@ -15,11 +15,19 @@ pub(super) const NUM_USB2_PORTS: u8 = 4;
 /// The number of USB3 ports the controller supports.
 pub(super) const NUM_USB3_PORTS: u8 = 4;
 
-/// Max number of device slots the controller supports.
+/// Max number of device slots the controller supports (up to 255).
 pub(super) const MAX_DEVICE_SLOTS: u8 = 64;
 
-/// Max number of interrupters the controller supports.
-const NUM_INTRS: u16 = 1024;
+/// Max number of interrupters the controller supports (up to 1024).
+pub(super) const NUM_INTRS: u16 = 1;
+
+struct IntrRegSet {
+    management: bits::InterrupterManagement,
+    moderation: bits::InterrupterModeration,
+    evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize,
+    evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress,
+    evt_ring_deq_ptr: bits::EventRingDequeuePointer,
+}
 
 struct XhciState {
     /// USB Command Register
@@ -30,6 +38,12 @@ struct XhciState {
 
     /// Device Notification Control Register
     dnctrl: bits::DeviceNotificationControl,
+
+    /// Microframe counter (125 ms per tick while running)
+    mf_index: bits::MicroframeIndex,
+
+    /// Interrupter register sets
+    intr_reg_sets: [IntrRegSet; NUM_INTRS as usize],
 
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
@@ -84,6 +98,17 @@ impl PciXhci {
             dnctrl: bits::DeviceNotificationControl::new([0]),
             dev_ctx_table_base: None,
             config: bits::Configure(0),
+            mf_index: bits::MicroframeIndex(0),
+            intr_reg_sets: [IntrRegSet {
+                management: bits::InterrupterManagement(0),
+                moderation: bits::InterrupterModeration(0)
+                    .with_interval(0x4000),
+                evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
+                evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress(
+                    0,
+                ),
+                evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
+            }],
         });
 
         Arc::new(Self { pci_state, state })
@@ -127,6 +152,7 @@ impl PciXhci {
         use CapabilityRegisters::*;
         use OperationalRegisters::*;
         use Registers::*;
+        use RuntimeRegisters::*;
 
         match id {
             Reserved => ro.fill(0),
@@ -219,6 +245,38 @@ impl PciXhci {
             }
             Op(Port(..)) => {}
 
+            // Runtime registers
+            Runtime(MicroframeIndex) => {
+                let state = self.state.lock().unwrap();
+                ro.write_u32(state.mf_index.0);
+            }
+            Runtime(Interrupter(i, intr_regs)) => {
+                let i = i as usize;
+                if i < NUM_INTRS as usize {
+                    let state = self.state.lock().unwrap();
+                    let reg_set = &state.intr_reg_sets[i];
+                    match intr_regs {
+                        InterrupterRegisters::Management => {
+                            ro.write_u32(reg_set.management.0);
+                        }
+                        InterrupterRegisters::Moderation => {
+                            ro.write_u32(reg_set.moderation.0);
+                        }
+                        InterrupterRegisters::EventRingSegmentTableSize => {
+                            ro.write_u32(reg_set.evt_ring_seg_tbl_size.0);
+                        }
+                        InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                            ro.write_u64(reg_set.evt_ring_seg_base_addr.0);
+                        }
+                        InterrupterRegisters::EventRingDequeuePointer => {
+                            ro.write_u64(reg_set.evt_ring_deq_ptr.0);
+                        }
+                    }
+                } else {
+                    // invalid interrupter index given.
+                }
+            }
+
             // Only for software to write, returns 0 when read.
             Doorbell(_) => ro.write_u32(0),
         }
@@ -226,7 +284,9 @@ impl PciXhci {
 
     /// Handle write to memory-mapped host controller register
     fn reg_write(&self, id: Registers, wo: &mut WriteOp) {
+        use OperationalRegisters::*;
         use Registers::*;
+        use RuntimeRegisters::*;
 
         match id {
             // Ignore writes to reserved bits
@@ -236,137 +296,166 @@ impl PciXhci {
             Cap(_) => {}
 
             // Operational registers
-            Op(opreg) => match opreg {
-                OperationalRegisters::UsbCommand => {
-                    let mut state = self.state.lock().unwrap();
-                    let cmd = bits::UsbCommand(wo.read_u32());
+            Op(UsbCommand) => {
+                let mut state = self.state.lock().unwrap();
+                let cmd = bits::UsbCommand(wo.read_u32());
 
-                    // xHCI 1.2 Section 5.4.1.1
-                    if cmd.run_stop() && !state.usb_cmd.run_stop() {
-                        if !state.usb_sts.host_controller_halted() {
-                            todo!("xhci: run while not halted: undefined behavior!");
+                // xHCI 1.2 Section 5.4.1.1
+                if cmd.run_stop() && !state.usb_cmd.run_stop() {
+                    if !state.usb_sts.host_controller_halted() {
+                        todo!(
+                            "xhci: run while not halted: undefined behavior!"
+                        );
+                    }
+                    state.usb_sts.set_host_controller_halted(false);
+                    todo!("xhci: run");
+                } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
+                    // TODO: can we *actually* stop on a dime like this?:
+                    state.usb_sts.set_host_controller_halted(true);
+                    // TODO: do we stop CRCR too?
+                    todo!("xhci: stop");
+                }
+
+                if cmd.host_controller_reset() {
+                    todo!("xhci: host controller reset");
+                }
+
+                if cmd.interrupter_enable() {
+                    todo!("xhci: interrupter enable");
+                }
+
+                // xHCI 1.2 Section 4.10.2.6
+                if cmd.host_system_error_enable() {
+                    todo!("xhci: host system error enable");
+                }
+
+                // xHCI 1.2 Section 4.23.2
+                if cmd.controller_save_state() {
+                    if state.usb_sts.save_state_status() {
+                        todo!("xhci: save state while saving: undefined behavior!");
+                    }
+                    if state.usb_sts.host_controller_halted() {
+                        todo!("xhci: save state");
+                    }
+                }
+                // xHCI 1.2 Section 4.23.2
+                if cmd.controller_restore_state() {
+                    if state.usb_sts.save_state_status() {
+                        todo!("xhci: restore state while saving: undefined behavior!");
+                    }
+                    if state.usb_sts.host_controller_halted() {
+                        todo!("xhci: restore state");
+                    }
+                }
+
+                // xHCI 1.2 Section 4.14.2
+                if cmd.enable_wrap_event() {
+                    todo!("xhci: enable wrap event");
+                }
+
+                // xHCI 1.2 Section 4.14.2
+                if cmd.enable_u3_mfindex_stop() {
+                    todo!("xhci: enable u3 mfindex stop");
+                }
+
+                // xHCI 1.2 Section 4.23.5.2.2
+                if cmd.cem_enable() {
+                    todo!("xhci: cem enable");
+                }
+
+                // xHCI 1.2 Section 4.11.2.3
+                if cmd.ete() {
+                    todo!("xhci: extended tbc enable");
+                }
+
+                // xHCI 1.2 Section 4.11.2.3
+                if cmd.tsc_enable() {
+                    todo!("xhci: extended tsc trb status enable");
+                }
+
+                if cmd.vtio_enable() {
+                    todo!("xhci: vtio enable");
+                }
+
+                // LHCRST is optional, and when it is not implemented
+                // (HCCPARAMS1), it must always return 0 when read.
+                // CSS and CRS also must always return 0 when read.
+                state.usb_cmd = cmd
+                    .with_controller_save_state(false)
+                    .with_controller_restore_state(false)
+                    .with_light_host_controller_reset(false);
+            }
+            // xHCI 1.2 Section 5.4.2
+            Op(UsbStatus) => {
+                let mut state = self.state.lock().unwrap();
+                // HCH, SSS, RSS, CNR, and HCE are read-only (ignored here).
+                // HSE, EINT, PCD, and SRE are RW1C (guest writes a 1 to
+                // clear a field to 0, e.g. to ack an interrupt we gave it).
+                let sts = bits::UsbStatus(wo.read_u32());
+                if sts.host_system_error() {
+                    state.usb_sts.set_host_system_error(false);
+                }
+                if sts.event_interrupt() {
+                    state.usb_sts.set_event_interrupt(false);
+                }
+                if sts.port_change_detect() {
+                    state.usb_sts.set_port_change_detect(false);
+                }
+                if sts.save_restore_error() {
+                    state.usb_sts.set_save_restore_error(false);
+                }
+            }
+            // Read-only.
+            Op(PageSize) => {}
+            Op(DeviceNotificationControl) => {
+                let mut state = self.state.lock().unwrap();
+                state.dnctrl.data[0] = wo.read_u32() & 0xFFFFu32;
+                todo!("xhci: opreg write dev notif ctrl");
+            }
+            Op(CommandRingControlRegister) => {
+                let crcr = bits::CommandRingControl(wo.read_u64());
+                todo!("xhci: opreg write crcr");
+            }
+            Op(DeviceContextBaseAddressArrayPointerRegister) => {
+                let mut state = self.state.lock().unwrap();
+                state.dev_ctx_table_base = Some(GuestAddr(wo.read_u64()));
+                todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
+            }
+            Op(Configure) => {
+                let mut state = self.state.lock().unwrap();
+                state.config = bits::Configure(wo.read_u32());
+                todo!("xhci: opreg write conf");
+            }
+            Op(Port(i, regs)) => {
+                todo!("xhci: opreg write port {} {:?}", i, regs);
+            }
+
+            // Runtime registers
+            Runtime(MicroframeIndex) => {} // Read-only
+            Runtime(Interrupter(i, intr_regs)) => {
+                let i = i as usize;
+                if i < NUM_INTRS as usize {
+                    let state = self.state.lock().unwrap();
+                    let _reg_set = &state.intr_reg_sets[i];
+                    match intr_regs {
+                        InterrupterRegisters::Management => {
+                            todo!("xhci: rt reg write intr mgmt");
                         }
-                        state.usb_sts.set_host_controller_halted(false);
-                        todo!("xhci: run");
-                    } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
-                        // TODO: can we *actually* stop on a dime like this?:
-                        state.usb_sts.set_host_controller_halted(true);
-                        // TODO: do we stop CRCR too?
-                        todo!("xhci: stop");
-                    }
-
-                    if cmd.host_controller_reset() {
-                        todo!("xhci: host controller reset");
-                    }
-
-                    if cmd.interrupter_enable() {
-                        todo!("xhci: interrupter enable");
-                    }
-
-                    // xHCI 1.2 Section 4.10.2.6
-                    if cmd.host_system_error_enable() {
-                        todo!("xhci: host system error enable");
-                    }
-
-                    // xHCI 1.2 Section 4.23.2
-                    if cmd.controller_save_state() {
-                        if state.usb_sts.save_state_status() {
-                            todo!("xhci: save state while saving: undefined behavior!");
+                        InterrupterRegisters::Moderation => {
+                            todo!("xhci: rt reg write intr mod");
                         }
-                        if state.usb_sts.host_controller_halted() {
-                            todo!("xhci: save state");
+                        InterrupterRegisters::EventRingSegmentTableSize => {
+                            todo!("xhci: rt reg write erstsz");
+                        }
+                        InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                            todo!("xhci: rt reg write erstba");
+                        }
+                        InterrupterRegisters::EventRingDequeuePointer => {
+                            todo!("xhci: rt reg write erdp");
                         }
                     }
-                    // xHCI 1.2 Section 4.23.2
-                    if cmd.controller_restore_state() {
-                        if state.usb_sts.save_state_status() {
-                            todo!("xhci: restore state while saving: undefined behavior!");
-                        }
-                        if state.usb_sts.host_controller_halted() {
-                            todo!("xhci: restore state");
-                        }
-                    }
-
-                    // xHCI 1.2 Section 4.14.2
-                    if cmd.enable_wrap_event() {
-                        todo!("xhci: enable wrap event");
-                    }
-
-                    // xHCI 1.2 Section 4.14.2
-                    if cmd.enable_u3_mfindex_stop() {
-                        todo!("xhci: enable u3 mfindex stop");
-                    }
-
-                    // xHCI 1.2 Section 4.23.5.2.2
-                    if cmd.cem_enable() {
-                        todo!("xhci: cem enable");
-                    }
-
-                    // xHCI 1.2 Section 4.11.2.3
-                    if cmd.ete() {
-                        todo!("xhci: extended tbc enable");
-                    }
-
-                    // xHCI 1.2 Section 4.11.2.3
-                    if cmd.tsc_enable() {
-                        todo!("xhci: extended tsc trb status enable");
-                    }
-
-                    if cmd.vtio_enable() {
-                        todo!("xhci: vtio enable");
-                    }
-
-                    // LHCRST is optional, and when it is not implemented
-                    // (HCCPARAMS1), it must always return 0 when read.
-                    // CSS and CRS also must always return 0 when read.
-                    state.usb_cmd = cmd
-                        .with_controller_save_state(false)
-                        .with_controller_restore_state(false)
-                        .with_light_host_controller_reset(false);
-                }
-                // xHCI 1.2 Section 5.4.2
-                OperationalRegisters::UsbStatus => {
-                    let mut state = self.state.lock().unwrap();
-                    // HCH, SSS, RSS, CNR, and HCE are read-only (ignored here).
-                    // HSE, EINT, PCD, and SRE are RW1C (guest writes a 1 to
-                    // clear a field to 0, e.g. to ack an interrupt we gave it).
-                    let sts = bits::UsbStatus(wo.read_u32());
-                    if sts.host_system_error() {
-                        state.usb_sts.set_host_system_error(false);
-                    }
-                    if sts.event_interrupt() {
-                        state.usb_sts.set_event_interrupt(false);
-                    }
-                    if sts.port_change_detect() {
-                        state.usb_sts.set_port_change_detect(false);
-                    }
-                    if sts.save_restore_error() {
-                        state.usb_sts.set_save_restore_error(false);
-                    }
-                }
-                // Read-only.
-                OperationalRegisters::PageSize => {}
-                OperationalRegisters::DeviceNotificationControl => {
-                    let mut state = self.state.lock().unwrap();
-                    state.dnctrl.data[0] = wo.read_u32() & 0xFFFFu32;
-                    todo!("xhci: opreg write dev notif ctrl");
-                }
-                OperationalRegisters::CommandRingControlRegister => {
-                    let crcr = bits::CommandRingControl(wo.read_u64());
-                    todo!("xhci: opreg write crcr");
-                }
-                OperationalRegisters::DeviceContextBaseAddressArrayPointerRegister => {
-                    let mut state = self.state.lock().unwrap();
-                    state.dev_ctx_table_base = Some(GuestAddr(wo.read_u64()));
-                    todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
-                }
-                OperationalRegisters::Configure => {
-                    let mut state = self.state.lock().unwrap();
-                    state.config = bits::Configure(wo.read_u32());
-                    todo!("xhci: opreg write conf");
-                }
-                OperationalRegisters::Port(i, regs) => {
-                    todo!("xhci: opreg write port {} {:?}", i, regs);
+                } else {
+                    // invalid interrupter index given.
                 }
             }
 

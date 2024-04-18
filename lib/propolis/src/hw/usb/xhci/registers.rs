@@ -5,7 +5,9 @@
 use crate::util::regmap::RegMap;
 
 use super::bits;
-use super::controller::{MAX_DEVICE_SLOTS, NUM_USB2_PORTS, NUM_USB3_PORTS};
+use super::controller::{
+    MAX_DEVICE_SLOTS, NUM_INTRS, NUM_USB2_PORTS, NUM_USB3_PORTS,
+};
 
 use lazy_static::lazy_static;
 
@@ -52,6 +54,7 @@ pub enum Registers {
     Reserved,
     Cap(CapabilityRegisters),
     Op(OperationalRegisters),
+    Runtime(RuntimeRegisters),
     Doorbell(u8),
 }
 
@@ -139,6 +142,7 @@ lazy_static! {
     pub static ref XHC_REGS: XhcRegMap = {
         use CapabilityRegisters::*;
         use OperationalRegisters::*;
+        use RuntimeRegisters::*;
         use Registers::*;
 
         // xHCI 1.2 Table 5-9
@@ -181,10 +185,24 @@ lazy_static! {
             ]
         }));
 
-        let run_layout = todo!();
+        let run_layout = [
+            (Runtime(MicroframeIndex), 4),
+            (Reserved, 28),
+        ].into_iter();
+        let run_layout = run_layout.chain((0..NUM_INTRS).flat_map(|i| {
+            use InterrupterRegisters::*;
+            [
+                (Runtime(Interrupter(i, Management)), 4),
+                (Runtime(Interrupter(i, Moderation)), 4),
+                (Runtime(Interrupter(i, EventRingSegmentTableSize)), 4),
+                (Reserved, 4),
+                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress)), 8),
+                (Runtime(Interrupter(i, EventRingDequeuePointer)), 8),
+            ]
+        }));
 
         // +1: 0th doorbell is Command Ring's.
-        // TODO: it's a different layout, define a different variant for it?
+        // TODO: CR's is a different layout, define a different variant for it?
         let db_layout = (0..MAX_DEVICE_SLOTS + 1).map(|i| (Doorbell(i), 4));
 
         // Stash the lengths for later use.
@@ -210,7 +228,7 @@ lazy_static! {
             db_len,
         };
 
-        // xHCI 1.2 Table 5-1:
+        // xHCI 1.2 Table 5-2:
         // Capability registers must be page-aligned, and they're first.
         // Operational-registers must be 4-byte-aligned. They follow cap regs.
         // `cap_len` is a multiple of 4 (32 at time of writing).
@@ -221,6 +239,9 @@ lazy_static! {
         // (Note: if VTIO is implemented, virtual fn's must be *page*-aligned)
         assert_eq!(xhc_reg_map.runtime_offset() % 32, 0);
         // Finally, the Doorbell array merely must be 4-byte-aligned.
+        // All the runtime registers immediately preceding are 4 bytes wide.
         assert_eq!(xhc_reg_map.doorbell_offset() % 4, 0);
+
+        xhc_reg_map
     };
 }
