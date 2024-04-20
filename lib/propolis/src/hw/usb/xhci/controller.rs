@@ -15,7 +15,9 @@ pub(super) const NUM_USB2_PORTS: u8 = 4;
 /// The number of USB3 ports the controller supports.
 pub(super) const NUM_USB3_PORTS: u8 = 4;
 
-/// Max number of device slots the controller supports (up to 255).
+/// Max number of device slots the controller supports.
+// (up to 255)
+// (Windows needs at least 64? TODO: source other than bhyve C frontend comment)
 pub(super) const MAX_DEVICE_SLOTS: u8 = 64;
 
 /// Max number of interrupters the controller supports (up to 1024).
@@ -459,8 +461,18 @@ impl PciXhci {
                 }
             }
 
-            Doorbell(i) => todo!("xhci: doorbell {} write", i),
+            Doorbell(0) => {
+                todo!("xhci: doorbell zero write");
+            }
+            Doorbell(i) => {
+                todo!("xhci: doorbell {} write", i);
+            }
         }
+    }
+
+    fn reset_controller(&self) {
+        let mut state = self.state.lock().unwrap();
+        todo!("xhci: reset all device slots");
     }
 }
 
