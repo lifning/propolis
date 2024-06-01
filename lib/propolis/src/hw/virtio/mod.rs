@@ -8,6 +8,7 @@ use std::sync::Arc;
 mod bits;
 
 pub mod block;
+pub mod input;
 #[cfg(feature = "falcon")]
 pub mod p9fs;
 pub mod pci;

@@ -53,6 +53,7 @@ pub const CLASS_DISPLAY: u8 = 3;
 pub const CLASS_MULTIMEDIA: u8 = 4;
 pub const CLASS_MEMORY: u8 = 5;
 pub const CLASS_BRIDGE: u8 = 6;
+pub const CLASS_INPUT: u8 = 9;
 
 // Sub-classes under CLASS_STORAGE
 pub const SUBCLASS_STORAGE_NVM: u8 = 8;

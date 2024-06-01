@@ -5,11 +5,13 @@
 pub const VIRTIO_DEV_NET: u16 = 0x1000;
 pub const VIRTIO_DEV_BLOCK: u16 = 0x1001;
 pub const VIRTIO_DEV_9P: u16 = 0x1009;
+pub const VIRTIO_DEV_INPUT: u16 = 0x1012;
 
 // Legacy virtio-pci devices must present these sub-device-IDs
 pub const VIRTIO_SUB_DEV_NET: u16 = 0x1;
 pub const VIRTIO_SUB_DEV_BLOCK: u16 = 0x2;
 pub const VIRTIO_SUB_DEV_9P_TRANSPORT: u16 = 0x9;
+pub const VIRTIO_SUB_DEV_INPUT: u16 = 0x12;
 
 // Legacy interface feature bits
 pub const VIRTIO_F_NOTIFY_ON_EMPTY: usize = 1 << 24;
