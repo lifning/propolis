@@ -116,6 +116,29 @@ impl MigrationElement for VirtioNic {
     }
 }
 
+/// A human interface device that presents a virtio-input interface to the guest.
+#[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VirtioInput {
+    /// The PCI path at which to attach this device.
+    pub pci_path: PciPath,
+}
+
+impl MigrationElement for VirtioInput {
+    fn kind(&self) -> &'static str {
+        "VirtioInput"
+    }
+
+    fn can_migrate_from_element(
+        &self,
+        other: &Self,
+    ) -> Result<(), crate::instance_spec::migration::ElementCompatibilityError>
+    {
+        pci_path_matches(&self.pci_path, &other.pci_path)?;
+        Ok(())
+    }
+}
+
 /// A serial port identifier, which determines what I/O ports a guest can use to
 /// access a port.
 #[derive(

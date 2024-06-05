@@ -626,6 +626,32 @@ impl<'a> MachineInitializer<'a> {
         Ok(())
     }
 
+    pub fn initialize_input_devices(
+        &mut self,
+        chipset: &RegisteredChipset,
+    ) -> Result<(), Error> {
+        for (name, input_spec) in &self.spec.devices.input_devices {
+            let tablet = virtio::input::PciVirtioInput::new(
+                0x100,
+                Box::new(virtio::input::VirtioTablet::new()),
+            );
+            let bdf: pci::Bdf =
+                input_spec.pci_path().try_into().map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "Couldn't get PCI BDF for input device {}: {}",
+                            name, e
+                        ),
+                    )
+                })?;
+            self.devices
+                .insert(format!("pci-virtio-input-{}", bdf), tablet.clone());
+            chipset.pci_attach(bdf, tablet);
+        }
+        Ok(())
+    }
+
     #[cfg(not(feature = "omicron-build"))]
     pub fn initialize_test_devices(
         &mut self,

@@ -12,7 +12,7 @@ use super::queue::VirtQueues;
 use super::{VirtioDevice, VirtioIntr, VqChange, VqIntr};
 use crate::common::*;
 use crate::hw::ids::pci::VENDOR_VIRTIO;
-use crate::hw::pci;
+use crate::hw::pci::{self, Device};
 use crate::intr_pins::IntrPin;
 use crate::migrate::*;
 use crate::util::regmap::RegMap;
@@ -97,22 +97,29 @@ impl<D: PciVirtio + Send + Sync + 'static> pci::Device for D {
     fn bar_rw(&self, bar: pci::BarN, mut rwo: RWOp) {
         let vs = self.virtio_state();
 
-        assert_eq!(bar, pci::BarN::BAR0);
-        let map = match vs.map_which.load(Ordering::SeqCst) {
-            false => &vs.map_nomsix,
-            true => &vs.map,
-        };
-        map.process(&mut rwo, |id, mut rwo| match id {
-            VirtioTop::LegacyConfig => {
-                LEGACY_REGS.process(&mut rwo, |id, rwo| match rwo {
-                    RWOp::Read(ro) => vs.legacy_read(self, id, ro),
-                    RWOp::Write(wo) => {
-                        vs.legacy_write(self.pci_state(), self, id, wo)
+        match self.pci_state().ident().device_id {
+            0x1040..=0x10ef => self.cfg_rw(rwo),
+            // legacy or transitional
+            _ => {
+                assert_eq!(bar, pci::BarN::BAR0);
+
+                let map = match vs.map_which.load(Ordering::SeqCst) {
+                    false => &vs.map_nomsix,
+                    true => &vs.map,
+                };
+                map.process(&mut rwo, |id, mut rwo| match id {
+                    VirtioTop::LegacyConfig => {
+                        LEGACY_REGS.process(&mut rwo, |id, rwo| match rwo {
+                            RWOp::Read(ro) => vs.legacy_read(self, id, ro),
+                            RWOp::Write(wo) => {
+                                vs.legacy_write(self.pci_state(), self, id, wo)
+                            }
+                        })
                     }
-                })
+                    VirtioTop::DeviceConfig => self.cfg_rw(rwo),
+                });
             }
-            VirtioTop::DeviceConfig => self.cfg_rw(rwo),
-        });
+        }
     }
     fn attach(&self) {
         let ps = self.pci_state();

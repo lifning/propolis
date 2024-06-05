@@ -131,6 +131,24 @@ impl SpecBuilder {
         Ok(self)
     }
 
+    /// Adds an input device.
+    pub fn add_input_device(
+        &mut self,
+        device_name: String,
+        device_spec: InputDeviceV0,
+    ) -> Result<&Self, SpecBuilderError> {
+        if self.spec.devices.input_devices.contains_key(&device_name) {
+            return Err(SpecBuilderError::DeviceNameInUse(device_name));
+        }
+
+        self.register_pci_device(device_spec.pci_path())?;
+        let _old =
+            self.spec.devices.input_devices.insert(device_name, device_spec);
+
+        assert!(_old.is_none());
+        Ok(self)
+    }
+
     /// Adds a PCI-PCI bridge.
     pub fn add_pci_bridge(
         &mut self,

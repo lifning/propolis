@@ -391,6 +391,37 @@ impl ServerSpecBuilder {
         Ok(())
     }
 
+    fn add_input_device_from_config(
+        &mut self,
+        name: &str,
+        device: &config::Device,
+    ) -> Result<(), ServerSpecBuilderError> {
+        let device_type = device.get_string("type").ok_or_else(|| {
+            ServerSpecBuilderError::ConfigTomlError(format!(
+                "Failed to get input device type for device {}",
+                name
+            ))
+        })?;
+
+        let pci_path: PciPath = device.get("pci-path").ok_or_else(|| {
+            ServerSpecBuilderError::ConfigTomlError(format!(
+                "Failed to get PCI path for input device {}",
+                name
+            ))
+        })?;
+
+        let device_spec =
+            InputDeviceV0::VirtioInput(components::devices::VirtioInput {
+                pci_path,
+            });
+
+        let device_name = format!("input-{}-{}", pci_path, device_type);
+
+        self.builder.add_input_device(device_name, device_spec)?;
+
+        Ok(())
+    }
+
     fn add_pci_bridge_from_config(
         &mut self,
         bridge: &config::PciBridge,
@@ -459,6 +490,9 @@ impl ServerSpecBuilder {
                 }
                 "pci-virtio-viona" => {
                     self.add_network_device_from_config(device_name, device)?
+                }
+                "pci-virtio-input" => {
+                    self.add_input_device_from_config(device_name, device)?
                 }
                 #[cfg(feature = "falcon")]
                 "softnpu-pci-port" => {

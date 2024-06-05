@@ -238,6 +238,10 @@ impl DeviceState {
         }
     }
 
+    pub(crate) fn ident(&self) -> &Ident {
+        &self.ident
+    }
+
     /// State changes which result in a new interrupt mode for the device incur
     /// a notification which could trigger deadlock if normal lock-ordering was
     /// used.  In such cases, the process is done in two stages: the state
@@ -525,6 +529,15 @@ impl DeviceState {
                     msix_cfg
                         .cfg_rw(rwo, |info| self.notify_msi_update(dev, info));
                 }
+            }
+            CAP_ID_VENDOR => {
+                // need VIRTIO_PCI_CAP_COMMON_CFG,
+                // VIRTIO_PCI_CAP_ISR_CFG,
+                // VIRTIO_PCI_CAP_NOTIFY_CFG.
+                // while VIRTIO_PCI_CAP_DEVICE_CFG is optional,
+                // it might be required for virtio-input?
+                // https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/virtio/virtio_pci_modern_dev.c?h=linux-6.6.y#n248
+                todo!("pci cap id vndr");
             }
             _ => {
                 // XXX: do some logging?

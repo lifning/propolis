@@ -5,7 +5,9 @@
 pub const VIRTIO_DEV_NET: u16 = 0x1000;
 pub const VIRTIO_DEV_BLOCK: u16 = 0x1001;
 pub const VIRTIO_DEV_9P: u16 = 0x1009;
-pub const VIRTIO_DEV_INPUT: u16 = 0x1012;
+
+// Add non-legacy ID base and VIRTIO_ID_INPUT (18) to get 0x1052
+pub const VIRTIO_DEV_INPUT: u16 = 0x1040 + VIRTIO_SUB_DEV_INPUT;
 
 // Legacy virtio-pci devices must present these sub-device-IDs
 pub const VIRTIO_SUB_DEV_NET: u16 = 0x1;

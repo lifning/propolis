@@ -23,7 +23,7 @@ use lazy_static::lazy_static;
 /// Device IDs used when VIRTIO_INPUT_CFG_ID_DEVIDS is queried.
 /// (virtio 1.3 sect 5.8.4)
 #[repr(C, packed)]
-struct VirtioInputDevIds {
+pub struct VirtioInputDevIds {
     bus_type: u16,
     vendor: u16,
     product: u16,
@@ -34,7 +34,7 @@ struct VirtioInputDevIds {
 /// when VIRTIO_INPUT_CFG_ABS_INFO is queried.
 /// (virtio 1.3 sect 5.8.4)
 #[repr(C, packed)]
-struct VirtioInputAbsInfo {
+pub struct VirtioInputAbsInfo {
     min: i32,
     max: i32,
     fuzz: i32,
@@ -56,8 +56,8 @@ impl VirtioTablet {
     pub fn new() -> Self {
         Self {
             supported_events: [
-                // we'll have up to 8 mouse buttons' state given to us by VNC,
-                // two are scroll wheel EV_REL events. (RFC 6143 sect 7.5.5)
+                // we'll have up to 8 mouse buttons' state given to us by VNC
+                // (RFC 6143 sect 7.5.5). two are scroll wheel EV_REL events.
                 (
                     EV_KEY,
                     vec![
@@ -82,7 +82,7 @@ impl VirtioTablet {
     }
 }
 
-trait VirtioInputDevice {
+pub trait VirtioInputDevice {
     fn name(&self) -> &str;
     fn dev_ids(&self) -> VirtioInputDevIds;
     fn properties(&self) -> &[u16];
@@ -98,7 +98,7 @@ impl VirtioInputDevice for VirtioTablet {
         VirtioInputDevIds {
             bus_type: BUS_PCI,
             vendor: VENDOR_OXIDE,
-            product: 0, // TODO
+            product: 0x7AB1,
             version: 0,
         }
     }
@@ -216,6 +216,7 @@ impl PciVirtioInput {
     }
 
     fn write_payload(&self, selection: &Selection, ro: &mut ReadOp) {
+        probes::vioinput_cfg_read!(|| (selection.sel, selection.subsel));
         match selection.sel {
             VIRTIO_INPUT_CFG_UNSET => {}
             VIRTIO_INPUT_CFG_ID_NAME if selection.subsel == 0 => {
@@ -261,6 +262,7 @@ impl PciVirtioInput {
 
     fn input_cfg_write(&self, id: &InputReg, wo: &mut WriteOp) {
         let mut selection = self.selection.lock().unwrap();
+        probes::vioinput_cfg_write!(|| (selection.sel, selection.subsel));
         match id {
             InputReg::Select => selection.sel = wo.read_u8(),
             InputReg::Subselect => selection.subsel = wo.read_u8(),
@@ -396,5 +398,6 @@ mod bits {
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
-    // TODO
+    fn vioinput_cfg_read(sel: u8, subsel: u8) {}
+    fn vioinput_cfg_write(sel: u8, subsel: u8) {}
 }

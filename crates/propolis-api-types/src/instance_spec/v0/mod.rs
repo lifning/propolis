@@ -105,12 +105,41 @@ impl MigrationElement for NetworkDeviceV0 {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
+#[serde(deny_unknown_fields, tag = "type", content = "component")]
+pub enum InputDeviceV0 {
+    VirtioInput(components::devices::VirtioInput),
+}
+
+impl InputDeviceV0 {
+    pub fn pci_path(&self) -> PciPath {
+        match self {
+            Self::VirtioInput(inp) => inp.pci_path,
+        }
+    }
+}
+
+impl MigrationElement for InputDeviceV0 {
+    fn kind(&self) -> &'static str {
+        "InputDevice(VirtioInput)"
+    }
+
+    fn can_migrate_from_element(
+        &self,
+        other: &Self,
+    ) -> Result<(), ElementCompatibilityError> {
+        let (Self::VirtioInput(this), Self::VirtioInput(other)) = (self, other);
+        this.can_migrate_from_element(other)
+    }
+}
+
 #[derive(Default, Clone, Deserialize, Serialize, Debug, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceSpecV0 {
     pub board: components::board::Board,
     pub storage_devices: HashMap<SpecKey, StorageDeviceV0>,
     pub network_devices: HashMap<SpecKey, NetworkDeviceV0>,
+    pub input_devices: HashMap<SpecKey, InputDeviceV0>,
     pub serial_ports: HashMap<SpecKey, components::devices::SerialPort>,
     pub pci_pci_bridges: HashMap<SpecKey, components::devices::PciPciBridge>,
 

@@ -465,6 +465,7 @@ impl VmController {
         init.initialize_qemu_debug_port()?;
         init.initialize_qemu_pvpanic((&properties).into())?;
         init.initialize_network_devices(&chipset)?;
+        init.initialize_input_devices(&chipset)?;
 
         #[cfg(not(feature = "omicron-build"))]
         init.initialize_test_devices(&toml_config.devices)?;
