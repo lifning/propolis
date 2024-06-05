@@ -2,8 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::common::*;
 use crate::hw::ids::pci::VENDOR_OXIDE;
@@ -17,7 +18,6 @@ use super::queue::{VirtQueue, VirtQueues};
 use super::VirtioDevice;
 use bits::*;
 
-use futures::future::BoxFuture;
 use lazy_static::lazy_static;
 
 /// Device IDs used when VIRTIO_INPUT_CFG_ID_DEVIDS is queried.
@@ -35,11 +35,11 @@ struct VirtioInputDevIds {
 /// (virtio 1.3 sect 5.8.4)
 #[repr(C, packed)]
 struct VirtioInputAbsInfo {
-    min: u32,
-    max: u32,
-    fuzz: u32,
-    flat: u32,
-    res: u32,
+    min: i32,
+    max: i32,
+    fuzz: i32,
+    flat: i32,
+    res: i32,
 }
 
 pub enum VirtioInputDev {
@@ -47,12 +47,46 @@ pub enum VirtioInputDev {
 }
 
 pub struct VirtioTablet {
-    event_recv: !,
+    supported_events: BTreeMap<u16, Vec<u16>>,
+    properties: Vec<u16>,
+    //vnc_pointer_recv: !,
+}
+
+impl VirtioTablet {
+    pub fn new() -> Self {
+        Self {
+            supported_events: [
+                // we'll have up to 8 mouse buttons' state given to us by VNC,
+                // two are scroll wheel EV_REL events. (RFC 6143 sect 7.5.5)
+                (
+                    EV_KEY,
+                    vec![
+                        BTN_LEFT,
+                        BTN_MIDDLE,
+                        BTN_RIGHT,
+                        BTN_FORWARD,
+                        BTN_BACK,
+                        BTN_TASK,
+                    ],
+                ),
+                (EV_ABS, vec![ABS_X, ABS_Y]),
+                // wheel +1/-1 emitted for btns 4 (up) and 5 (down) respectively
+                (EV_REL, vec![REL_WHEEL]),
+            ]
+            .into_iter()
+            .collect(),
+            // https://www.kernel.org/doc/html/latest/input/event-codes.html#tablets
+            properties: vec![INPUT_PROP_POINTER, INPUT_PROP_DIRECT],
+            //vnc_pointer_recv: todo!(),
+        }
+    }
 }
 
 trait VirtioInputDevice {
     fn name(&self) -> &str;
     fn dev_ids(&self) -> VirtioInputDevIds;
+    fn properties(&self) -> &[u16];
+    fn supported_events(&self) -> &BTreeMap<u16, Vec<u16>>;
     fn abs_info(&self, axis: u8) -> VirtioInputAbsInfo;
 }
 
@@ -68,23 +102,43 @@ impl VirtioInputDevice for VirtioTablet {
             version: 0,
         }
     }
-    fn abs_info(&self, axis: u8) -> VirtioInputAbsInfo {
-        VirtioInputAbsInfo { min: 0, max: 0xFF, fuzz: 3, flat: 69, res: 0 }
+    fn properties(&self) -> &[u16] {
+        &self.properties
     }
+    fn supported_events(&self) -> &BTreeMap<u16, Vec<u16>> {
+        &self.supported_events
+    }
+    fn abs_info(&self, _axis: u8) -> VirtioInputAbsInfo {
+        // TODO care about _axis and answer accordingly
+        VirtioInputAbsInfo { min: 0, max: 0x8000, fuzz: 0, flat: 0, res: 1 }
+    }
+}
+
+fn bitmapify(iter: impl IntoIterator<Item = u16>) -> [u8; 128] {
+    let mut bitmap = [0u8; 128];
+    for x in iter.into_iter() {
+        let i = x as usize / 8;
+        bitmap[i] |= 1 << (x % 8);
+    }
+    bitmap
+}
+
+struct Selection {
+    sel: u8,
+    subsel: u8,
 }
 
 pub struct PciVirtioInput {
     virtio_state: PciVirtioState,
     pci_state: pci::DeviceState,
-    select: u8,
-    subselect: u8,
-    device: Box<dyn VirtioInputDevice>,
+    selection: Mutex<Selection>,
+    device: Box<dyn VirtioInputDevice + Send + Sync>,
     // TODO: proper wrapping for device
 }
 impl PciVirtioInput {
     pub fn new(
         queue_size: u16,
-        device: Box<dyn VirtioInputDevice>,
+        device: Box<dyn VirtioInputDevice + Send + Sync>,
     ) -> Arc<Self> {
         // eventq + statusq (virtio 1.3 sect 5.8.2)
         let queues = VirtQueues::new(
@@ -108,70 +162,108 @@ impl PciVirtioInput {
         Arc::new_cyclic(|weak| Self {
             pci_state,
             virtio_state,
-            select: VIRTIO_INPUT_CFG_UNSET,
-            subselect: 0,
+            selection: Mutex::new(Selection {
+                sel: VIRTIO_INPUT_CFG_UNSET,
+                subsel: 0,
+            }),
             device,
         })
     }
 
     fn input_cfg_read(&self, id: &InputReg, ro: &mut ReadOp) {
+        let selection = self.selection.lock().unwrap();
         match id {
-            InputReg::Select => ro.write_u8(self.select),
-            InputReg::Subselect => ro.write_u8(self.subselect),
-            InputReg::Size => ro.write_u8(self.selected_payload().len() as u8),
+            InputReg::Select => ro.write_u8(selection.sel),
+            InputReg::Subselect => ro.write_u8(selection.subsel),
+            InputReg::Size => {
+                // must be size zero if unsupported select and subsel combination
+                // (virtio 1.3 sect 5.8.5.2)
+                let size = match selection.sel {
+                    VIRTIO_INPUT_CFG_UNSET => 0,
+                    VIRTIO_INPUT_CFG_ID_NAME => {
+                        if selection.subsel == 0 {
+                            self.device.name().len()
+                        } else {
+                            0
+                        }
+                    }
+                    VIRTIO_INPUT_CFG_ID_SERIAL => 0,
+                    VIRTIO_INPUT_CFG_ID_DEVIDS => {
+                        if selection.subsel == 0 {
+                            core::mem::size_of::<VirtioInputDevIds>()
+                        } else {
+                            0
+                        }
+                    }
+                    VIRTIO_INPUT_CFG_PROP_BITS => {
+                        if selection.subsel == 0 {
+                            128
+                        } else {
+                            0
+                        }
+                    }
+                    VIRTIO_INPUT_CFG_EV_BITS => 128,
+                    VIRTIO_INPUT_CFG_ABS_INFO => {
+                        core::mem::size_of::<VirtioInputAbsInfo>()
+                    }
+                    _ => 0,
+                };
+                ro.write_u8(size as u8);
+            }
             InputReg::Reserved => ro.fill(0),
-            InputReg::Payload => ro.write_bytes(self.selected_payload()),
+            InputReg::Payload => self.write_payload(&selection, ro),
         }
     }
 
-    fn selected_payload(&self) -> &[u8] {
-        match self.select {
-            VIRTIO_INPUT_CFG_UNSET => &[],
-            VIRTIO_INPUT_CFG_ID_NAME => {
-                if self.subselect == 0 {
-                    self.device.name()
-                } else {
-                    // must be size zero if unsupported select and subsel combination
-                    // (virtio 1.3 sect 5.8.5.2)
-                    &[]
-                }
+    fn write_payload(&self, selection: &Selection, ro: &mut ReadOp) {
+        match selection.sel {
+            VIRTIO_INPUT_CFG_UNSET => {}
+            VIRTIO_INPUT_CFG_ID_NAME if selection.subsel == 0 => {
+                ro.write_bytes(self.device.name().as_bytes())
             }
-            VIRTIO_INPUT_CFG_ID_SERIAL => b"",
-            // safety: reinterpreting a struct that's Copy and repr(C, packed)
-            VIRTIO_INPUT_CFG_ID_DEVIDS => unsafe {
-                std::slice::from_raw_parts(
-                    &self.device.dev_ids() as *const VirtioInputDevIds
-                        as *const u8,
-                    core::mem::size_of::<VirtioInputDevIds>(),
-                )
-            },
+            VIRTIO_INPUT_CFG_ID_SERIAL => {}
+            VIRTIO_INPUT_CFG_ID_DEVIDS => {
+                let d = self.device.dev_ids();
+                ro.write_u16(d.bus_type);
+                ro.write_u16(d.vendor);
+                ro.write_u16(d.product);
+                ro.write_u16(d.version);
+            }
             VIRTIO_INPUT_CFG_PROP_BITS => {
-                if self.subselect == 0 {
-                    &[0u8; 128]
-                } else {
-                    &[]
+                if selection.subsel == 0 {
+                    ro.write_bytes(&bitmapify(
+                        self.device.properties().iter().copied(),
+                    ));
                 }
             }
             VIRTIO_INPUT_CFG_EV_BITS => {
-                &[] // TODO
+                let events = self.device.supported_events();
+                if selection.subsel == 0 {
+                    ro.write_bytes(&bitmapify(events.keys().copied()));
+                } else if let Some(val) = events.get(&(selection.subsel as u16))
+                {
+                    ro.write_bytes(&bitmapify(val.iter().copied()));
+                } else {
+                    ro.fill(0);
+                }
             }
-            // safety: reinterpreting a struct that's Copy and repr(C, packed)
-            VIRTIO_INPUT_CFG_ABS_INFO => unsafe {
-                std::slice::from_raw_parts(
-                    &self.device.abs_info(self.subselect)
-                        as *const VirtioInputAbsInfo
-                        as *const u8,
-                    core::mem::size_of::<VirtioInputAbsInfo>(),
-                )
-            },
-            _ => &[],
+            VIRTIO_INPUT_CFG_ABS_INFO => {
+                let abs = self.device.abs_info(selection.subsel);
+                ro.write_u32(abs.min as u32);
+                ro.write_u32(abs.max as u32);
+                ro.write_u32(abs.fuzz as u32);
+                ro.write_u32(abs.flat as u32);
+                ro.write_u32(abs.res as u32);
+            }
+            _ => {}
         }
     }
 
     fn input_cfg_write(&self, id: &InputReg, wo: &mut WriteOp) {
+        let mut selection = self.selection.lock().unwrap();
         match id {
-            InputReg::Select => self.select = wo.read_u8(),
-            InputReg::Subselect => self.subselect = wo.read_u8(),
+            InputReg::Select => selection.sel = wo.read_u8(),
+            InputReg::Subselect => selection.subsel = wo.read_u8(),
             // drivers must not write to cfg fields other than sel and subsel
             // (virtio 1.3 sect 5.8.5.1)
             _ => {}
@@ -212,6 +304,7 @@ impl Lifecycle for PciVirtioInput {
     fn reset(&self) {
         self.virtio_state.reset(self);
     }
+    /*
     fn pause(&self) {
         todo!("pause")
     }
@@ -219,8 +312,9 @@ impl Lifecycle for PciVirtioInput {
         todo!("resume")
     }
     fn paused(&self) -> BoxFuture<'static, ()> {
-        Box::pin(todo!())
+        todo!("paused")
     }
+    */
     fn migrate(&self) -> Migrator {
         Migrator::Multi(self)
     }
@@ -282,6 +376,22 @@ mod bits {
 
     // linux/input.h
     pub(super) const BUS_PCI: u16 = 1;
+
+    // linux/input-event-codes.h
+    pub(super) const INPUT_PROP_POINTER: u16 = 0; // needs a pointer
+    pub(super) const INPUT_PROP_DIRECT: u16 = 1; // direct input devices
+    pub(super) const EV_KEY: u16 = 1;
+    pub(super) const EV_REL: u16 = 2;
+    pub(super) const EV_ABS: u16 = 3;
+    pub(super) const BTN_LEFT: u16 = 0x110;
+    pub(super) const BTN_RIGHT: u16 = 0x111;
+    pub(super) const BTN_MIDDLE: u16 = 0x112;
+    pub(super) const BTN_FORWARD: u16 = 0x115;
+    pub(super) const BTN_BACK: u16 = 0x116;
+    pub(super) const BTN_TASK: u16 = 0x117;
+    pub(super) const REL_WHEEL: u16 = 8;
+    pub(super) const ABS_X: u16 = 0;
+    pub(super) const ABS_Y: u16 = 1;
 }
 
 #[usdt::provider(provider = "propolis")]
