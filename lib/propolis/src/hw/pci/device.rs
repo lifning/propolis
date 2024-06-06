@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use super::bar::{BarDefine, Bars};
@@ -186,11 +187,12 @@ impl State {
 pub(super) struct Cap {
     id: u8,
     offset: u8,
+    extra: u16,
 }
 
 impl Cap {
-    pub(super) fn new(id: u8, offset: u8) -> Self {
-        Self { id, offset }
+    pub(super) fn new(id: u8, offset: u8, extra: u16) -> Self {
+        Self { id, offset, extra }
     }
 }
 
@@ -199,6 +201,7 @@ pub struct DeviceState {
     lintr_support: bool,
     cfg_space: RegMap<CfgReg>,
     msix_cfg: Option<Arc<MsixCfg>>,
+    vendor_cfg: Option<Arc<dyn VendorCfg>>,
     caps: Vec<Cap>,
 
     pub acc_mem: MemAccessor,
@@ -215,6 +218,7 @@ impl DeviceState {
         lintr_support: bool,
         cfg_space: RegMap<CfgReg>,
         msix_cfg: Option<Arc<MsixCfg>>,
+        vendor_cfg: Option<Arc<dyn VendorCfg>>,
         caps: Vec<Cap>,
         bars: Bars,
     ) -> Self {
@@ -228,6 +232,7 @@ impl DeviceState {
             lintr_support,
             cfg_space,
             msix_cfg,
+            vendor_cfg,
             caps,
 
             acc_mem: MemAccessor::new_orphan(),
@@ -531,6 +536,9 @@ impl DeviceState {
                 }
             }
             CAP_ID_VENDOR => {
+                if let Some(vndr_cfg) = self.vendor_cfg.as_ref() {
+                    vndr_cfg.cfg_rw(rwo);
+                }
                 // need VIRTIO_PCI_CAP_COMMON_CFG,
                 // VIRTIO_PCI_CAP_ISR_CFG,
                 // VIRTIO_PCI_CAP_NOTIFY_CFG.
@@ -1104,10 +1112,25 @@ impl Clone for MsixHdl {
     }
 }
 
+trait VendorCfg: Send + Sync {
+    // eventually, we want to be able to migrate a guest to a version of
+    // propolis that may have e.g. changed the strategy it uses to place
+    // vendor caps when creating hardware from a config, and have the target
+    // created from the migration payload with its caps placed as they were
+    // on the source host. in such a case, we want to give the device impl
+    // some means of identifying *which* of several vendor caps are being
+    // accessed by the guest, so we have a u16 for that in this sketch.
+    fn map(&self) -> &BTreeMap<BarN, Vec<(u16, usize)>> {
+        0.next_power_of_two();
+        todo!()
+    }
+}
+
 pub struct Builder {
     ident: Ident,
     lintr_support: bool,
     msix_cfg: Option<Arc<MsixCfg>>,
+    vendor_cfg: Option<Arc<dyn VendorCfg>>,
     bars: [Option<BarDefine>; 6],
     cfg_builder: CfgBuilder,
 }
@@ -1120,6 +1143,7 @@ impl Builder {
             ident,
             lintr_support: false,
             msix_cfg: None,
+            vendor_cfg: None,
             bars: [None; 6],
             cfg_builder: CfgBuilder::new(),
         }
@@ -1192,8 +1216,8 @@ impl Builder {
         self
     }
 
-    fn add_cap_raw(&mut self, id: u8, len: u8) {
-        self.cfg_builder.add_capability(id, len);
+    fn add_cap_raw(&mut self, id: u8, len: u8, extra: u16) {
+        self.cfg_builder.add_capability(id, len, extra);
     }
 
     /// Add MSI-X interrupt functionality.
@@ -1211,7 +1235,29 @@ impl Builder {
         assert!(bar_size < u32::MAX as usize);
         self = self.add_bar_mmio(bar, bar_size as u32);
         self.msix_cfg = Some(cfg);
-        self.add_cap_raw(CAP_ID_MSIX, 10);
+        self.add_cap_raw(CAP_ID_MSIX, 10, 0);
+
+        self
+    }
+
+    /// Add "vendor-specific" functionality. (e.g. for virtio_pci_cap)
+    ///
+    /// # Panics
+    ///
+    /// If:
+    /// - `bar` conflicts (overlaps) with other defined BAR for the device
+    pub fn add_caps_vendor(mut self, vndr: Arc<dyn VendorCfg>) -> Self {
+        assert!(self.vendor_cfg.is_none());
+        let map = vndr.map();
+        for (bar, cap_vec) in map {
+            let mut bar_size;
+            for (cap_sub_id, cap_size) in cap_vec {
+                self.add_cap_raw(CAP_ID_VENDOR, len as u8, *cap_sub_id);
+                todo!();
+            }
+            assert!(bar_size < u32::MAX as usize);
+            self = self.add_bar_mmio(bar, bar_size as u32);
+        }
 
         self
     }
@@ -1223,6 +1269,7 @@ impl Builder {
             self.lintr_support,
             cfgmap,
             self.msix_cfg,
+            self.vendor_cfg,
             caps,
             Bars::new(&self.bars),
         )

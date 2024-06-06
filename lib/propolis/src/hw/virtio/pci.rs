@@ -102,7 +102,6 @@ impl<D: PciVirtio + Send + Sync + 'static> pci::Device for D {
             // legacy or transitional
             _ => {
                 assert_eq!(bar, pci::BarN::BAR0);
-
                 let map = match vs.map_which.load(Ordering::SeqCst) {
                     false => &vs.map_nomsix,
                     true => &vs.map,
@@ -192,6 +191,7 @@ impl PciVirtioState {
     pub(super) fn create(
         queues: VirtQueues,
         msix_count: Option<u16>,
+        vendor_caps: Option<Arc<dyn VendorCfg>>,
         dev_id: u16,
         sub_dev_id: u16,
         dev_class: u8,
@@ -209,6 +209,10 @@ impl PciVirtioState {
 
         if let Some(count) = msix_count {
             builder = builder.add_cap_msix(pci::BarN::BAR1, count);
+        }
+
+        if let Some(vndr) = vendor_caps {
+            builder = builder.add_caps_vendor(vndr);
         }
 
         // XXX: properly size the legacy cfg BAR

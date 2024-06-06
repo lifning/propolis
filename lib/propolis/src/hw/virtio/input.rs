@@ -57,21 +57,20 @@ impl VirtioTablet {
         Self {
             supported_events: [
                 // we'll have up to 8 mouse buttons' state given to us by VNC
-                // (RFC 6143 sect 7.5.5). two are scroll wheel EV_REL events.
-                (
-                    EV_KEY,
-                    vec![
-                        BTN_LEFT,
-                        BTN_MIDDLE,
-                        BTN_RIGHT,
-                        BTN_FORWARD,
-                        BTN_BACK,
-                        BTN_TASK,
-                    ],
-                ),
+                // (RFC 6143 sect 7.5.5). some are pairs of wheel EV_REL dirs.
+                // if we use NoVNC's mapping as a source of truth:
+                // bit 0: left
+                // bit 1: middle
+                // bit 2: right
+                // bit 3: scroll up
+                // bit 4: scroll down
+                // bit 5: scroll left
+                // bit 6: scroll right
+                // bit 7: (no data)
+                (EV_KEY, vec![BTN_LEFT, BTN_MIDDLE, BTN_RIGHT]),
                 (EV_ABS, vec![ABS_X, ABS_Y]),
                 // wheel +1/-1 emitted for btns 4 (up) and 5 (down) respectively
-                (EV_REL, vec![REL_WHEEL]),
+                (EV_REL, vec![REL_WHEEL, REL_HWHEEL]),
             ]
             .into_iter()
             .collect(),
@@ -388,9 +387,7 @@ mod bits {
     pub(super) const BTN_LEFT: u16 = 0x110;
     pub(super) const BTN_RIGHT: u16 = 0x111;
     pub(super) const BTN_MIDDLE: u16 = 0x112;
-    pub(super) const BTN_FORWARD: u16 = 0x115;
-    pub(super) const BTN_BACK: u16 = 0x116;
-    pub(super) const BTN_TASK: u16 = 0x117;
+    pub(super) const REL_HWHEEL: u16 = 6;
     pub(super) const REL_WHEEL: u16 = 8;
     pub(super) const ABS_X: u16 = 0;
     pub(super) const ABS_Y: u16 = 1;
