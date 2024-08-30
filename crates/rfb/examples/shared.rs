@@ -14,6 +14,7 @@ use rgb_frame::*;
 use slog::Drain;
 
 use rfb::encodings::RawEncoding;
+//use rfb::encodings::{RawEncodingRef, ZRLEncoding};
 use rfb::proto::{
     FramebufferUpdate, PixelFormat, Position, Rectangle, Resolution,
 };
@@ -56,7 +57,15 @@ impl ExampleBackend {
                 width: width as u16,
                 height: height as u16,
             },
-            data: Box::new(RawEncoding::new(frame.bytes().to_vec())),
+            data: Box::new(
+                //ZRLEncoding::from(&RawEncodingRef::new(
+                RawEncoding::new(
+                    frame.bytes().to_vec(),
+                    width as u16,
+                    height as u16,
+                    format,
+                ),
+            ),
         };
         FramebufferUpdate(vec![r])
     }

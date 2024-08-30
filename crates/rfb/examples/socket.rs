@@ -13,9 +13,12 @@ use slog::info;
 use tokio::net::TcpListener;
 use tokio_util::codec::FramedRead;
 
-use rfb::proto::{
-    ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution, SecurityType,
-    SecurityTypes,
+use rfb::{
+    encodings::EncodeContext,
+    proto::{
+        ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution,
+        SecurityType, SecurityTypes,
+    },
 };
 use rgb_frame::FourCC;
 
@@ -112,6 +115,8 @@ async fn main() -> Result<()> {
             let mut decoder =
                 FramedRead::new(sock, ClientMessageDecoder::default());
             loop {
+                let mut ctx = EncodeContext::default();
+
                 let msg = match decoder.next().await {
                     Some(Ok(m)) => m,
                     Some(Err(e)) => {
@@ -138,7 +143,7 @@ async fn main() -> Result<()> {
                         let fbu =
                             be_clone.generate(WIDTH, HEIGHT, &output_pf).await;
 
-                        if let Err(e) = fbu.write_to(sock).await {
+                        if let Err(e) = fbu.write_to(sock, &mut ctx).await {
                             slog::info!(
                                 log_child,
                                 "Error sending FrambufferUpdate: {:?}",

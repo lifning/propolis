@@ -4,9 +4,28 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-use crate::proto::{Position, Resolution};
-
+use crate::proto::PixelFormat;
 use strum::FromRepr;
+
+mod raw;
+mod trle;
+mod zlib;
+
+pub use raw::{RawEncoding, RawEncodingRef};
+pub use trle::{TRLEncoding, ZRLEncoding};
+pub use zlib::{ZlibEncoding, ZlibEncodingRef};
+
+pub struct EncodeContext {
+    pub zlib_cmp: flate2::Compress,
+}
+
+impl Default for EncodeContext {
+    fn default() -> Self {
+        Self {
+            zlib_cmp: flate2::Compress::new(flate2::Compression::fast(), false),
+        }
+    }
+}
 
 #[derive(Debug, FromRepr, Ord, PartialOrd, Eq, PartialEq)]
 #[repr(i32)]
@@ -31,64 +50,15 @@ pub enum EncodingType {
 pub trait Encoding: Send {
     fn get_type(&self) -> EncodingType;
 
-    /// Transform this encoding from its representation into a byte vector that
-    /// can be passed to the client.
-    fn encode(&self) -> &[u8];
-}
+    /// Return the pixel format of this encoding's data.
+    fn pixel_format(&self) -> &PixelFormat;
 
-/// Section 7.7.1
-pub struct RawEncoding {
-    pixels: Vec<u8>,
-}
+    /// Return the width and height in pixels of the encoded screen region.
+    fn dimensions(&self) -> (u16, u16);
 
-impl RawEncoding {
-    pub fn new(pixels: Vec<u8>) -> Self {
-        Self { pixels }
-    }
-}
-
-impl Encoding for RawEncoding {
-    fn get_type(&self) -> EncodingType {
-        EncodingType::Raw
-    }
-
-    fn encode(&self) -> &[u8] {
-        &self.pixels
-    }
-}
-
-#[allow(dead_code)]
-struct RREncoding {
-    background_pixel: Pixel,
-    sub_rectangles: Vec<RRESubrectangle>,
-}
-
-#[allow(dead_code)]
-struct Pixel {
-    bytes: Vec<u8>,
-}
-
-#[allow(dead_code)]
-struct RRESubrectangle {
-    pixel: Pixel,
-    position: Position,
-    dimensions: Resolution,
-}
-
-#[allow(dead_code)]
-struct HextileEncoding {
-    tiles: Vec<Vec<HextileTile>>,
-}
-
-#[allow(dead_code)]
-enum HextileTile {
-    Raw(Vec<u8>),
-    Encoded(HextileTileEncoded),
-}
-
-#[allow(dead_code)]
-struct HextileTileEncoded {
-    background: Option<Pixel>,
-    foreground: Option<Pixel>,
-    // TODO: finish this
+    /// Transform this encoding from its representation into a byte sequence that can be passed to the client.
+    fn encode(
+        &self,
+        ctx: &mut EncodeContext,
+    ) -> Box<dyn Iterator<Item = u8> + '_>;
 }

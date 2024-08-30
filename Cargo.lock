@@ -4483,6 +4483,7 @@ dependencies = [
  "bitflags 2.6.0",
  "clap",
  "dropshot",
+ "flate2",
  "futures",
  "image",
  "rgb_frame",

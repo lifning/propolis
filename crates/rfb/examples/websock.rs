@@ -13,6 +13,7 @@ use dropshot::{
     RequestContext, WebsocketConnection,
 };
 use futures::StreamExt;
+use rfb::encodings::EncodeContext;
 use slog::info;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -88,6 +89,8 @@ async fn run_server(
     let mut output_pf = input_pf.clone();
     let mut decoder = FramedRead::new(sock, ClientMessageDecoder::default());
     loop {
+        let mut ctx = EncodeContext::default();
+
         let msg = match decoder.next().await {
             Some(Ok(m)) => m,
             Some(Err(e)) => {
@@ -109,7 +112,7 @@ async fn run_server(
             ClientMessage::FramebufferUpdateRequest(_req) => {
                 let fbu = be.generate(WIDTH, HEIGHT, &output_pf).await;
 
-                if let Err(e) = fbu.write_to(sock).await {
+                if let Err(e) = fbu.write_to(sock, &mut ctx).await {
                     slog::info!(log, "Error sending FrambufferUpdate: {:?}", e);
                     return;
                 }
@@ -146,7 +149,7 @@ async fn main() -> Result<(), String> {
     // Set up the server.
     let config_dropshot = ConfigDropshot {
         bind_address: SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             3030,
         ),
         ..Default::default()

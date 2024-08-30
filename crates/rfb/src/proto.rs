@@ -15,7 +15,7 @@ use tokio_util::bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
 use zerocopy::{AsBytes, FromBytes};
 
-use crate::encodings::{Encoding, EncodingType};
+use crate::encodings::{EncodeContext, Encoding, EncodingType};
 use crate::keysym::KeySym;
 
 #[derive(Debug, Error)]
@@ -201,13 +201,14 @@ impl FramebufferUpdate {
     pub async fn write_to(
         self,
         stream: &mut (impl AsyncWrite + Unpin),
+        ctx: &mut EncodeContext,
     ) -> Result<()> {
         let header = raw::FramebufferUpdateHeader::new(self.0.len() as u16);
         stream.write_all(header.as_bytes()).await?;
 
         // rectangles
         for r in self.0.into_iter() {
-            r.write_to(stream).await?;
+            r.write_to(stream, ctx).await?;
         }
 
         Ok(())
@@ -247,6 +248,7 @@ impl Rectangle {
     pub async fn write_to(
         self,
         stream: &mut (impl AsyncWrite + Unpin),
+        ctx: &mut EncodeContext,
     ) -> Result<()> {
         stream.write_u16(self.position.x).await?;
         stream.write_u16(self.position.y).await?;
@@ -254,8 +256,8 @@ impl Rectangle {
         stream.write_u16(self.dimensions.height).await?;
         stream.write_i32(self.data.get_type() as i32).await?;
 
-        let data = self.data.encode();
-        stream.write_all(data).await?;
+        let data = self.data.encode(ctx);
+        stream.write_all(&data.collect::<Vec<u8>>()).await?;
 
         Ok(())
     }
@@ -278,6 +280,23 @@ impl PixelFormat {
         let raw: raw::PixelFormat = self.into();
         stream.write_all(raw.as_bytes()).await?;
         Ok(())
+    }
+
+    pub fn value_mask(&self) -> Option<u64> {
+        match self.color_spec {
+            ColorSpecification::ColorFormat(ColorFormat {
+                red_max,
+                green_max,
+                blue_max,
+                red_shift,
+                green_shift,
+                blue_shift,
+            }) => Some(
+                ((red_max as u64) << red_shift)
+                    | ((green_max as u64) << green_shift)
+                    | ((blue_max as u64) << blue_shift),
+            ),
+        }
     }
 }
 impl TryFrom<raw::PixelFormat> for PixelFormat {
