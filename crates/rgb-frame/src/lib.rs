@@ -6,6 +6,7 @@
 
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
+use std::ops::Range;
 
 #[derive(Clone, Copy)]
 pub struct Spec {
@@ -106,6 +107,33 @@ impl Frame {
         &mut self.data
     }
 
+    /// Iterate over the bytes of the pixels of a 2-dimensional sub-region of the frame.
+    /// Coordinate ranges are measured in pixels, starting from the top-left as usual.
+    /// The number of bytes returned by the iterator will vary based on the bytes-per-pixel of the Spec.
+    pub fn subrect_bytes(
+        &self,
+        x_range: Range<usize>,
+        y_range: Range<usize>,
+    ) -> impl Iterator<Item = u8> + '_ {
+        let bytepp: usize = self.spec.fourcc.bytes_per_pixel().into();
+        let stride: usize = self.spec.stride.into();
+
+        // don't out-of-bounds into the next row
+        // (or into horizontal-blank area if stride > width*bytepp)
+        let width: usize = self.spec.width.into();
+        let x_start_byte = x_range.start.min(width) * bytepp;
+        let x_end_byte = x_range.end.min(width) * bytepp;
+        // (unnecesary to cap y_range that way; the iterator will simply end early)
+
+        self.data
+            .chunks_exact(stride)
+            .skip(y_range.start)
+            .take(y_range.end - y_range.start)
+            .flat_map(move |row_bytes| {
+                row_bytes[x_start_byte..x_end_byte].iter().copied()
+            })
+    }
+
     /// Convert between recognized 4-byte pixel formats
     pub fn convert(&mut self, target: FourCC) {
         let source = self.spec.fourcc;
@@ -125,7 +153,16 @@ impl Frame {
         }
 
         // TODO: rub some SIMD on this, when possible
+        // https://github.com/rust-lang/rust/issues/86656
+        // let mut indeces = [0u8; 4];
+        // indeces[target_rgba.0] = source_rgba.0 as u8;
+        // indeces[target_rgba.1] = source_rgba.1 as u8;
+        // indeces[target_rgba.2] = source_rgba.2 as u8;
+        // indeces[target_rgba.3] = source_rgba.3 as u8;
+        // let indeces_simd = u8x4::from_array(indeces);
         for pixel in self.data.chunks_exact_mut(4) {
+            // let pixel_simd = u8x4::from_slice(pixel);
+            // pixel_simd.swizzle_dyn(indeces_simd).copy_to_slice(pixel);
             let red = pixel[source_rgba.0];
             let green = pixel[source_rgba.1];
             let blue = pixel[source_rgba.2];
