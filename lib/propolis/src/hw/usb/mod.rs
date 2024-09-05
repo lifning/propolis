@@ -9,7 +9,8 @@ pub mod usbdev;
 pub mod xhci;
 
 pub mod value_types {
-    use std::{convert::Infallible, string::FromUtf16Error};
+    use bitstruct::bitstruct;
+    use strum::FromRepr;
 
     pub struct Bcd16(u16);
     impl Bcd16 {
@@ -30,6 +31,13 @@ pub mod value_types {
                     ones | (tens << 4) | (hundreds << 8) | (thousands << 12),
                 ))
             }
+        }
+        pub fn into_decimal(&self) -> u16 {
+            let ones = self.0 & 0xF;
+            let tens = (self.0 >> 4) & 0xF;
+            let hundreds = (self.0 >> 8) & 0xF;
+            let thousands = self.0 >> 12;
+            ones + tens * 10 + hundreds * 100 + thousands * 1000
         }
     }
 
@@ -56,7 +64,7 @@ pub mod value_types {
     /// USB Language Identifiers, version 1.0.
     /// (see also Universal Serial Bus HID Usage Tables, section 3.6: HID LANGIDs)
     #[repr(u16)]
-    #[derive(PartialEq, Eq)]
+    #[derive(PartialEq, Eq, Hash)]
     pub enum LanguageId {
         EnglishUS = 0x409,
         HIDUsageDataDescriptor = 0x0FF | (0x01 << 10),
@@ -74,24 +82,82 @@ pub mod value_types {
     pub struct CountryCode(pub u8);
 
     pub struct Utf16String(Vec<u16>);
-
     impl TryInto<String> for &Utf16String {
-        type Error = FromUtf16Error;
+        type Error = std::string::FromUtf16Error;
         fn try_into(self) -> Result<String, Self::Error> {
             // TODO: specifically LE https://github.com/rust-lang/rust/issues/116258
             String::from_utf16(&self.0)
         }
     }
     impl std::str::FromStr for Utf16String {
-        type Err = Infallible;
+        type Err = std::convert::Infallible;
         fn from_str(value: &str) -> Result<Self, Self::Err> {
             Ok(Self(value.encode_utf16().collect()))
         }
     }
 
+    #[repr(u8)]
+    #[derive(FromRepr)]
     pub enum EndpointDir {
-        In,
-        Out,
+        Out = 0,
+        In = 1,
+    }
+    impl From<bool> for EndpointDir {
+        fn from(value: bool) -> Self {
+            // unwrap: bool as u8 is always 0 or 1
+            Self::from_repr(value as u8).unwrap()
+        }
+    }
+    impl Into<bool> for EndpointDir {
+        fn into(self) -> bool {
+            self as u8 != 0
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(FromRepr)]
+    pub enum TransferType {
+        Configuration = 0,
+        Isochronous = 1,
+        Bulk = 2,
+        Interrupt = 3,
+    }
+    impl From<u8> for TransferType {
+        fn from(value: u8) -> Self {
+            Self::from_repr(value)
+                .expect("must be converted from a two-bit bitstruct field")
+        }
+    }
+    impl Into<u8> for TransferType {
+        fn into(self) -> u8 {
+            self as u8
+        }
+    }
+
+    bitstruct! {
+        #[derive(Clone, Copy, Debug, Default)]
+        pub struct BitmapCfgDescAttributes(pub u8) {
+            reserved: u8 = 0..5;
+            pub remote_wakeup: bool = 5;
+            pub self_powered: bool = 6;
+            pub bus_powered: bool = 7;
+        }
+    }
+
+    bitstruct! {
+        #[derive(Clone, Copy, Debug, Default)]
+        pub struct BitmapEndptDescAddress(pub u8) {
+            pub endpoint_number: u8 = 0..4;
+            reserved: u8 = 4..7;
+            pub endpoint_direction: EndpointDir = 7;
+        }
+    }
+    bitstruct! {
+        #[derive(Clone, Copy, Debug, Default)]
+        pub struct BitmapEndptDescAttributes(pub u8) {
+            pub transfer_type: TransferType = 0..2;
+            reserved: u8 = 2..8;
+        }
     }
 }
 
@@ -146,15 +212,20 @@ trait Device {
     fn device_info(&self) -> &DeviceInfo;
     // default trait impl of `get_descriptor` can be overridden,
     // if a device has a specific need to
-    fn get_descriptor(&self, typ: GetDescriptorType) -> Box<dyn Descriptor> {
+    fn get_descriptor(
+        &self,
+        typ: GetDescriptorType,
+    ) -> Option<Box<dyn Descriptor>> {
         match typ {
             GetDescriptorType::Device => {
-                Box::new(DeviceDescriptor::from(self.device_info()))
+                Some(Box::new(DeviceDescriptor::from(self.device_info())))
             }
             GetDescriptorType::String(index, language) => match index {
-                MANUFACTURER => Box::new(StringDescriptor::from(
-                    self.device_info.manufacturer_name.get(language),
-                )),
+                MANUFACTURER => self
+                    .device_info()
+                    .manufacturer_name
+                    .get(language)
+                    .map(|s| Box::new(StringDescriptor::from(s))),
                 // ...
             }, // ...
         }
@@ -185,19 +256,20 @@ mod descriptors {
     }
 
     pub struct DeviceDescriptor {
-        bcdUSB: Bcd16,                  // u16
-        bDeviceClass: ClassCode,        // u8
-        bDeviceSubClass: SubclassCode,  // u8
-        bDeviceProtocol: ProtocolCode,  // u8
-        bMaxPacketSize0: MaxSizeZeroEP, // repr(u8) enum. values: 8, 16, 32, 64
-        idVendor: VendorId,             // u16
-        idProduct: ProductId,           // u16
-        bcdDevice: Bcd16,               // u16
-        iManufacturer: StringIndex,     // u8
-        iProduct: StringIndex,          // u8
-        iSerial: StringIndex,           // u8
+        bcdUSB: Bcd16,
+        bDeviceClass: ClassCode,
+        bDeviceSubClass: SubclassCode,
+        bDeviceProtocol: ProtocolCode,
+        bMaxPacketSize0: MaxSizeZeroEP,
+        idVendor: VendorId,
+        idProduct: ProductId,
+        bcdDevice: Bcd16,
+        iManufacturer: StringIndex,
+        iProduct: StringIndex,
+        iSerial: StringIndex,
 
-        configurations: Vec<ConfigurationDescriptor>, // .len() as u8 = bNumConfigurations
+        /// .len() as u8 = bNumConfigurations
+        configurations: Vec<ConfigurationDescriptor>,
         // class- or vendor-
         specific_augmentations: Vec<Box<dyn Descriptor>>,
     }
@@ -210,11 +282,12 @@ mod descriptors {
     }
     pub struct ConfigurationDescriptor {
         // wTotalLength (u16) is calculated based on serialization of:
-        interfaces: Vec<InterfaceDescriptor>, // .len() as u8 = bNumInterfaces
+        /// .len() as u8 = bNumInterfaces
+        interfaces: Vec<InterfaceDescriptor>,
 
-        bConfigurationValue: ConfigurationValue, // u8
-        iConfiguration: StringIndex,             // u8
-        bmAttributes: Bitmap8,                   // u8
+        bConfigurationValue: ConfigurationValue,
+        iConfiguration: StringIndex,
+        bmAttributes: BitmapCfgDescAttributes,
 
         specific_augmentations: Vec<Box<dyn Descriptor>>,
     }
@@ -232,10 +305,10 @@ mod descriptors {
 
         endpoints: Vec<EndpointDescriptor>, // .len() as u8 = bNumEndpoints
 
-        bInterfaceClass: InterfaceClass, // u8
-        bInterfaceSubClass: InterfaceSubclass, // u8
-        bInterfaceProtocol: InterfaceProtocol, // u8,
-        iInterface: StringIndex,         // u8
+        bInterfaceClass: InterfaceClass,
+        bInterfaceSubClass: InterfaceSubclass,
+        bInterfaceProtocol: InterfaceProtocol,
+        iInterface: StringIndex,
 
         specific_augmentations: Vec<Box<dyn Descriptor>>,
     }
@@ -245,14 +318,14 @@ mod descriptors {
             DescriptorType(33u8)
         }
     }
-
     pub struct HidDescriptor {
-        bLength: u8,               // dependent on bNumDescriptors
-        bcdHID: Bcd16,             // u16
-        bCountryCode: CountryCode, // u8
+        // bLength: u8, // dependent on bNumDescriptors
+        bcdHID: Bcd16,
+        bCountryCode: CountryCode,
 
-        class_descriptor: Vec<Box<dyn Descriptor>>, // .len() as u8 = bNumDescriptors
-                                                    // followed by bDescriptorType (u8), wDescriptorLength (u16) for each at serialization time.
+        /// .len() as u8 = bNumDescriptors
+        class_descriptor: Vec<Box<dyn Descriptor>>,
+        // followed by bDescriptorType (u8), wDescriptorLength (u16) for each at serialization time.
     }
 
     impl Descriptor for EndpointDescriptor {
@@ -262,8 +335,8 @@ mod descriptors {
         }
     }
     pub struct EndpointDescriptor {
-        bEndpointAddress: u8,
-        bmAttributes: Bitmap8, // u8
+        bEndpointAddress: BitmapEndptDescAddress,
+        bmAttributes: BitmapEndptDescAttributes,
         wMaxPacketSize: u16,
         bInterval: u8,
 
@@ -277,7 +350,7 @@ mod descriptors {
     }
 
     pub struct StringDescriptor {
-        bLength: u8,
+        // bLength: u8,
         bString: Utf16String,
     }
 
@@ -288,8 +361,19 @@ mod descriptors {
     }
 
     // special-case for GET_DESCRIPTOR(String, 0)
-    struct StringLanguageIdentifierDescriptor {
-        bLength: u8,
+    pub struct StringLanguageIdentifierDescriptor {
+        // bLength: u8,
         wLANGID: Vec<LanguageId>, // [u16]
+    }
+
+    impl std::str::FromStr for StringDescriptor {
+        type Err = std::convert::Infallible;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            Ok(Self {
+                // unwrap: infallible
+                bString: Utf16String::from_str(s).unwrap(),
+            })
+        }
     }
 }
