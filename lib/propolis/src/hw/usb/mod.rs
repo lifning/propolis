@@ -108,7 +108,7 @@ pub mod value_types {
     }
 
     #[repr(u8)]
-    #[derive(FromRepr)]
+    #[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub enum EndpointDir {
         Out = 0,
         In = 1,
@@ -126,7 +126,7 @@ pub mod value_types {
     }
 
     #[repr(u8)]
-    #[derive(FromRepr)]
+    #[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub enum TransferType {
         Configuration = 0,
         Isochronous = 1,
@@ -250,7 +250,10 @@ trait Device {
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 mod descriptors {
-    use super::{value_types::*, ConfigurationInfo, DeviceInfo, InterfaceInfo};
+    use super::{
+        value_types::*, ConfigurationInfo, DeviceInfo, EndpointInfo,
+        InterfaceInfo,
+    };
 
     pub trait Descriptor {
         fn descriptor_type(&self) -> DescriptorType;
@@ -452,6 +455,7 @@ mod descriptors {
             }
         }
     }
+
     impl From<(&InterfaceNumber, &InterfaceInfo)> for InterfaceDescriptor {
         fn from((if_num, if_info): (&InterfaceNumber, &InterfaceInfo)) -> Self {
             let InterfaceInfo {
@@ -462,15 +466,37 @@ mod descriptors {
                 protocol,
                 description,
             } = if_info;
-
+            let endpoints = endpoints
+                .into_iter()
+                .enumerate()
+                .map(EndpointDescriptor::from)
+                .collect();
             Self {
                 bInterfaceNumber: *if_num,
-                bAlternateSetting: todo!(),
-                endpoints: todo!(),
+                bAlternateSetting: *alternate_setting,
+                endpoints,
                 bInterfaceClass: *class,
                 bInterfaceSubClass: *subclass,
                 bInterfaceProtocol: *protocol,
                 iInterface: todo!(),
+                specific_augmentations: todo!(),
+            }
+        }
+    }
+
+    impl From<(usize, &EndpointInfo)> for EndpointDescriptor {
+        fn from((ep_num, ep_info): (usize, &EndpointInfo)) -> Self {
+            let EndpointInfo { direction, transfer_type, interval } = ep_info;
+            let bEndpointAddress = BitmapEndptDescAddress::default()
+                .with_endpoint_number(ep_num as u8)
+                .with_endpoint_direction(*direction);
+            let bmAttributes = BitmapEndptDescAttributes::default()
+                .with_transfer_type(*transfer_type);
+            Self {
+                bEndpointAddress,
+                bmAttributes,
+                wMaxPacketSize: todo!(),
+                bInterval: *interval,
                 specific_augmentations: todo!(),
             }
         }
