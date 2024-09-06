@@ -1,6 +1,7 @@
 //! USB Emulation
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 
 use descriptors::*;
 use value_types::*;
@@ -12,6 +13,7 @@ pub mod value_types {
     use bitstruct::bitstruct;
     use strum::FromRepr;
 
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct Bcd16(u16);
     impl Bcd16 {
         pub fn from_raw(hex: u16) -> Self {
@@ -41,14 +43,22 @@ pub mod value_types {
         }
     }
 
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct DescriptorType(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct ClassCode(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct SubclassCode(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct ProtocolCode(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct InterfaceClass(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct InterfaceSubclass(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct InterfaceProtocol(pub u8);
 
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[repr(u8)]
     pub enum MaxSizeZeroEP {
         _8 = 8,
@@ -56,10 +66,16 @@ pub mod value_types {
         _32 = 32,
         _64 = 64,
     }
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct VendorId(pub u16);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct ProductId(pub u16);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct StringIndex(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub struct ConfigurationValue(pub u8);
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct InterfaceNumber(pub u8);
 
     /// USB Language Identifiers, version 1.0.
     /// (see also Universal Serial Bus HID Usage Tables, section 3.6: HID LANGIDs)
@@ -72,11 +88,6 @@ pub mod value_types {
         HIDVendor2 = 0x0FF | (0x3d << 10),
         HIDVendor3 = 0x0FF | (0x3e << 10),
         HIDVendor4 = 0x0FF | (0x3f << 10),
-    }
-
-    pub struct Bitmap8(u8);
-    impl Bitmap8 {
-        // TODO
     }
 
     pub struct CountryCode(pub u8);
@@ -171,18 +182,12 @@ struct DeviceInfo {
     pub product_id: ProductId,
     pub class: ClassCode,
     pub subclass: SubclassCode,
-    pub configurations: HashMap<ConfigurationValue, ConfigurationInfo>,
+    pub configurations: BTreeMap<ConfigurationValue, ConfigurationInfo>,
     pub specific_descriptors: Vec<ClassSpecificDescriptor>,
 }
 
-impl Into<DeviceDescriptor> for &DeviceInfo {
-    fn into(self) -> DeviceDescriptor {
-        todo!()
-    }
-}
-
 struct ConfigurationInfo {
-    pub interfaces: HashMap<InterfaceNum, InterfaceInfo>,
+    pub interfaces: BTreeMap<InterfaceNumber, InterfaceInfo>,
     pub bus_powered: bool,
     pub self_powered: bool,
     pub remote_wakeup: bool,
@@ -225,8 +230,13 @@ trait Device {
                     .device_info()
                     .manufacturer_name
                     .get(language)
-                    .map(|s| Box::new(StringDescriptor::from(s))),
-                // ...
+                    .map(|s| {
+                        // inlining this variable breaks type-check.
+                        // turbofish `Box::<dyn Descriptor>::new()` doesn't seem to help.
+                        let boxed_dyn: Box<dyn Descriptor> =
+                            Box::new(StringDescriptor::from_str(s).unwrap());
+                        boxed_dyn
+                    }), // ...
             }, // ...
         }
     }
@@ -240,7 +250,7 @@ trait Device {
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 mod descriptors {
-    use super::value_types::*;
+    use super::{value_types::*, ConfigurationInfo, DeviceInfo, InterfaceInfo};
 
     pub trait Descriptor {
         fn descriptor_type(&self) -> DescriptorType;
@@ -300,7 +310,7 @@ mod descriptors {
     }
 
     pub struct InterfaceDescriptor {
-        bInterfaceNumber: u8,
+        bInterfaceNumber: InterfaceNumber,
         bAlternateSetting: u8,
 
         endpoints: Vec<EndpointDescriptor>, // .len() as u8 = bNumEndpoints
@@ -374,6 +384,95 @@ mod descriptors {
                 // unwrap: infallible
                 bString: Utf16String::from_str(s).unwrap(),
             })
+        }
+    }
+
+    impl From<&DeviceInfo> for DeviceDescriptor {
+        fn from(value: &DeviceInfo) -> Self {
+            let DeviceInfo {
+                manufacturer_name,
+                product_name,
+                serial_number,
+                usb_version,
+                device_version,
+                vendor_id,
+                product_id,
+                class,
+                subclass,
+                configurations,
+                specific_descriptors,
+            } = value;
+            let configurations = configurations
+                .into_iter()
+                .map(ConfigurationDescriptor::from)
+                .collect();
+            Self {
+                bcdUSB: *usb_version,
+                bDeviceClass: *class,
+                bDeviceSubClass: *subclass,
+                bDeviceProtocol: todo!(),
+                bMaxPacketSize0: todo!(),
+                idVendor: *vendor_id,
+                idProduct: *product_id,
+                bcdDevice: *device_version,
+                iManufacturer: todo!(),
+                iProduct: todo!(),
+                iSerial: todo!(),
+                configurations,
+                specific_augmentations: todo!(),
+            }
+        }
+    }
+
+    impl From<(&ConfigurationValue, &ConfigurationInfo)>
+        for ConfigurationDescriptor
+    {
+        fn from(
+            (cfg_num, cfg_info): (&ConfigurationValue, &ConfigurationInfo),
+        ) -> Self {
+            let ConfigurationInfo {
+                interfaces,
+                bus_powered,
+                self_powered,
+                remote_wakeup,
+                max_power,
+            } = cfg_info;
+            let interfaces =
+                interfaces.into_iter().map(InterfaceDescriptor::from).collect();
+            let bmAttributes = BitmapCfgDescAttributes::default()
+                .with_self_powered(*self_powered)
+                .with_bus_powered(*bus_powered)
+                .with_remote_wakeup(*remote_wakeup);
+            Self {
+                interfaces,
+                bConfigurationValue: *cfg_num,
+                iConfiguration: todo!(),
+                bmAttributes,
+                specific_augmentations: todo!(),
+            }
+        }
+    }
+    impl From<(&InterfaceNumber, &InterfaceInfo)> for InterfaceDescriptor {
+        fn from((if_num, if_info): (&InterfaceNumber, &InterfaceInfo)) -> Self {
+            let InterfaceInfo {
+                alternate_setting,
+                endpoints,
+                class,
+                subclass,
+                protocol,
+                description,
+            } = if_info;
+
+            Self {
+                bInterfaceNumber: *if_num,
+                bAlternateSetting: todo!(),
+                endpoints: todo!(),
+                bInterfaceClass: *class,
+                bInterfaceSubClass: *subclass,
+                bInterfaceProtocol: *protocol,
+                iInterface: todo!(),
+                specific_augmentations: todo!(),
+            }
         }
     }
 }
