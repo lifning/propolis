@@ -3,5 +3,6 @@
 mod bits;
 mod controller;
 mod registers;
+mod ring_reader;
 
 pub use controller::PciXhci;
