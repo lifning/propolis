@@ -34,6 +34,13 @@ impl<T: Copy + Default> Ring<T> {
     fn write_to_guest(&self, memctx: &mut MemCtx) {
         assert!(memctx.write_many(self.addr, &self.shadow_copy))
     }
+    fn is_empty(&self) -> bool {
+        self.enqueue_index == self.dequeue_index
+    }
+    fn is_full(&self) -> bool {
+        // TODO note: depends on Link TRBs, 4.11.5.1
+        todo!("enqueue index + 1") == self.dequeue_index
+    }
     fn enqueue(&mut self, value: T) -> Result<(), T> {
         // TODO: here's how a naive circular buffer would work...
         // but this is NOT how xHCI does it.
@@ -159,7 +166,7 @@ pub struct TransferDescriptor {
     trbs: Vec<TransferRequestBlock>,
 }
 impl TransferDescriptor {
-    /// xHCI 4.14: The TD Transfer Size is defined by the sum of the
+    /// xHCI 1.2 sect 4.14: The TD Transfer Size is defined by the sum of the
     /// TRB Transfer Length fields in all TRBs that comprise the TD.
     pub fn transfer_size(&self) -> usize {
         self.trbs
@@ -168,9 +175,32 @@ impl TransferDescriptor {
             .sum()
     }
 
-    //
+    // TODO: validate my read of the below
+    /// xHCI 1.2 sect 4.9.1: To generate a zero-length USB transaction,
+    /// software shall define a TD with a single Transfer TRB with its
+    /// transfer length set to 0. (it may include others, such as Link TRBs or
+    /// Event Data TRBs, but only one 'Transfer TRB')
+    /// (see also xHCI 1.2 table 6-21; as 4.9.1 is ambiguously worded.
+    /// we're looking at *Normal* Transfer TRBs)
+    pub fn is_zero_length(&self) -> bool {
+        let mut trb_transfer_length = None;
+        for trb in &self.trbs {
+            if trb.control.trb_type() == TrbType::Normal {
+                let x = trb.status.trb_transfer_length();
+                if x != 0 {
+                    return false;
+                }
+                // more than one Normal encountered
+                if trb_transfer_length.replace(x).is_some() {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
 }
 
+// TODO: move to ::bits
 bitstruct! {
     /// Representation of the 'control' field of Transfer Request Block (TRB).
     ///
