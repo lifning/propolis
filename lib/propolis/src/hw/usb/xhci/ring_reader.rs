@@ -23,6 +23,17 @@ impl<T: Copy + Default> Ring<T> {
             consumer_cycle_state: todo!(),
         }
     }
+    #[cfg(test)]
+    fn new_synthetic(shadow_copy: Vec<T>) -> Self {
+        Self {
+            addr: GuestAddr(0),
+            shadow_copy,
+            enqueue_index: 0,
+            dequeue_index: 0,
+            producer_cycle_state: todo!(),
+            consumer_cycle_state: todo!(),
+        }
+    }
     fn update_from_guest(&mut self, memctx: &mut MemCtx) {
         let many =
             memctx.read_many::<T>(self.addr, self.shadow_copy.len()).unwrap();
@@ -73,12 +84,22 @@ impl<T: Copy + Default> Ring<T> {
 pub type TransferRing = Ring<TransferRequestBlock>;
 
 #[repr(C)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone)]
 pub struct TransferRequestBlock {
     /// may be an address or immediate data
     parameter: u64,
     status: TrbStatusField,
     control: TrbControlField,
+}
+
+impl Default for TransferRequestBlock {
+    fn default() -> Self {
+        Self {
+            parameter: 0,
+            status: Default::default(),
+            control: TrbControlField { normal: Default::default() },
+        }
+    }
 }
 
 /// xHCI 1.2 Section 6.4.6
@@ -153,12 +174,50 @@ pub enum TrbType {
 
 impl From<u8> for TrbType {
     fn from(value: u8) -> Self {
-        TrbType::from_repr(value).expect("TrbType should only be converted from a 6-bit field in TrbControlField")
+        Self::from_repr(value).expect("TrbType should only be converted from a 6-bit field in TrbControlField")
     }
 }
 impl Into<u8> for TrbType {
     fn into(self) -> u8 {
         self as u8
+    }
+}
+
+/// Or "TRT". See xHCI 1.2 Table 6-26 and Section 4.11.2.2
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum TrbTransferType {
+    NoDataStage = 0,
+    Reserved = 1,
+    OutDataStage = 2,
+    InDataStage = 3,
+}
+impl From<u8> for TrbTransferType {
+    fn from(value: u8) -> Self {
+        Self::from_repr(value).expect("TrbTransferType should only be converted from a 2-bit field in TrbControlField")
+    }
+}
+impl Into<u8> for TrbTransferType {
+    fn into(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Or "TRT". See xHCI 1.2 Table 6-26 and Section 4.11.2.2
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum TrbDirection {
+    Out = 0,
+    In = 1,
+}
+impl From<bool> for TrbDirection {
+    fn from(value: bool) -> Self {
+        unsafe { core::mem::transmute(value as u8) }
+    }
+}
+impl Into<bool> for TrbDirection {
+    fn into(self) -> bool {
+        self == Self::In
     }
 }
 
@@ -185,7 +244,7 @@ impl TransferDescriptor {
     pub fn is_zero_length(&self) -> bool {
         let mut trb_transfer_length = None;
         for trb in &self.trbs {
-            if trb.control.trb_type() == TrbType::Normal {
+            if trb.control.normal.trb_type() == TrbType::Normal {
                 let x = trb.status.trb_transfer_length();
                 if x != 0 {
                     return false;
@@ -201,12 +260,20 @@ impl TransferDescriptor {
 }
 
 // TODO: move to ::bits
+/// Representations of the 'control' field of Transfer Request Block (TRB).
+/// The field definitions differ depending on the TrbType.
+/// See xHCI 1.2 Section 6.4.1 (Comments are paraphrases thereof)
+#[derive(Copy, Clone)]
+pub union TrbControlField {
+    normal: TrbControlFieldNormal,
+    setup_stage: TrbControlFieldSetupStage,
+    data_stage: TrbControlFieldDataStage,
+}
+
 bitstruct! {
-    /// Representation of the 'control' field of Transfer Request Block (TRB).
-    ///
-    /// See xHCI 1.2 Section 6.4.1 (Comments are paraphrases thereof)
+    /// Normal TRB control fields (xHCI 1.2 table 6-22)
     #[derive(Clone, Copy, Debug, Default)]
-    pub struct TrbControlField(pub u32) {
+    pub struct TrbControlFieldNormal(pub u32) {
         /// Used to mark the Enqueue Pointer of the Transfer Ring.
         pub cycle: bool = 0;
 
@@ -252,6 +319,87 @@ bitstruct! {
 }
 
 bitstruct! {
+    /// Setup Stage TRB control fields (xHCI 1.2 table 6-26)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldSetupStage(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u8 = 1..5;
+
+        /// Or "IOC".
+        // TODO: description
+        pub interrupt_on_completion: bool = 5;
+
+        /// Or "IDT".
+        // TODO: description
+        pub immediate_data: bool = 6;
+
+        reserved2: u8 = 7..10;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        /// Or "TRT"
+        // TODO: description
+        pub transfer_type: TrbTransferType = 16..18;
+
+        reserved3: u16 = 18..32;
+    }
+}
+
+bitstruct! {
+    /// Data Stage TRB control fields (xHCI 1.2 table 6-29)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldDataStage(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer Ring.
+        pub cycle: bool = 0;
+
+        /// Or "ENT". If set, the xHC shall fetch and evaluate the next TRB
+        /// before saving the endpoint state (see xHCI 1.2 Section 4.12.3)
+        pub evaluate_next_trb: bool = 1;
+
+        /// Or "ISP". If set, and a Short Packet is encountered for this TRB
+        /// (less than the amount specified in the TRB Transfer Length),
+        /// then a Transfer Event TRB shall be generated with its
+        /// Completion Code set to Short Packet and its TRB Transfer Length
+        /// field set to the residual number of bytes not transfered into
+        /// the associated data buffer.
+        pub interrupt_on_short_packet: bool = 2;
+
+        /// Or "NS".
+        // TODO: description
+        pub no_snoop: bool = 3;
+
+        /// Or "CH".
+        // TODO: description
+        pub chain_bit: bool = 4;
+
+        /// Or "IOC".
+        // TODO: description
+        pub interrupt_on_completion: bool = 5;
+
+        /// Or "IDT".
+        // TODO: description
+        pub immediate_data: bool = 6;
+
+        reserved1: u8 = 7..9;
+
+        /// Or "BEI".
+        // TODO: description
+        pub block_event_interrupt: bool = 9;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        /// Or "DIR".
+        pub direction: TrbDirection = 16;
+
+        reserved3: u16 = 17..32;
+    }
+}
+
+bitstruct! {
     /// Representation of the 'status' field of Transfer Request Block (TRB).
     ///
     /// See xHCI 1.2 Section 6.4.1 (Comments are paraphrases thereof)
@@ -276,5 +424,42 @@ bitstruct! {
         /// The index of the Interrupter that will receive events generated
         /// by this TRB. "Valid values are between 0 and MaxIntrs-1."
         pub interrupter_target: u16 = 22..32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Ring, TransferRequestBlock, TrbControlField, TrbControlFieldSetupStage,
+        TrbStatusField, TrbTransferType,
+    };
+
+    #[test]
+    fn test_get_device_descriptor_ring() {
+        let ring_contents = vec![
+            TransferRequestBlock {
+                parameter: todo!(
+                    "bmRequestType, bRequest, wValue, wIndex, wLength"
+                ),
+                status: TrbStatusField::default()
+                    .with_td_size(8)
+                    .with_interrupter_target(0),
+                control: TrbControlField {
+                    setup_stage: TrbControlFieldSetupStage::default()
+                        .with_cycle(true)
+                        .with_immediate_data(true)
+                        .with_trb_type(super::TrbType::SetupStage)
+                        .with_transfer_type(TrbTransferType::InDataStage),
+                },
+            },
+            TransferRequestBlock {
+                parameter: todo!("phys address"),
+                status: TrbStatusField::default().with_td_size(todo!()),
+                control: TrbControlField {
+                    data_stage: TrbControlFieldDataStage::default(),
+                },
+            },
+        ];
+        let ring = Ring::new_synthetic(ring_contents);
     }
 }
