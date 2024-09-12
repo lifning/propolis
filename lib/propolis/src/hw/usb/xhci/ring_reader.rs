@@ -19,8 +19,8 @@ impl<T: Copy + Default> Ring<T> {
             shadow_copy: vec![Default::default(); num_elem],
             enqueue_index: 0,
             dequeue_index: 0,
-            producer_cycle_state: todo!(),
-            consumer_cycle_state: todo!(),
+            producer_cycle_state: false,
+            consumer_cycle_state: false,
         }
     }
     #[cfg(test)]
@@ -30,8 +30,8 @@ impl<T: Copy + Default> Ring<T> {
             shadow_copy,
             enqueue_index: 0,
             dequeue_index: 0,
-            producer_cycle_state: todo!(),
-            consumer_cycle_state: todo!(),
+            producer_cycle_state: false,
+            consumer_cycle_state: false,
         }
     }
     fn update_from_guest(&mut self, memctx: &mut MemCtx) {
@@ -48,10 +48,10 @@ impl<T: Copy + Default> Ring<T> {
     fn is_empty(&self) -> bool {
         self.enqueue_index == self.dequeue_index
     }
-    fn is_full(&self) -> bool {
-        // TODO note: depends on Link TRBs, 4.11.5.1
-        todo!("enqueue index + 1") == self.dequeue_index
-    }
+    // fn is_full(&self) -> bool {
+    //     // TODO note: depends on Link TRBs, 4.11.5.1
+    //     todo!("enqueue index + 1") == self.dequeue_index
+    // }
     fn enqueue(&mut self, value: T) -> Result<(), T> {
         // TODO: here's how a naive circular buffer would work...
         // but this is NOT how xHCI does it.
@@ -244,7 +244,7 @@ impl TransferDescriptor {
     pub fn is_zero_length(&self) -> bool {
         let mut trb_transfer_length = None;
         for trb in &self.trbs {
-            if trb.control.normal.trb_type() == TrbType::Normal {
+            if trb.control.trb_type() == TrbType::Normal {
                 let x = trb.status.trb_transfer_length();
                 if x != 0 {
                     return false;
@@ -268,6 +268,14 @@ pub union TrbControlField {
     normal: TrbControlFieldNormal,
     setup_stage: TrbControlFieldSetupStage,
     data_stage: TrbControlFieldDataStage,
+    status_stage: TrbControlFieldStatusStage,
+}
+
+impl TrbControlField {
+    fn trb_type(&self) -> TrbType {
+        // all variants are alike in TRB type location
+        unsafe { self.normal.trb_type() }
+    }
 }
 
 bitstruct! {
@@ -383,11 +391,40 @@ bitstruct! {
         // TODO: description
         pub immediate_data: bool = 6;
 
-        reserved1: u8 = 7..9;
+        reserved1: u8 = 7..10;
 
-        /// Or "BEI".
         // TODO: description
-        pub block_event_interrupt: bool = 9;
+        pub trb_type: TrbType = 10..16;
+
+        /// Or "DIR".
+        pub direction: TrbDirection = 16;
+
+        reserved2: u16 = 17..32;
+    }
+}
+
+bitstruct! {
+    /// Status Stage TRB control fields (xHCI 1.2 table 6-31)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldStatusStage(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer Ring.
+        pub cycle: bool = 0;
+
+        /// Or "ENT". If set, the xHC shall fetch and evaluate the next TRB
+        /// before saving the endpoint state (see xHCI 1.2 Section 4.12.3)
+        pub evaluate_next_trb: bool = 1;
+
+        reserved1: u8 = 2..4;
+
+        /// Or "CH".
+        // TODO: description
+        pub chain_bit: bool = 4;
+
+        /// Or "IOC".
+        // TODO: description
+        pub interrupt_on_completion: bool = 5;
+
+        reserved2: u8 = 6..10;
 
         // TODO: description
         pub trb_type: TrbType = 10..16;
@@ -429,18 +466,14 @@ bitstruct! {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Ring, TransferRequestBlock, TrbControlField, TrbControlFieldSetupStage,
-        TrbStatusField, TrbTransferType,
-    };
+    use super::*;
 
     #[test]
     fn test_get_device_descriptor_ring() {
+        // mimicking pg. 85 of xHCI 1.2
         let ring_contents = vec![
             TransferRequestBlock {
-                parameter: todo!(
-                    "bmRequestType, bRequest, wValue, wIndex, wLength"
-                ),
+                parameter: 0, // todo!("bmRequestType 0x80, bRequest 6, wValue 0x100, wIndex 0, wLength 8"),
                 status: TrbStatusField::default()
                     .with_td_size(8)
                     .with_interrupter_target(0),
@@ -448,18 +481,35 @@ mod tests {
                     setup_stage: TrbControlFieldSetupStage::default()
                         .with_cycle(true)
                         .with_immediate_data(true)
-                        .with_trb_type(super::TrbType::SetupStage)
+                        .with_trb_type(TrbType::SetupStage)
                         .with_transfer_type(TrbTransferType::InDataStage),
                 },
             },
             TransferRequestBlock {
-                parameter: todo!("phys address"),
-                status: TrbStatusField::default().with_td_size(todo!()),
+                parameter: 0x123456789abcdef0u64,
+                status: TrbStatusField::default().with_trb_transfer_length(8),
                 control: TrbControlField {
-                    data_stage: TrbControlFieldDataStage::default(),
+                    data_stage: TrbControlFieldDataStage::default()
+                        .with_cycle(true)
+                        .with_trb_type(TrbType::DataStage)
+                        .with_direction(TrbDirection::In),
+                },
+            },
+            TransferRequestBlock {
+                parameter: 0,
+                status: TrbStatusField::default(),
+                control: TrbControlField {
+                    status_stage: TrbControlFieldStatusStage::default()
+                        .with_cycle(true)
+                        .with_interrupt_on_completion(true)
+                        .with_trb_type(TrbType::StatusStage)
+                        .with_direction(TrbDirection::Out),
                 },
             },
         ];
-        let ring = Ring::new_synthetic(ring_contents);
+        let ring = Ring::new_synthetic(ring_contents.clone());
+        // TODO: read from ring
+        let td = TransferDescriptor { trbs: ring_contents };
+        assert_eq!(td.transfer_size(), 8);
     }
 }
