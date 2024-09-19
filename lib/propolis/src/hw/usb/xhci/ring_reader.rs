@@ -1,87 +1,162 @@
-use crate::{common::GuestAddr, hw::usb::xhci::*, vmm::mem::MemCtx};
+#![allow(unused)]
+
+use std::marker::PhantomData;
+
+use crate::{
+    common::{GuestAddr, GuestRegion},
+    vmm::mem::MemCtx,
+};
 use bitstruct::bitstruct;
 use strum::FromRepr;
 
-pub struct Ring<T: Copy + Default> {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("I/O error: {0:?}")]
+    IoError(#[from] std::io::Error),
+    #[error("Last TRB in ring at 0x{0:?} was not Link: {1:?}")]
+    MissingLink(GuestAddr, TrbType),
+    #[error("Tried to construct Command Descriptor from multiple TRBs")]
+    CommandDescriptorSize,
+    #[error("Tried to construct Event Descriptor from multiple TRBs")]
+    EventDescriptorSize,
+}
+pub type Result<T> = core::result::Result<T, Error>;
+
+pub struct Consumer;
+pub struct Producer;
+pub trait RingDirection {}
+impl RingDirection for Consumer {}
+impl RingDirection for Producer {}
+
+pub trait WorkItem: Sized + IntoIterator<Item = TransferRequestBlock> {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = TransferRequestBlock>,
+    ) -> Result<Self>;
+}
+
+pub type TransferRing = Ring<TransferDescriptor, Consumer>;
+pub type CommandRing = Ring<CommandDescriptor, Consumer>;
+pub type EventRing = Ring<EventDescriptor, Producer>;
+
+pub struct Ring<T: WorkItem, Dir: RingDirection> {
     addr: GuestAddr,
-    shadow_copy: Vec<T>,
+    shadow_copy: Vec<TransferRequestBlock>,
     enqueue_index: usize,
     dequeue_index: usize,
-    producer_cycle_state: bool,
-    consumer_cycle_state: bool,
+    _ghost: PhantomData<(T, Dir)>,
 }
 
 /// See xHCI 1.2 section 4.14 "Managing Transfer Rings"
-impl<T: Copy + Default> Ring<T> {
+impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
     fn new(addr: GuestAddr, num_elem: usize) -> Self {
+        // TODO: bound size
         Self {
             addr,
-            shadow_copy: vec![Default::default(); num_elem],
+            shadow_copy: vec![TransferRequestBlock::default(); num_elem],
             enqueue_index: 0,
             dequeue_index: 0,
-            producer_cycle_state: false,
-            consumer_cycle_state: false,
+            _ghost: PhantomData,
         }
     }
     #[cfg(test)]
-    fn new_synthetic(shadow_copy: Vec<T>) -> Self {
+    fn new_synthetic(shadow_copy: Vec<TransferRequestBlock>) -> Self {
         Self {
             addr: GuestAddr(0),
             shadow_copy,
             enqueue_index: 0,
             dequeue_index: 0,
-            producer_cycle_state: false,
-            consumer_cycle_state: false,
+            _ghost: PhantomData,
         }
     }
-    fn update_from_guest(&mut self, memctx: &mut MemCtx) {
-        let many =
-            memctx.read_many::<T>(self.addr, self.shadow_copy.len()).unwrap();
-        self.shadow_copy.clear();
-        self.shadow_copy.extend(many);
-        //let byte_len = self.shadow_copy.len() * core::mem::size_of::<T>();
-        //memctx.direct_read_into(self.addr, &mut self.shadow_copy, byte_len);
-    }
-    fn write_to_guest(&self, memctx: &mut MemCtx) {
-        assert!(memctx.write_many(self.addr, &self.shadow_copy))
+    /// xHCI 1.2 sect 4.9.2: When a Transfer Ring is enabled or reset,
+    /// the xHC initializes its copies of the Enqueue and Dequeue Pointers
+    /// with the value of the Endpoint/Stream Context TR Dequeue Pointer field.
+    fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
+        let index = (tr_dequeue_pointer.0 - self.addr.0) as usize
+            / size_of::<TransferRequestBlock>();
+        self.enqueue_index = index;
+        self.dequeue_index = index;
+        // TODO: how does enqueue index get set in consumer?
     }
     fn is_empty(&self) -> bool {
         self.enqueue_index == self.dequeue_index
+    }
+    fn deq_incr(&mut self) {
+        self.dequeue_index = (self.dequeue_index + 1) % self.shadow_copy.len()
+    }
+    fn enq_incr(&mut self) {
+        self.enqueue_index = (self.enqueue_index + 1) % self.shadow_copy.len()
     }
     // fn is_full(&self) -> bool {
     //     // TODO note: depends on Link TRBs, 4.11.5.1
     //     todo!("enqueue index + 1") == self.dequeue_index
     // }
-    fn enqueue(&mut self, value: T) -> Result<(), T> {
-        // TODO: here's how a naive circular buffer would work...
-        // but this is NOT how xHCI does it.
-        //
-        // let next_enq = (self.enqueue_index + 1) % self.shadow_copy.len();
-        // if next_enq != self.dequeue_index {
-        //     self.shadow_copy[self.enqueue_index] = value;
-        //     self.enqueue_index = next_enq;
-        //     Ok(())
-        // } else {
-        //     Err(value)
-        // }
-        todo!()
+}
+
+impl<T: WorkItem> Ring<T, Consumer> {
+    // xHCI 1.2 sect 4.9: "TRB Rings may be larger than a Page,
+    // however they shall not cross a 64K byte boundary."
+    // xHCI 1.2 sect 4.11.5.1: "The Ring Segment Pointer field in a Link TRB
+    // is not required to point to the beginning of a physical memory page."
+    // (They *are* required to be 16-byte aligned, i.e. sizeof::<TRB>())
+    fn update_from_guest(&mut self, memctx: &mut MemCtx) -> Result<()> {
+        if let Some(region) = memctx
+            .readable_region(&GuestRegion(self.addr, self.shadow_copy.len()))
+        {
+            region.read_many(&mut self.shadow_copy)?;
+        }
+        // TODO: segmented! scan for Link TRBs and copy from those too,
+        //  until one points back to self.addr.
+        // and defend against infinitely long linked lists by counting up some
+        // reasonable upper bound to how many TRB's we'll allow
+
+        // xHCI 1.2 sect 4.9.2.1: The last TRB in a Ring Segment is always a Link TRB.
+        let trb_type = self.shadow_copy.last().unwrap().control.trb_type();
+        if trb_type != TrbType::Link {
+            Err(Error::MissingLink(self.addr, trb_type))
+        } else {
+            Ok(())
+        }
     }
-    fn dequeue(&mut self) -> Option<T> {
-        // TODO: ditto.
-        //
-        // if self.dequeue_index != self.enqueue_index {
-        //     let value = self.shadow_copy[self.dequeue_index];
-        //     self.dequeue_index =
-        //         (self.dequeue_index + 1) % self.shadow_copy.len();
-        //     Some(value)
-        // } else {
-        //     None
-        // }
-        todo!()
+    fn dequeue(&mut self) -> Option<Result<T>> {
+        while !self.is_empty() {
+            if self.shadow_copy[self.dequeue_index].control.trb_type()
+                == TrbType::Link
+            {
+                self.deq_incr();
+            } else {
+                break;
+            }
+        }
+        if self.is_empty() {
+            return None;
+        }
+        let cycle_state = self.shadow_copy[self.dequeue_index].control.cycle();
+        //let start_index = self.dequeue_index;
+        // TODO: fewer allocs/copies
+        let mut trbs = Vec::new();
+        while !self.is_empty()
+            && self.shadow_copy[self.dequeue_index].control.cycle()
+                == cycle_state
+        {
+            trbs.push(self.shadow_copy[self.dequeue_index]);
+            self.deq_incr();
+        }
+        Some(T::try_from_trb_iter(trbs))
     }
 }
 
-pub type TransferRing = Ring<TransferRequestBlock>;
+impl<T: WorkItem> Ring<T, Producer> {
+    fn write_to_guest(&self, memctx: &mut MemCtx) {
+        assert!(memctx.write_many(self.addr, &self.shadow_copy))
+        // TODO: check that shadow_copy has no incorrect TRB types?
+        // e.g. no Link TRBs (xHCI 1.2 sect 4.11.5: only relevant to Transfer
+        // and Command) as the Producer-type ring (EventRing) isn't segmented
+    }
+    fn enqueue(&mut self, value: T) -> core::result::Result<(), T> {
+        todo!()
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -103,7 +178,7 @@ impl Default for TransferRequestBlock {
 }
 
 /// xHCI 1.2 Section 6.4.6
-#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum TrbType {
     Reserved0 = 0,
@@ -221,9 +296,86 @@ impl Into<bool> for TrbDirection {
     }
 }
 
+pub struct EventDescriptor(TransferRequestBlock);
+impl WorkItem for EventDescriptor {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = TransferRequestBlock>,
+    ) -> Result<Self> {
+        let mut trbs = trbs.into_iter();
+        if let Some(trb) = trbs.next() {
+            if trbs.next().is_some() {
+                Err(Error::EventDescriptorSize)
+            } else {
+                Ok(Self(trb))
+            }
+        } else {
+            Err(Error::EventDescriptorSize)
+        }
+    }
+}
+impl IntoIterator for EventDescriptor {
+    type Item = TransferRequestBlock;
+    type IntoIter = std::iter::Once<TransferRequestBlock>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::iter::once(self.0)
+    }
+}
+
+pub struct CommandDescriptor(TransferRequestBlock);
+impl WorkItem for CommandDescriptor {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = TransferRequestBlock>,
+    ) -> Result<Self> {
+        let mut trbs = trbs.into_iter();
+        if let Some(trb) = trbs.next() {
+            if trbs.next().is_some() {
+                Err(Error::CommandDescriptorSize)
+            } else {
+                Ok(Self(trb))
+            }
+        } else {
+            Err(Error::CommandDescriptorSize)
+        }
+    }
+}
+impl IntoIterator for CommandDescriptor {
+    type Item = TransferRequestBlock;
+    type IntoIter = std::iter::Once<TransferRequestBlock>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::iter::once(self.0)
+    }
+}
+
 pub struct TransferDescriptor {
     trbs: Vec<TransferRequestBlock>,
 }
+impl WorkItem for TransferDescriptor {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = TransferRequestBlock>,
+    ) -> Result<Self> {
+        Ok(Self { trbs: trbs.into_iter().collect() })
+    }
+}
+impl IntoIterator for TransferDescriptor {
+    type Item = TransferRequestBlock;
+    type IntoIter = std::vec::IntoIter<TransferRequestBlock>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.trbs.into_iter()
+    }
+}
+
+impl TryFrom<Vec<TransferRequestBlock>> for TransferDescriptor {
+    type Error = ();
+    fn try_from(
+        trbs: Vec<TransferRequestBlock>,
+    ) -> core::result::Result<Self, Self::Error> {
+        Ok(Self { trbs })
+    }
+}
+
 impl TransferDescriptor {
     /// xHCI 1.2 sect 4.14: The TD Transfer Size is defined by the sum of the
     /// TRB Transfer Length fields in all TRBs that comprise the TD.
@@ -275,6 +427,11 @@ impl TrbControlField {
     fn trb_type(&self) -> TrbType {
         // all variants are alike in TRB type location
         unsafe { self.normal.trb_type() }
+    }
+
+    fn cycle(&self) -> bool {
+        // all variants are alike in cycle bit location
+        unsafe { self.normal.cycle() }
     }
 }
 
@@ -507,7 +664,7 @@ mod tests {
                 },
             },
         ];
-        let ring = Ring::new_synthetic(ring_contents.clone());
+        let ring = TransferRing::new_synthetic(ring_contents.clone());
         // TODO: read from ring
         let td = TransferDescriptor { trbs: ring_contents };
         assert_eq!(td.transfer_size(), 8);
