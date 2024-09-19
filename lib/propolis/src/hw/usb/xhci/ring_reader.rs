@@ -11,7 +11,7 @@ use strum::FromRepr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("I/O error: {0:?}")]
+    #[error("I/O error in xHC Ring: {0:?}")]
     IoError(#[from] std::io::Error),
     #[error("Last TRB in ring at 0x{0:?} was not Link: {1:?}")]
     MissingLink(GuestAddr, TrbType),
@@ -19,6 +19,10 @@ pub enum Error {
     CommandDescriptorSize,
     #[error("Tried to construct Event Descriptor from multiple TRBs")]
     EventDescriptorSize,
+    #[error("Guest defined a segmented ring larger than allowed maximum size")]
+    SegmentedRingTooLarge,
+    #[error("Failed reading TRB from guest memory")]
+    FailedReadingTRB,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -98,23 +102,45 @@ impl<T: WorkItem> Ring<T, Consumer> {
     // however they shall not cross a 64K byte boundary."
     // xHCI 1.2 sect 4.11.5.1: "The Ring Segment Pointer field in a Link TRB
     // is not required to point to the beginning of a physical memory page."
-    // (They *are* required to be 16-byte aligned, i.e. sizeof::<TRB>())
+    // (They *are* required to be at least 16-byte aligned, i.e. sizeof::<TRB>())
     fn update_from_guest(&mut self, memctx: &mut MemCtx) -> Result<()> {
-        if let Some(region) = memctx
-            .readable_region(&GuestRegion(self.addr, self.shadow_copy.len()))
-        {
-            region.read_many(&mut self.shadow_copy)?;
+        let mut new_shadow =
+            Vec::<TransferRequestBlock>::with_capacity(self.shadow_copy.len());
+        let mut addr = self.addr;
+
+        // arbitrary upper limit: if a ring is larger than this, assume
+        // something may be trying to attack us from a compromised guest
+        let mut trb_count = 0;
+        const UPPER_LIMIT: usize =
+            1024 * 1024 * 1024 / size_of::<TransferRequestBlock>();
+
+        loop {
+            if let Some(val) = memctx.read(addr) {
+                new_shadow.push(val);
+                trb_count += 1;
+                if trb_count >= UPPER_LIMIT {
+                    return Err(Error::SegmentedRingTooLarge);
+                }
+                if val.control.trb_type() == TrbType::Link {
+                    // xHCI 1.2 figure 6-38
+                    addr = GuestAddr(val.parameter & !15);
+                    if addr == self.addr {
+                        break;
+                    }
+                } else {
+                    addr = addr.offset::<TransferRequestBlock>(1);
+                }
+            } else {
+                return Err(Error::FailedReadingTRB);
+            }
         }
-        // TODO: segmented! scan for Link TRBs and copy from those too,
-        //  until one points back to self.addr.
-        // and defend against infinitely long linked lists by counting up some
-        // reasonable upper bound to how many TRB's we'll allow
 
         // xHCI 1.2 sect 4.9.2.1: The last TRB in a Ring Segment is always a Link TRB.
-        let trb_type = self.shadow_copy.last().unwrap().control.trb_type();
-        if trb_type != TrbType::Link {
-            Err(Error::MissingLink(self.addr, trb_type))
+        let last_trb_type = new_shadow.last().unwrap().control.trb_type();
+        if last_trb_type != TrbType::Link {
+            Err(Error::MissingLink(self.addr, last_trb_type))
         } else {
+            self.shadow_copy = new_shadow;
             Ok(())
         }
     }
@@ -131,6 +157,7 @@ impl<T: WorkItem> Ring<T, Consumer> {
         if self.is_empty() {
             return None;
         }
+        // TODO: is this sound?
         let cycle_state = self.shadow_copy[self.dequeue_index].control.cycle();
         //let start_index = self.dequeue_index;
         // TODO: fewer allocs/copies
@@ -139,6 +166,9 @@ impl<T: WorkItem> Ring<T, Consumer> {
             && self.shadow_copy[self.dequeue_index].control.cycle()
                 == cycle_state
         {
+            // TODO: respect CHain bit, ENT
+            // TODO: skip Link TRBs according to the state of their Toggle Cycle and Cycle
+            // (see 4.11.7)
             trbs.push(self.shadow_copy[self.dequeue_index]);
             self.deq_incr();
         }
@@ -154,6 +184,7 @@ impl<T: WorkItem> Ring<T, Producer> {
         // and Command) as the Producer-type ring (EventRing) isn't segmented
     }
     fn enqueue(&mut self, value: T) -> core::result::Result<(), T> {
+        // NOTE: must set cycle bits accordingly
         todo!()
     }
 }
@@ -421,6 +452,7 @@ pub union TrbControlField {
     setup_stage: TrbControlFieldSetupStage,
     data_stage: TrbControlFieldDataStage,
     status_stage: TrbControlFieldStatusStage,
+    link: TrbControlFieldLink,
 }
 
 impl TrbControlField {
@@ -590,6 +622,37 @@ bitstruct! {
         pub direction: TrbDirection = 16;
 
         reserved3: u16 = 17..32;
+    }
+}
+
+bitstruct! {
+    /// Status Stage TRB control fields (xHCI 1.2 table 6-31)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldLink(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        /// Or "TC". If set, the xHC shall toggle its interpretation of the
+        /// cycle bit. If claered, the xHC shall continue to the next segment
+        /// using its current cycle bit interpretation.
+        pub toggle_cycle: bool = 1;
+
+        reserved1: u8 = 2..4;
+
+        /// Or "CH".
+        // TODO: description
+        pub chain_bit: bool = 4;
+
+        /// Or "IOC".
+        // TODO: description
+        pub interrupt_on_completion: bool = 5;
+
+        reserved2: u8 = 6..10;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        reserved3: u16 = 16..32;
     }
 }
 
