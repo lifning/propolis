@@ -23,6 +23,10 @@ pub enum Error {
     SegmentedRingTooLarge,
     #[error("Failed reading TRB from guest memory")]
     FailedReadingTRB,
+    #[error(
+        "Incomplete TD: no more TRBs in the cycle to complete the chain: {0:?}"
+    )]
+    IncompleteWorkItem(Vec<TransferRequestBlock>),
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -45,8 +49,10 @@ pub type EventRing = Ring<EventDescriptor, Producer>;
 pub struct Ring<T: WorkItem, Dir: RingDirection> {
     addr: GuestAddr,
     shadow_copy: Vec<TransferRequestBlock>,
-    enqueue_index: usize,
-    dequeue_index: usize,
+    // enqueue or dequeue index, depending on RingDirection
+    queue_index: usize,
+    // producer or consumer cycle state, depending on RingDirection
+    cycle_state: bool,
     _ghost: PhantomData<(T, Dir)>,
 }
 
@@ -57,8 +63,8 @@ impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
         Self {
             addr,
             shadow_copy: vec![TransferRequestBlock::default(); num_elem],
-            enqueue_index: 0,
-            dequeue_index: 0,
+            queue_index: 0,
+            cycle_state: true,
             _ghost: PhantomData,
         }
     }
@@ -67,8 +73,8 @@ impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
         Self {
             addr: GuestAddr(0),
             shadow_copy,
-            enqueue_index: 0,
-            dequeue_index: 0,
+            queue_index: 0,
+            cycle_state: true,
             _ghost: PhantomData,
         }
     }
@@ -78,22 +84,15 @@ impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
     fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
         let index = (tr_dequeue_pointer.0 - self.addr.0) as usize
             / size_of::<TransferRequestBlock>();
-        self.enqueue_index = index;
-        self.dequeue_index = index;
+        self.queue_index = index;
         // TODO: how does enqueue index get set in consumer?
     }
-    fn is_empty(&self) -> bool {
-        self.enqueue_index == self.dequeue_index
-    }
-    fn deq_incr(&mut self) {
-        self.dequeue_index = (self.dequeue_index + 1) % self.shadow_copy.len()
-    }
-    fn enq_incr(&mut self) {
-        self.enqueue_index = (self.enqueue_index + 1) % self.shadow_copy.len()
+    fn queue_advance(&mut self) {
+        self.queue_index = (self.queue_index + 1) % self.shadow_copy.len()
     }
     // fn is_full(&self) -> bool {
     //     // TODO note: depends on Link TRBs, 4.11.5.1
-    //     todo!("enqueue index + 1") == self.dequeue_index
+    //     todo!("enqueue index + 1 == dequeue index")
     // }
 }
 
@@ -144,33 +143,46 @@ impl<T: WorkItem> Ring<T, Consumer> {
             Ok(())
         }
     }
-    fn dequeue(&mut self) -> Option<Result<T>> {
-        while !self.is_empty() {
-            if self.shadow_copy[self.dequeue_index].control.trb_type()
-                == TrbType::Link
-            {
-                self.deq_incr();
+
+    /// Find the first transfer-related TRB, if one exists.
+    /// (See xHCI 1.2 sect 4.9.2)
+    fn dequeue_trb(&mut self) -> Option<TransferRequestBlock> {
+        let start_index = self.queue_index;
+        loop {
+            let trb = self.shadow_copy[self.queue_index];
+            // cycle bit transition - found enqueue pointer
+            if trb.control.cycle() != self.cycle_state {
+                return None;
+            }
+            // xHCI 1.2 figure 4-7
+            if trb.control.trb_type() == TrbType::Link {
+                if unsafe { trb.control.link.toggle_cycle() } {
+                    // xHCI 1.2 figure 4-8
+                    self.cycle_state = !self.cycle_state;
+                }
+                self.queue_advance();
+                // failsafe - in case of full circuit of matching cycle bits
+                // without a toggle_cycle occurring
+                if self.queue_index == start_index {
+                    return None;
+                }
             } else {
-                break;
+                // TODO: do we skip, e.g., NoOp TRBs?
+                return Some(trb);
             }
         }
-        if self.is_empty() {
-            return None;
-        }
-        // TODO: is this sound?
-        let cycle_state = self.shadow_copy[self.dequeue_index].control.cycle();
-        //let start_index = self.dequeue_index;
-        // TODO: fewer allocs/copies
-        let mut trbs = Vec::new();
-        while !self.is_empty()
-            && self.shadow_copy[self.dequeue_index].control.cycle()
-                == cycle_state
-        {
-            // TODO: respect CHain bit, ENT
-            // TODO: skip Link TRBs according to the state of their Toggle Cycle and Cycle
-            // (see 4.11.7)
-            trbs.push(self.shadow_copy[self.dequeue_index]);
-            self.deq_incr();
+    }
+
+    fn dequeue_work_item(&mut self) -> Option<Result<T>> {
+        let mut trbs = vec![self.dequeue_trb()?];
+        while trbs.last().unwrap().control.chain_bit().unwrap_or(false) {
+            // TODO: do we need to consider chain bits of link trb's this would skip?
+            if let Some(trb) = self.dequeue_trb() {
+                trbs.push(trb);
+            } else {
+                // TODO: we need more TRBs for this work item that aren't here yet!
+                return Some(Err(Error::IncompleteWorkItem(trbs)));
+            }
         }
         Some(T::try_from_trb_iter(trbs))
     }
@@ -196,6 +208,18 @@ pub struct TransferRequestBlock {
     parameter: u64,
     status: TrbStatusField,
     control: TrbControlField,
+}
+
+impl core::fmt::Debug for TransferRequestBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "TransferRequestBlock {{ parameter: 0x{:x}, control.trb_type: {:?} }}",
+            self.parameter,
+            self.control.trb_type()
+        )?;
+        Ok(())
+    }
 }
 
 impl Default for TransferRequestBlock {
@@ -465,6 +489,16 @@ impl TrbControlField {
         // all variants are alike in cycle bit location
         unsafe { self.normal.cycle() }
     }
+
+    fn chain_bit(&self) -> Option<bool> {
+        Some(match self.trb_type() {
+            TrbType::Normal => unsafe { self.normal.chain_bit() },
+            TrbType::DataStage => unsafe { self.data_stage.chain_bit() },
+            TrbType::StatusStage => unsafe { self.status_stage.chain_bit() },
+            TrbType::Link => unsafe { self.link.chain_bit() },
+            _ => return None,
+        })
+    }
 }
 
 bitstruct! {
@@ -710,7 +744,7 @@ mod tests {
                 status: TrbStatusField::default().with_trb_transfer_length(8),
                 control: TrbControlField {
                     data_stage: TrbControlFieldDataStage::default()
-                        .with_cycle(true)
+                        .with_chain_bit(true) // TODO: do DataStage and StatusStage get chained?
                         .with_trb_type(TrbType::DataStage)
                         .with_direction(TrbDirection::In),
                 },
@@ -721,6 +755,7 @@ mod tests {
                 control: TrbControlField {
                     status_stage: TrbControlFieldStatusStage::default()
                         .with_cycle(true)
+                        .with_chain_bit(true)
                         .with_interrupt_on_completion(true)
                         .with_trb_type(TrbType::StatusStage)
                         .with_direction(TrbDirection::Out),
