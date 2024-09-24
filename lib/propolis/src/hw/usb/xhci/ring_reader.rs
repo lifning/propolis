@@ -217,8 +217,10 @@ impl EventRing {
         Ok(x)
     }
 
-    // xHCI 1.2 sect 4.9.4.1: ERST entries are not allowed to be modified by
-    // software when HCHalted = 0
+    /// Cache entire segment table. To be called when location (ERSTBA) or
+    /// size (ERSTSZ) registers are written, or when host controller is resumed.
+    /// (Per xHCI 1.2 sect 4.9.4.1: ERST entries themselves are not allowed
+    /// to be modified by software when HCHalted = 0)
     fn update_segment_table(
         &mut self,
         erstba: GuestAddr,
