@@ -23,18 +23,16 @@ pub enum Error {
     SegmentedRingTooLarge,
     #[error("Failed reading TRB from guest memory")]
     FailedReadingTRB,
-    #[error(
-        "Incomplete TD: no more TRBs in the cycle to complete the chain: {0:?}"
-    )]
+    #[error("Incomplete TD: no more TRBs in cycle to complete chain: {0:?}")]
     IncompleteWorkItem(Vec<TransferRequestBlock>),
+    #[error("Event Ring full when trying to enqueue {0:?}")]
+    EventRingFull(TransferRequestBlock),
+    #[error("Event Ring Segment Table of size {1} cannot be read from address {0:?}")]
+    EventRingSegmentTableLocationInvalid(GuestAddr, usize),
+    #[error("Event Ring Segment Table Entry has invalid size: {0:?}")]
+    InvalidEventRingSegmentSize(EventRingSegment),
 }
 pub type Result<T> = core::result::Result<T, Error>;
-
-pub struct Consumer;
-pub struct Producer;
-pub trait RingDirection {}
-impl RingDirection for Consumer {}
-impl RingDirection for Producer {}
 
 pub trait WorkItem: Sized + IntoIterator<Item = TransferRequestBlock> {
     fn try_from_trb_iter(
@@ -42,29 +40,26 @@ pub trait WorkItem: Sized + IntoIterator<Item = TransferRequestBlock> {
     ) -> Result<Self>;
 }
 
-pub type TransferRing = Ring<TransferDescriptor, Consumer>;
-pub type CommandRing = Ring<CommandDescriptor, Consumer>;
-pub type EventRing = Ring<EventDescriptor, Producer>;
+pub type TransferRing = ConsumerRing<TransferDescriptor>;
+pub type CommandRing = ConsumerRing<CommandDescriptor>;
 
-pub struct Ring<T: WorkItem, Dir: RingDirection> {
+pub struct ConsumerRing<T: WorkItem> {
     addr: GuestAddr,
     shadow_copy: Vec<TransferRequestBlock>,
-    // enqueue or dequeue index, depending on RingDirection
-    queue_index: usize,
-    // producer or consumer cycle state, depending on RingDirection
-    cycle_state: bool,
-    _ghost: PhantomData<(T, Dir)>,
+    dequeue_index: usize,
+    consumer_cycle_state: bool,
+    _ghost: PhantomData<T>,
 }
 
 /// See xHCI 1.2 section 4.14 "Managing Transfer Rings"
-impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
+impl<T: WorkItem> ConsumerRing<T> {
     fn new(addr: GuestAddr, num_elem: usize) -> Self {
-        // TODO: bound size
+        // TODO: bound size?
         Self {
             addr,
             shadow_copy: vec![TransferRequestBlock::default(); num_elem],
-            queue_index: 0,
-            cycle_state: true,
+            dequeue_index: 0,
+            consumer_cycle_state: true,
             _ghost: PhantomData,
         }
     }
@@ -73,30 +68,28 @@ impl<T: WorkItem, Dir: RingDirection> Ring<T, Dir> {
         Self {
             addr: GuestAddr(0),
             shadow_copy,
-            queue_index: 0,
-            cycle_state: true,
+            dequeue_index: 0,
+            consumer_cycle_state: true,
             _ghost: PhantomData,
         }
     }
+
+    fn queue_advance(&mut self) {
+        self.dequeue_index = self.queue_next_index()
+    }
+    fn queue_next_index(&mut self) -> usize {
+        (self.dequeue_index + 1) % self.shadow_copy.len()
+    }
+
     /// xHCI 1.2 sect 4.9.2: When a Transfer Ring is enabled or reset,
     /// the xHC initializes its copies of the Enqueue and Dequeue Pointers
     /// with the value of the Endpoint/Stream Context TR Dequeue Pointer field.
     fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
         let index = (tr_dequeue_pointer.0 - self.addr.0) as usize
             / size_of::<TransferRequestBlock>();
-        self.queue_index = index;
-        // TODO: how does enqueue index get set in consumer?
+        self.dequeue_index = index;
     }
-    fn queue_advance(&mut self) {
-        self.queue_index = (self.queue_index + 1) % self.shadow_copy.len()
-    }
-    // fn is_full(&self) -> bool {
-    //     // TODO note: depends on Link TRBs, 4.11.5.1
-    //     todo!("enqueue index + 1 == dequeue index")
-    // }
-}
 
-impl<T: WorkItem> Ring<T, Consumer> {
     // xHCI 1.2 sect 4.9: "TRB Rings may be larger than a Page,
     // however they shall not cross a 64K byte boundary."
     // xHCI 1.2 sect 4.11.5.1: "The Ring Segment Pointer field in a Link TRB
@@ -147,23 +140,23 @@ impl<T: WorkItem> Ring<T, Consumer> {
     /// Find the first transfer-related TRB, if one exists.
     /// (See xHCI 1.2 sect 4.9.2)
     fn dequeue_trb(&mut self) -> Option<TransferRequestBlock> {
-        let start_index = self.queue_index;
+        let start_index = self.dequeue_index;
         loop {
-            let trb = self.shadow_copy[self.queue_index];
+            let trb = self.shadow_copy[self.dequeue_index];
             // cycle bit transition - found enqueue pointer
-            if trb.control.cycle() != self.cycle_state {
+            if trb.control.cycle() != self.consumer_cycle_state {
                 return None;
             }
             // xHCI 1.2 figure 4-7
             if trb.control.trb_type() == TrbType::Link {
                 if unsafe { trb.control.link.toggle_cycle() } {
                     // xHCI 1.2 figure 4-8
-                    self.cycle_state = !self.cycle_state;
+                    self.consumer_cycle_state = !self.consumer_cycle_state;
                 }
                 self.queue_advance();
                 // failsafe - in case of full circuit of matching cycle bits
                 // without a toggle_cycle occurring
-                if self.queue_index == start_index {
+                if self.dequeue_index == start_index {
                     return None;
                 }
             } else {
@@ -188,17 +181,113 @@ impl<T: WorkItem> Ring<T, Consumer> {
     }
 }
 
-impl<T: WorkItem> Ring<T, Producer> {
-    fn write_to_guest(&self, memctx: &mut MemCtx) {
-        assert!(memctx.write_many(self.addr, &self.shadow_copy))
-        // TODO: check that shadow_copy has no incorrect TRB types?
-        // e.g. no Link TRBs (xHCI 1.2 sect 4.11.5: only relevant to Transfer
-        // and Command) as the Producer-type ring (EventRing) isn't segmented
+pub struct EventRing {
+    /// EREP.
+    enqueue_pointer: GuestAddr,
+
+    /// xHCI 1.2 sect 4.9.4: software writes the ERDP register to inform
+    /// the xHC it has completed processing TRBs up to and including the
+    /// TRB pointed to by ERDP.
+    dequeue_pointer: GuestAddr,
+
+    /// ESRTE's.
+    segment_table: Vec<EventRingSegment>,
+    /// ESRT Count.
+    segment_table_index: usize,
+    /// PCS.
+    producer_cycle_state: bool,
+}
+
+impl EventRing {
+    fn new(
+        erstba: GuestAddr,
+        erstsz: usize,
+        erdp: GuestAddr,
+        memctx: &mut MemCtx,
+    ) -> Result<Self> {
+        let mut x = Self {
+            enqueue_pointer: GuestAddr(0),
+            dequeue_pointer: erdp,
+            segment_table: Vec::new(),
+            segment_table_index: 0,
+            producer_cycle_state: true,
+        };
+        x.update_segment_table(erstba, erstsz, memctx)?;
+        x.enqueue_pointer = x.segment_table[0].base_address;
+        Ok(x)
     }
-    fn enqueue(&mut self, value: T) -> core::result::Result<(), T> {
-        // NOTE: must set cycle bits accordingly
-        todo!()
+
+    // xHCI 1.2 sect 4.9.4.1: ERST entries are not allowed to be modified by
+    // software when HCHalted = 0
+    fn update_segment_table(
+        &mut self,
+        erstba: GuestAddr,
+        erstsz: usize,
+        memctx: &mut MemCtx,
+    ) -> Result<()> {
+        let many = memctx.read_many(erstba, erstsz).ok_or(
+            Error::EventRingSegmentTableLocationInvalid(erstba, erstsz),
+        )?;
+        self.segment_table = many
+            .map(|mut erste: EventRingSegment| {
+                // lower bits are reserved
+                erste.base_address.0 &= !63;
+                if erste.segment_trb_count < 16
+                    || erste.segment_trb_count > 4096
+                {
+                    Err(Error::InvalidEventRingSegmentSize(erste))
+                } else {
+                    Ok(erste)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(())
     }
+
+    fn enqueue_trb(
+        &mut self,
+        mut trb: TransferRequestBlock,
+        memctx: &mut MemCtx,
+    ) -> core::result::Result<(), TransferRequestBlock> {
+        todo!("xHCI 1.2 figure 4-12");
+
+        // if self.last_known_dequeue_index == self.queue_next_index() {
+        //     return Err(trb);
+        // }
+
+        // trb.control.set_cycle(self.producer_cycle_state);
+        // self.shadow_copy[self.enqueue_index] = trb;
+        // self.queue_advance();
+        // if self.enqueue_index == 0 {
+        //     self.producer_cycle_state = !self.producer_cycle_state;
+        // }
+        Ok(())
+    }
+
+    fn enqueue(
+        &mut self,
+        value: EventDescriptor,
+        memctx: &mut MemCtx,
+    ) -> Result<()> {
+        let mut trbs_iter = value.into_iter();
+        let trb = trbs_iter.next().ok_or(Error::EventDescriptorSize)?;
+        // xHCI 1.2 sect 4.11.3: Event Descriptors comprised of only one TRB
+        if trbs_iter.next().is_some() {
+            return Err(Error::EventDescriptorSize);
+        }
+        self.enqueue_trb(trb, memctx).map_err(Error::EventRingFull)
+    }
+}
+
+/// xHCI 1.2 sect 6.5
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct EventRingSegment {
+    /// Ring Segment Base Address. Lower 6 bits are reserved (addresses are 64-byte aligned).
+    base_address: GuestAddr,
+    /// Ring Segment Size. Valid values are between 16 and 4096.
+    segment_trb_count: usize,
 }
 
 #[repr(C)]
@@ -488,6 +577,11 @@ impl TrbControlField {
     fn cycle(&self) -> bool {
         // all variants are alike in cycle bit location
         unsafe { self.normal.cycle() }
+    }
+
+    fn set_cycle(&mut self, cycle_state: bool) {
+        // all variants are alike in cycle bit location
+        unsafe { self.normal.set_cycle(cycle_state) }
     }
 
     fn chain_bit(&self) -> Option<bool> {
