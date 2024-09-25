@@ -25,6 +25,8 @@ pub enum Error {
     FailedReadingTRB,
     #[error("Incomplete TD: no more TRBs in cycle to complete chain: {0:?}")]
     IncompleteWorkItem(Vec<TransferRequestBlock>),
+    #[error("Incomplete TD: TRBs with chain bit set formed a full ring circuit: {0:?}")]
+    IncompleteWorkItemChainCyclic(Vec<TransferRequestBlock>),
     #[error("Event Ring full when trying to enqueue {0:?}")]
     EventRingFull(TransferRequestBlock),
     #[error("Event Ring Segment Table of size {1} cannot be read from address {0:?}")]
@@ -147,13 +149,14 @@ impl<T: WorkItem> ConsumerRing<T> {
             if trb.control.cycle() != self.consumer_cycle_state {
                 return None;
             }
+            self.queue_advance();
+
             // xHCI 1.2 figure 4-7
             if trb.control.trb_type() == TrbType::Link {
                 if unsafe { trb.control.link.toggle_cycle() } {
                     // xHCI 1.2 figure 4-8
                     self.consumer_cycle_state = !self.consumer_cycle_state;
                 }
-                self.queue_advance();
                 // failsafe - in case of full circuit of matching cycle bits
                 // without a toggle_cycle occurring
                 if self.dequeue_index == start_index {
@@ -167,8 +170,13 @@ impl<T: WorkItem> ConsumerRing<T> {
     }
 
     fn dequeue_work_item(&mut self) -> Option<Result<T>> {
+        let start_index = self.dequeue_index;
         let mut trbs = vec![self.dequeue_trb()?];
         while trbs.last().unwrap().control.chain_bit().unwrap_or(false) {
+            // failsafe - if full circuit of chain bits
+            if self.dequeue_index == start_index {
+                return Some(Err(Error::IncompleteWorkItemChainCyclic(trbs)));
+            }
             // TODO: do we need to consider chain bits of link trb's this would skip?
             if let Some(trb) = self.dequeue_trb() {
                 trbs.push(trb);
@@ -188,12 +196,16 @@ pub struct EventRing {
     /// xHCI 1.2 sect 4.9.4: software writes the ERDP register to inform
     /// the xHC it has completed processing TRBs up to and including the
     /// TRB pointed to by ERDP.
-    dequeue_pointer: GuestAddr,
+    dequeue_pointer: Option<GuestAddr>,
 
     /// ESRTE's.
     segment_table: Vec<EventRingSegment>,
-    /// ESRT Count.
+    /// "ESRT Count".
     segment_table_index: usize,
+
+    /// "TRB Count".
+    segment_remaining_trbs: usize,
+
     /// PCS.
     producer_cycle_state: bool,
 }
@@ -207,13 +219,15 @@ impl EventRing {
     ) -> Result<Self> {
         let mut x = Self {
             enqueue_pointer: GuestAddr(0),
-            dequeue_pointer: erdp,
+            dequeue_pointer: Some(erdp),
             segment_table: Vec::new(),
             segment_table_index: 0,
+            segment_remaining_trbs: 0,
             producer_cycle_state: true,
         };
         x.update_segment_table(erstba, erstsz, memctx)?;
         x.enqueue_pointer = x.segment_table[0].base_address;
+        x.segment_remaining_trbs = x.segment_table[0].segment_trb_count;
         Ok(x)
     }
 
@@ -247,24 +261,92 @@ impl EventRing {
         Ok(())
     }
 
+    /// Must be called when interrupter's ERDP register is written
+    fn update_dequeue_pointer(&mut self, erdp: GuestAddr) {
+        self.dequeue_pointer = Some(erdp);
+    }
+
+    /// Straight translation of xHCI 1.2 figure 4-12.
+    fn is_full(&self) -> bool {
+        let deq_ptr = self.dequeue_pointer.unwrap();
+
+        // check next segment
+        if self.segment_remaining_trbs == 1
+            && self.next_segment().base_address != deq_ptr
+        {
+            return false;
+        }
+
+        // check current segment
+        if self.enqueue_pointer.0 + size_of::<TransferRequestBlock>() as u64
+            != deq_ptr.0
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Straight translation of xHCI 1.2 figure 4-12.
+    fn next_segment(&self) -> &EventRingSegment {
+        &self.segment_table
+            [(self.segment_table_index + 1) % self.segment_table.len()]
+    }
+
+    /// Straight translation of xHCI 1.2 figure 4-12.
+    fn enqueue_trb_unchecked(
+        &mut self,
+        mut trb: TransferRequestBlock,
+        memctx: &mut MemCtx,
+    ) {
+        trb.control.set_cycle(self.producer_cycle_state);
+
+        memctx.write(self.enqueue_pointer, &trb);
+        self.enqueue_pointer.0 += size_of::<TransferRequestBlock>() as u64;
+        self.segment_remaining_trbs -= 1;
+
+        if self.segment_remaining_trbs == 0 {
+            self.segment_table_index += 1;
+            if self.segment_table_index >= self.segment_table.len() {
+                self.producer_cycle_state = !self.producer_cycle_state;
+                self.segment_table_index = 0;
+            }
+            let erst_entry = &self.segment_table[self.segment_table_index];
+            self.enqueue_pointer = erst_entry.base_address;
+            self.segment_remaining_trbs = erst_entry.segment_trb_count;
+        }
+    }
+
+    /// Straight translation of xHCI 1.2 figure 4-12.
     fn enqueue_trb(
         &mut self,
         mut trb: TransferRequestBlock,
         memctx: &mut MemCtx,
     ) -> core::result::Result<(), TransferRequestBlock> {
-        todo!("xHCI 1.2 figure 4-12");
-
-        // if self.last_known_dequeue_index == self.queue_next_index() {
-        //     return Err(trb);
-        // }
-
-        // trb.control.set_cycle(self.producer_cycle_state);
-        // self.shadow_copy[self.enqueue_index] = trb;
-        // self.queue_advance();
-        // if self.enqueue_index == 0 {
-        //     self.producer_cycle_state = !self.producer_cycle_state;
-        // }
-        Ok(())
+        if self.dequeue_pointer.is_none() {
+            // waiting for ERDP write, don't write multiple EventRingFullErrors
+            Err(trb)
+        } else if self.is_full() {
+            let event_ring_full_error = TransferRequestBlock {
+                parameter: 0,
+                status: TrbStatusField {
+                    event: TrbStatusFieldEvent::default().with_completion_code(
+                        TrbCompletionCode::EventRingFullError,
+                    ),
+                },
+                control: TrbControlField {
+                    normal: TrbControlFieldNormal::default()
+                        .with_trb_type(TrbType::HostControllerEvent),
+                },
+            };
+            self.enqueue_trb_unchecked(event_ring_full_error, memctx);
+            // must wait until another ERDP write
+            self.dequeue_pointer.take();
+            Err(trb)
+        } else {
+            self.enqueue_trb_unchecked(trb, memctx);
+            Ok(())
+        }
     }
 
     fn enqueue(
@@ -424,7 +506,6 @@ impl Into<u8> for TrbTransferType {
     }
 }
 
-/// Or "TRT". See xHCI 1.2 Table 6-26 and Section 4.11.2.2
 #[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TrbDirection {
@@ -439,6 +520,279 @@ impl From<bool> for TrbDirection {
 impl Into<bool> for TrbDirection {
     fn into(self) -> bool {
         self == Self::In
+    }
+}
+
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum TrbCompletionCode {
+    Invalid = 0,
+    Success = 1,
+    DataBufferError = 2,
+    BabbleDetectedError = 3,
+    UsbTransactionError = 4,
+    TrbError = 5,
+    StallError = 6,
+    ResourceError = 7,
+    BandwidthError = 8,
+    NoSlotsAvailableError = 9,
+    InvalidStreamTypeError = 10,
+    SlotNotEnabledError = 11,
+    EndpointNotEnabledError = 12,
+    ShortPacket = 13,
+    RingUnderrun = 14,
+    RingOverrun = 15,
+    VfEventRingFullError = 16,
+    ParameterError = 17,
+    BandwidthOverrunError = 18,
+    ContextStateError = 19,
+    NoPingResponseError = 20,
+    EventRingFullError = 21,
+    IncompatibleDeviceError = 22,
+    MissedServiceError = 23,
+    CommandRingStopped = 24,
+    CommandAborted = 25,
+    Stopped = 26,
+    StoppedLengthInvalid = 27,
+    StoppedShortPacket = 28,
+    MaxExitLatencyTooLarge = 29,
+    Reserved30 = 30,
+    IsochBufferOverrun = 31,
+    EventLostError = 32,
+    UndefinedError = 33,
+    InvalidStreamIdError = 34,
+    SecondaryBandwidthError = 35,
+    SplitTransactionError = 36,
+    Reserved37 = 37,
+    Reserved38 = 38,
+    Reserved39 = 39,
+    Reserved40 = 40,
+    Reserved41 = 41,
+    Reserved42 = 42,
+    Reserved43 = 43,
+    Reserved44 = 44,
+    Reserved45 = 45,
+    Reserved46 = 46,
+    Reserved47 = 47,
+    Reserved48 = 48,
+    Reserved49 = 49,
+    Reserved50 = 50,
+    Reserved51 = 51,
+    Reserved52 = 52,
+    Reserved53 = 53,
+    Reserved54 = 54,
+    Reserved55 = 55,
+    Reserved56 = 56,
+    Reserved57 = 57,
+    Reserved58 = 58,
+    Reserved59 = 59,
+    Reserved60 = 60,
+    Reserved61 = 61,
+    Reserved62 = 62,
+    Reserved63 = 63,
+    Reserved64 = 64,
+    Reserved65 = 65,
+    Reserved66 = 66,
+    Reserved67 = 67,
+    Reserved68 = 68,
+    Reserved69 = 69,
+    Reserved70 = 70,
+    Reserved71 = 71,
+    Reserved72 = 72,
+    Reserved73 = 73,
+    Reserved74 = 74,
+    Reserved75 = 75,
+    Reserved76 = 76,
+    Reserved77 = 77,
+    Reserved78 = 78,
+    Reserved79 = 79,
+    Reserved80 = 80,
+    Reserved81 = 81,
+    Reserved82 = 82,
+    Reserved83 = 83,
+    Reserved84 = 84,
+    Reserved85 = 85,
+    Reserved86 = 86,
+    Reserved87 = 87,
+    Reserved88 = 88,
+    Reserved89 = 89,
+    Reserved90 = 90,
+    Reserved91 = 91,
+    Reserved92 = 92,
+    Reserved93 = 93,
+    Reserved94 = 94,
+    Reserved95 = 95,
+    Reserved96 = 96,
+    Reserved97 = 97,
+    Reserved98 = 98,
+    Reserved99 = 99,
+    Reserved100 = 100,
+    Reserved101 = 101,
+    Reserved102 = 102,
+    Reserved103 = 103,
+    Reserved104 = 104,
+    Reserved105 = 105,
+    Reserved106 = 106,
+    Reserved107 = 107,
+    Reserved108 = 108,
+    Reserved109 = 109,
+    Reserved110 = 110,
+    Reserved111 = 111,
+    Reserved112 = 112,
+    Reserved113 = 113,
+    Reserved114 = 114,
+    Reserved115 = 115,
+    Reserved116 = 116,
+    Reserved117 = 117,
+    Reserved118 = 118,
+    Reserved119 = 119,
+    Reserved120 = 120,
+    Reserved121 = 121,
+    Reserved122 = 122,
+    Reserved123 = 123,
+    Reserved124 = 124,
+    Reserved125 = 125,
+    Reserved126 = 126,
+    Reserved127 = 127,
+    Reserved128 = 128,
+    Reserved129 = 129,
+    Reserved130 = 130,
+    Reserved131 = 131,
+    Reserved132 = 132,
+    Reserved133 = 133,
+    Reserved134 = 134,
+    Reserved135 = 135,
+    Reserved136 = 136,
+    Reserved137 = 137,
+    Reserved138 = 138,
+    Reserved139 = 139,
+    Reserved140 = 140,
+    Reserved141 = 141,
+    Reserved142 = 142,
+    Reserved143 = 143,
+    Reserved144 = 144,
+    Reserved145 = 145,
+    Reserved146 = 146,
+    Reserved147 = 147,
+    Reserved148 = 148,
+    Reserved149 = 149,
+    Reserved150 = 150,
+    Reserved151 = 151,
+    Reserved152 = 152,
+    Reserved153 = 153,
+    Reserved154 = 154,
+    Reserved155 = 155,
+    Reserved156 = 156,
+    Reserved157 = 157,
+    Reserved158 = 158,
+    Reserved159 = 159,
+    Reserved160 = 160,
+    Reserved161 = 161,
+    Reserved162 = 162,
+    Reserved163 = 163,
+    Reserved164 = 164,
+    Reserved165 = 165,
+    Reserved166 = 166,
+    Reserved167 = 167,
+    Reserved168 = 168,
+    Reserved169 = 169,
+    Reserved170 = 170,
+    Reserved171 = 171,
+    Reserved172 = 172,
+    Reserved173 = 173,
+    Reserved174 = 174,
+    Reserved175 = 175,
+    Reserved176 = 176,
+    Reserved177 = 177,
+    Reserved178 = 178,
+    Reserved179 = 179,
+    Reserved180 = 180,
+    Reserved181 = 181,
+    Reserved182 = 182,
+    Reserved183 = 183,
+    Reserved184 = 184,
+    Reserved185 = 185,
+    Reserved186 = 186,
+    Reserved187 = 187,
+    Reserved188 = 188,
+    Reserved189 = 189,
+    Reserved190 = 190,
+    Reserved191 = 191,
+    VendorDefinedError192 = 192,
+    VendorDefinedError193 = 193,
+    VendorDefinedError194 = 194,
+    VendorDefinedError195 = 195,
+    VendorDefinedError196 = 196,
+    VendorDefinedError197 = 197,
+    VendorDefinedError198 = 198,
+    VendorDefinedError199 = 199,
+    VendorDefinedError200 = 200,
+    VendorDefinedError201 = 201,
+    VendorDefinedError202 = 202,
+    VendorDefinedError203 = 203,
+    VendorDefinedError204 = 204,
+    VendorDefinedError205 = 205,
+    VendorDefinedError206 = 206,
+    VendorDefinedError207 = 207,
+    VendorDefinedError208 = 208,
+    VendorDefinedError209 = 209,
+    VendorDefinedError210 = 210,
+    VendorDefinedError211 = 211,
+    VendorDefinedError212 = 212,
+    VendorDefinedError213 = 213,
+    VendorDefinedError214 = 214,
+    VendorDefinedError215 = 215,
+    VendorDefinedError216 = 216,
+    VendorDefinedError217 = 217,
+    VendorDefinedError218 = 218,
+    VendorDefinedError219 = 219,
+    VendorDefinedError220 = 220,
+    VendorDefinedError221 = 221,
+    VendorDefinedError222 = 222,
+    VendorDefinedError223 = 223,
+    VendorDefinedInfo224 = 224,
+    VendorDefinedInfo225 = 225,
+    VendorDefinedInfo226 = 226,
+    VendorDefinedInfo227 = 227,
+    VendorDefinedInfo228 = 228,
+    VendorDefinedInfo229 = 229,
+    VendorDefinedInfo230 = 230,
+    VendorDefinedInfo231 = 231,
+    VendorDefinedInfo232 = 232,
+    VendorDefinedInfo233 = 233,
+    VendorDefinedInfo234 = 234,
+    VendorDefinedInfo235 = 235,
+    VendorDefinedInfo236 = 236,
+    VendorDefinedInfo237 = 237,
+    VendorDefinedInfo238 = 238,
+    VendorDefinedInfo239 = 239,
+    VendorDefinedInfo240 = 240,
+    VendorDefinedInfo241 = 241,
+    VendorDefinedInfo242 = 242,
+    VendorDefinedInfo243 = 243,
+    VendorDefinedInfo244 = 244,
+    VendorDefinedInfo245 = 245,
+    VendorDefinedInfo246 = 246,
+    VendorDefinedInfo247 = 247,
+    VendorDefinedInfo248 = 248,
+    VendorDefinedInfo249 = 249,
+    VendorDefinedInfo250 = 250,
+    VendorDefinedInfo251 = 251,
+    VendorDefinedInfo252 = 252,
+    VendorDefinedInfo253 = 253,
+    VendorDefinedInfo254 = 254,
+    VendorDefinedInfo255 = 255,
+}
+
+impl From<u8> for TrbCompletionCode {
+    fn from(value: u8) -> Self {
+        // the field is 8-bits and the entire range is defined in the enum
+        unsafe { core::mem::transmute(value) }
+    }
+}
+impl Into<u8> for TrbCompletionCode {
+    fn into(self) -> u8 {
+        self as u8
     }
 }
 
@@ -494,6 +848,7 @@ impl IntoIterator for CommandDescriptor {
     }
 }
 
+#[derive(Debug)]
 pub struct TransferDescriptor {
     trbs: Vec<TransferRequestBlock>,
 }
@@ -528,8 +883,13 @@ impl TransferDescriptor {
     pub fn transfer_size(&self) -> usize {
         self.trbs
             .iter()
-            .map(|trb| trb.status.trb_transfer_length() as usize)
+            .map(|trb| unsafe { trb.status.transfer.trb_transfer_length() }
+                as usize)
             .sum()
+    }
+
+    pub fn trb0_type(&self) -> Option<TrbType> {
+        self.trbs.first().map(|trb| trb.control.trb_type())
     }
 
     // TODO: validate my read of the below
@@ -543,7 +903,7 @@ impl TransferDescriptor {
         let mut trb_transfer_length = None;
         for trb in &self.trbs {
             if trb.control.trb_type() == TrbType::Normal {
-                let x = trb.status.trb_transfer_length();
+                let x = unsafe { trb.status.transfer.trb_transfer_length() };
                 if x != 0 {
                     return false;
                 }
@@ -786,12 +1146,23 @@ bitstruct! {
     }
 }
 
+#[derive(Copy, Clone)]
+pub union TrbStatusField {
+    transfer: TrbStatusFieldTransfer,
+    event: TrbStatusFieldEvent,
+}
+impl Default for TrbStatusField {
+    fn default() -> Self {
+        Self { transfer: TrbStatusFieldTransfer(0) }
+    }
+}
+
 bitstruct! {
     /// Representation of the 'status' field of Transfer Request Block (TRB).
     ///
     /// See xHCI 1.2 Section 6.4.1 (Comments are paraphrases thereof)
     #[derive(Clone, Copy, Debug, Default)]
-    pub struct TrbStatusField(pub u32) {
+    pub struct TrbStatusFieldTransfer(pub u32) {
         /// For OUT, this field defines the number of data bytes the xHC shall
         /// send during the execution of this TRB. If this field is 0 when the
         /// xHC fetches this TRB, xHC shall execute a zero-length transaction.
@@ -814,19 +1185,29 @@ bitstruct! {
     }
 }
 
+bitstruct! {
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbStatusFieldEvent(pub u32) {
+        reserved: u32 = 0..24;
+        pub completion_code: TrbCompletionCode = 24..32;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_get_device_descriptor_ring() {
+    fn test_get_device_descriptor_transfer_ring() {
         // mimicking pg. 85 of xHCI 1.2
         let ring_contents = vec![
             TransferRequestBlock {
                 parameter: 0, // todo!("bmRequestType 0x80, bRequest 6, wValue 0x100, wIndex 0, wLength 8"),
-                status: TrbStatusField::default()
-                    .with_td_size(8)
-                    .with_interrupter_target(0),
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer::default()
+                        .with_td_size(8)
+                        .with_interrupter_target(0),
+                },
                 control: TrbControlField {
                     setup_stage: TrbControlFieldSetupStage::default()
                         .with_cycle(true)
@@ -837,10 +1218,13 @@ mod tests {
             },
             TransferRequestBlock {
                 parameter: 0x123456789abcdef0u64,
-                status: TrbStatusField::default().with_trb_transfer_length(8),
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer::default()
+                        .with_trb_transfer_length(8),
+                },
                 control: TrbControlField {
                     data_stage: TrbControlFieldDataStage::default()
-                        .with_chain_bit(true) // TODO: do DataStage and StatusStage get chained?
+                        .with_cycle(true)
                         .with_trb_type(TrbType::DataStage)
                         .with_direction(TrbDirection::In),
                 },
@@ -851,16 +1235,33 @@ mod tests {
                 control: TrbControlField {
                     status_stage: TrbControlFieldStatusStage::default()
                         .with_cycle(true)
-                        .with_chain_bit(true)
                         .with_interrupt_on_completion(true)
                         .with_trb_type(TrbType::StatusStage)
                         .with_direction(TrbDirection::Out),
                 },
             },
+            TransferRequestBlock::default(),
         ];
-        let ring = TransferRing::new_synthetic(ring_contents.clone());
-        // TODO: read from ring
-        let td = TransferDescriptor { trbs: ring_contents };
-        assert_eq!(td.transfer_size(), 8);
+
+        let mut ring = TransferRing::new_synthetic(ring_contents);
+
+        let setup_td = ring.dequeue_work_item().unwrap().unwrap();
+        let data_td = ring.dequeue_work_item().unwrap().unwrap();
+        let status_td = ring.dequeue_work_item().unwrap().unwrap();
+        assert!(ring.dequeue_work_item().is_none());
+
+        assert_eq!(setup_td.trbs.len(), 1);
+        assert_eq!(data_td.trbs.len(), 1);
+        assert_eq!(status_td.trbs.len(), 1);
+
+        assert_eq!(setup_td.trb0_type().unwrap(), TrbType::SetupStage);
+        assert_eq!(data_td.trb0_type().unwrap(), TrbType::DataStage);
+        assert_eq!(status_td.trb0_type().unwrap(), TrbType::StatusStage);
+
+        assert_eq!(data_td.transfer_size(), 8);
     }
+
+    // TODO: test chained TD
+    // TODO: test incomplete work items
+    // TODO: tests for event ring writing
 }
