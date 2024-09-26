@@ -54,21 +54,10 @@ pub struct ConsumerRing<T: WorkItem> {
 
 /// See xHCI 1.2 section 4.14 "Managing Transfer Rings"
 impl<T: WorkItem> ConsumerRing<T> {
-    fn new(addr: GuestAddr, num_elem: usize) -> Self {
-        // TODO: bound size?
+    fn new(addr: GuestAddr) -> Self {
         Self {
             addr,
-            shadow_copy: vec![Trb::default(); num_elem],
-            dequeue_index: 0,
-            consumer_cycle_state: true,
-            _ghost: PhantomData,
-        }
-    }
-    #[cfg(test)]
-    fn new_synthetic(shadow_copy: Vec<Trb>) -> Self {
-        Self {
-            addr: GuestAddr(0),
-            shadow_copy,
+            shadow_copy: vec![Trb::default()],
             dequeue_index: 0,
             consumer_cycle_state: true,
             _ghost: PhantomData,
@@ -1177,51 +1166,81 @@ mod tests {
 
     #[test]
     fn test_get_device_descriptor_transfer_ring() {
+        let mut phys_map = PhysMap::new_test(16 * 1024);
+        phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024);
+        let memctx = phys_map.memctx();
+
         // mimicking pg. 85 of xHCI 1.2
-        let ring_contents = vec![
-            Trb {
-                parameter: 0, // todo!("bmRequestType 0x80, bRequest 6, wValue 0x100, wIndex 0, wLength 8"),
-                status: TrbStatusField {
-                    transfer: TrbStatusFieldTransfer::default()
-                        .with_td_size(8)
-                        .with_interrupter_target(0),
+        let ring_segments: &[&[_]] = &[
+            &[
+                Trb {
+                    parameter: 0, // todo!("bmRequestType 0x80, bRequest 6, wValue 0x100, wIndex 0, wLength 8"),
+                    status: TrbStatusField {
+                        transfer: TrbStatusFieldTransfer::default()
+                            .with_td_size(8)
+                            .with_interrupter_target(0),
+                    },
+                    control: TrbControlField {
+                        setup_stage: TrbControlFieldSetupStage::default()
+                            .with_cycle(true)
+                            .with_immediate_data(true)
+                            .with_trb_type(TrbType::SetupStage)
+                            .with_transfer_type(TrbTransferType::InDataStage),
+                    },
                 },
-                control: TrbControlField {
-                    setup_stage: TrbControlFieldSetupStage::default()
-                        .with_cycle(true)
-                        .with_immediate_data(true)
-                        .with_trb_type(TrbType::SetupStage)
-                        .with_transfer_type(TrbTransferType::InDataStage),
+                Trb {
+                    parameter: 0x123456789abcdef0u64,
+                    status: TrbStatusField {
+                        transfer: TrbStatusFieldTransfer::default()
+                            .with_trb_transfer_length(8),
+                    },
+                    control: TrbControlField {
+                        data_stage: TrbControlFieldDataStage::default()
+                            .with_cycle(true)
+                            .with_trb_type(TrbType::DataStage)
+                            .with_direction(TrbDirection::In),
+                    },
                 },
-            },
-            Trb {
-                parameter: 0x123456789abcdef0u64,
-                status: TrbStatusField {
-                    transfer: TrbStatusFieldTransfer::default()
-                        .with_trb_transfer_length(8),
+                Trb {
+                    parameter: 2048,
+                    status: TrbStatusField::default(),
+                    control: TrbControlField {
+                        link: TrbControlFieldLink::default()
+                            .with_cycle(true)
+                            .with_trb_type(TrbType::Link),
+                    },
                 },
-                control: TrbControlField {
-                    data_stage: TrbControlFieldDataStage::default()
-                        .with_cycle(true)
-                        .with_trb_type(TrbType::DataStage)
-                        .with_direction(TrbDirection::In),
+            ],
+            &[
+                Trb {
+                    parameter: 0,
+                    status: TrbStatusField::default(),
+                    control: TrbControlField {
+                        status_stage: TrbControlFieldStatusStage::default()
+                            .with_cycle(true)
+                            .with_interrupt_on_completion(true)
+                            .with_trb_type(TrbType::StatusStage)
+                            .with_direction(TrbDirection::Out),
+                    },
                 },
-            },
-            Trb {
-                parameter: 0,
-                status: TrbStatusField::default(),
-                control: TrbControlField {
-                    status_stage: TrbControlFieldStatusStage::default()
-                        .with_cycle(true)
-                        .with_interrupt_on_completion(true)
-                        .with_trb_type(TrbType::StatusStage)
-                        .with_direction(TrbDirection::Out),
+                Trb {
+                    parameter: 1024,
+                    status: TrbStatusField::default(),
+                    control: TrbControlField {
+                        link: TrbControlFieldLink::default()
+                            .with_toggle_cycle(true)
+                            .with_trb_type(TrbType::Link),
+                    },
                 },
-            },
-            Trb::default(),
+            ],
         ];
 
-        let mut ring = TransferRing::new_synthetic(ring_contents);
+        for (i, seg) in ring_segments.iter().enumerate() {
+            memctx.write_many(GuestAddr((i as u64 + 1) * 1024), seg);
+        }
+
+        let mut ring = TransferRing::new(GuestAddr(1024));
+        ring.update_from_guest(&memctx).unwrap();
 
         let setup_td = ring.dequeue_work_item().unwrap().unwrap();
         let data_td = ring.dequeue_work_item().unwrap().unwrap();
