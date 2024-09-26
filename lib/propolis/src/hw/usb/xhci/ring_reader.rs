@@ -24,22 +24,21 @@ pub enum Error {
     #[error("Failed reading TRB from guest memory")]
     FailedReadingTRB,
     #[error("Incomplete TD: no more TRBs in cycle to complete chain: {0:?}")]
-    IncompleteWorkItem(Vec<TransferRequestBlock>),
+    IncompleteWorkItem(Vec<Trb>),
     #[error("Incomplete TD: TRBs with chain bit set formed a full ring circuit: {0:?}")]
-    IncompleteWorkItemChainCyclic(Vec<TransferRequestBlock>),
+    IncompleteWorkItemChainCyclic(Vec<Trb>),
     #[error("Event Ring full when trying to enqueue {0:?}")]
-    EventRingFull(TransferRequestBlock),
+    EventRingFull(Trb),
     #[error("Event Ring Segment Table of size {1} cannot be read from address {0:?}")]
     EventRingSegmentTableLocationInvalid(GuestAddr, usize),
     #[error("Event Ring Segment Table Entry has invalid size: {0:?}")]
     InvalidEventRingSegmentSize(EventRingSegment),
 }
 pub type Result<T> = core::result::Result<T, Error>;
+pub enum Never {}
 
-pub trait WorkItem: Sized + IntoIterator<Item = TransferRequestBlock> {
-    fn try_from_trb_iter(
-        trbs: impl IntoIterator<Item = TransferRequestBlock>,
-    ) -> Result<Self>;
+pub trait WorkItem: Sized + IntoIterator<Item = Trb> {
+    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self>;
 }
 
 pub type TransferRing = ConsumerRing<TransferDescriptor>;
@@ -47,7 +46,7 @@ pub type CommandRing = ConsumerRing<CommandDescriptor>;
 
 pub struct ConsumerRing<T: WorkItem> {
     addr: GuestAddr,
-    shadow_copy: Vec<TransferRequestBlock>,
+    shadow_copy: Vec<Trb>,
     dequeue_index: usize,
     consumer_cycle_state: bool,
     _ghost: PhantomData<T>,
@@ -59,14 +58,14 @@ impl<T: WorkItem> ConsumerRing<T> {
         // TODO: bound size?
         Self {
             addr,
-            shadow_copy: vec![TransferRequestBlock::default(); num_elem],
+            shadow_copy: vec![Trb::default(); num_elem],
             dequeue_index: 0,
             consumer_cycle_state: true,
             _ghost: PhantomData,
         }
     }
     #[cfg(test)]
-    fn new_synthetic(shadow_copy: Vec<TransferRequestBlock>) -> Self {
+    fn new_synthetic(shadow_copy: Vec<Trb>) -> Self {
         Self {
             addr: GuestAddr(0),
             shadow_copy,
@@ -87,8 +86,8 @@ impl<T: WorkItem> ConsumerRing<T> {
     /// the xHC initializes its copies of the Enqueue and Dequeue Pointers
     /// with the value of the Endpoint/Stream Context TR Dequeue Pointer field.
     fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
-        let index = (tr_dequeue_pointer.0 - self.addr.0) as usize
-            / size_of::<TransferRequestBlock>();
+        let index =
+            (tr_dequeue_pointer.0 - self.addr.0) as usize / size_of::<Trb>();
         self.dequeue_index = index;
     }
 
@@ -97,16 +96,14 @@ impl<T: WorkItem> ConsumerRing<T> {
     // xHCI 1.2 sect 4.11.5.1: "The Ring Segment Pointer field in a Link TRB
     // is not required to point to the beginning of a physical memory page."
     // (They *are* required to be at least 16-byte aligned, i.e. sizeof::<TRB>())
-    fn update_from_guest(&mut self, memctx: &mut MemCtx) -> Result<()> {
-        let mut new_shadow =
-            Vec::<TransferRequestBlock>::with_capacity(self.shadow_copy.len());
+    fn update_from_guest(&mut self, memctx: &MemCtx) -> Result<()> {
+        let mut new_shadow = Vec::<Trb>::with_capacity(self.shadow_copy.len());
         let mut addr = self.addr;
 
         // arbitrary upper limit: if a ring is larger than this, assume
         // something may be trying to attack us from a compromised guest
         let mut trb_count = 0;
-        const UPPER_LIMIT: usize =
-            1024 * 1024 * 1024 / size_of::<TransferRequestBlock>();
+        const UPPER_LIMIT: usize = 1024 * 1024 * 1024 / size_of::<Trb>();
 
         loop {
             if let Some(val) = memctx.read(addr) {
@@ -122,7 +119,7 @@ impl<T: WorkItem> ConsumerRing<T> {
                         break;
                     }
                 } else {
-                    addr = addr.offset::<TransferRequestBlock>(1);
+                    addr = addr.offset::<Trb>(1);
                 }
             } else {
                 return Err(Error::FailedReadingTRB);
@@ -141,7 +138,7 @@ impl<T: WorkItem> ConsumerRing<T> {
 
     /// Find the first transfer-related TRB, if one exists.
     /// (See xHCI 1.2 sect 4.9.2)
-    fn dequeue_trb(&mut self) -> Option<TransferRequestBlock> {
+    fn dequeue_trb(&mut self) -> Option<Trb> {
         let start_index = self.dequeue_index;
         loop {
             let trb = self.shadow_copy[self.dequeue_index];
@@ -215,7 +212,7 @@ impl EventRing {
         erstba: GuestAddr,
         erstsz: usize,
         erdp: GuestAddr,
-        memctx: &mut MemCtx,
+        memctx: &MemCtx,
     ) -> Result<Self> {
         let mut x = Self {
             enqueue_pointer: GuestAddr(0),
@@ -239,7 +236,7 @@ impl EventRing {
         &mut self,
         erstba: GuestAddr,
         erstsz: usize,
-        memctx: &mut MemCtx,
+        memctx: &MemCtx,
     ) -> Result<()> {
         let many = memctx.read_many(erstba, erstsz).ok_or(
             Error::EventRingSegmentTableLocationInvalid(erstba, erstsz),
@@ -269,22 +266,13 @@ impl EventRing {
     /// Straight translation of xHCI 1.2 figure 4-12.
     fn is_full(&self) -> bool {
         let deq_ptr = self.dequeue_pointer.unwrap();
-
-        // check next segment
-        if self.segment_remaining_trbs == 1
-            && self.next_segment().base_address != deq_ptr
-        {
-            return false;
+        if self.segment_remaining_trbs == 1 {
+            // check next segment
+            self.next_segment().base_address == deq_ptr
+        } else {
+            // check current segment
+            self.enqueue_pointer.offset::<Trb>(1) == deq_ptr
         }
-
-        // check current segment
-        if self.enqueue_pointer.0 + size_of::<TransferRequestBlock>() as u64
-            != deq_ptr.0
-        {
-            return false;
-        }
-
-        true
     }
 
     /// Straight translation of xHCI 1.2 figure 4-12.
@@ -294,15 +282,11 @@ impl EventRing {
     }
 
     /// Straight translation of xHCI 1.2 figure 4-12.
-    fn enqueue_trb_unchecked(
-        &mut self,
-        mut trb: TransferRequestBlock,
-        memctx: &mut MemCtx,
-    ) {
+    fn enqueue_trb_unchecked(&mut self, mut trb: Trb, memctx: &MemCtx) {
         trb.control.set_cycle(self.producer_cycle_state);
 
         memctx.write(self.enqueue_pointer, &trb);
-        self.enqueue_pointer.0 += size_of::<TransferRequestBlock>() as u64;
+        self.enqueue_pointer.0 += size_of::<Trb>() as u64;
         self.segment_remaining_trbs -= 1;
 
         if self.segment_remaining_trbs == 0 {
@@ -320,14 +304,14 @@ impl EventRing {
     /// Straight translation of xHCI 1.2 figure 4-12.
     fn enqueue_trb(
         &mut self,
-        mut trb: TransferRequestBlock,
-        memctx: &mut MemCtx,
-    ) -> core::result::Result<(), TransferRequestBlock> {
+        mut trb: Trb,
+        memctx: &MemCtx,
+    ) -> core::result::Result<(), Trb> {
         if self.dequeue_pointer.is_none() {
             // waiting for ERDP write, don't write multiple EventRingFullErrors
             Err(trb)
         } else if self.is_full() {
-            let event_ring_full_error = TransferRequestBlock {
+            let event_ring_full_error = Trb {
                 parameter: 0,
                 status: TrbStatusField {
                     event: TrbStatusFieldEvent::default().with_completion_code(
@@ -352,7 +336,7 @@ impl EventRing {
     fn enqueue(
         &mut self,
         value: EventDescriptor,
-        memctx: &mut MemCtx,
+        memctx: &MemCtx,
     ) -> Result<()> {
         let mut trbs_iter = value.into_iter();
         let trb = trbs_iter.next().ok_or(Error::EventDescriptorSize)?;
@@ -376,18 +360,18 @@ pub struct EventRingSegment {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct TransferRequestBlock {
+pub struct Trb {
     /// may be an address or immediate data
     parameter: u64,
     status: TrbStatusField,
     control: TrbControlField,
 }
 
-impl core::fmt::Debug for TransferRequestBlock {
+impl core::fmt::Debug for Trb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TransferRequestBlock {{ parameter: 0x{:x}, control.trb_type: {:?} }}",
+            "Trb {{ parameter: 0x{:x}, control.trb_type: {:?} }}",
             self.parameter,
             self.control.trb_type()
         )?;
@@ -395,7 +379,7 @@ impl core::fmt::Debug for TransferRequestBlock {
     }
 }
 
-impl Default for TransferRequestBlock {
+impl Default for Trb {
     fn default() -> Self {
         Self {
             parameter: 0,
@@ -506,7 +490,7 @@ impl Into<u8> for TrbTransferType {
     }
 }
 
-#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum TrbDirection {
     Out = 0,
@@ -523,7 +507,7 @@ impl Into<bool> for TrbDirection {
     }
 }
 
-#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(FromRepr, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum TrbCompletionCode {
     Invalid = 0,
@@ -796,11 +780,9 @@ impl Into<u8> for TrbCompletionCode {
     }
 }
 
-pub struct EventDescriptor(TransferRequestBlock);
+pub struct EventDescriptor(Trb);
 impl WorkItem for EventDescriptor {
-    fn try_from_trb_iter(
-        trbs: impl IntoIterator<Item = TransferRequestBlock>,
-    ) -> Result<Self> {
+    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
         let mut trbs = trbs.into_iter();
         if let Some(trb) = trbs.next() {
             if trbs.next().is_some() {
@@ -814,19 +796,17 @@ impl WorkItem for EventDescriptor {
     }
 }
 impl IntoIterator for EventDescriptor {
-    type Item = TransferRequestBlock;
-    type IntoIter = std::iter::Once<TransferRequestBlock>;
+    type Item = Trb;
+    type IntoIter = std::iter::Once<Trb>;
 
     fn into_iter(self) -> Self::IntoIter {
         std::iter::once(self.0)
     }
 }
 
-pub struct CommandDescriptor(TransferRequestBlock);
+pub struct CommandDescriptor(Trb);
 impl WorkItem for CommandDescriptor {
-    fn try_from_trb_iter(
-        trbs: impl IntoIterator<Item = TransferRequestBlock>,
-    ) -> Result<Self> {
+    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
         let mut trbs = trbs.into_iter();
         if let Some(trb) = trbs.next() {
             if trbs.next().is_some() {
@@ -840,8 +820,8 @@ impl WorkItem for CommandDescriptor {
     }
 }
 impl IntoIterator for CommandDescriptor {
-    type Item = TransferRequestBlock;
-    type IntoIter = std::iter::Once<TransferRequestBlock>;
+    type Item = Trb;
+    type IntoIter = std::iter::Once<Trb>;
 
     fn into_iter(self) -> Self::IntoIter {
         std::iter::once(self.0)
@@ -850,29 +830,25 @@ impl IntoIterator for CommandDescriptor {
 
 #[derive(Debug)]
 pub struct TransferDescriptor {
-    trbs: Vec<TransferRequestBlock>,
+    trbs: Vec<Trb>,
 }
 impl WorkItem for TransferDescriptor {
-    fn try_from_trb_iter(
-        trbs: impl IntoIterator<Item = TransferRequestBlock>,
-    ) -> Result<Self> {
+    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
         Ok(Self { trbs: trbs.into_iter().collect() })
     }
 }
 impl IntoIterator for TransferDescriptor {
-    type Item = TransferRequestBlock;
-    type IntoIter = std::vec::IntoIter<TransferRequestBlock>;
+    type Item = Trb;
+    type IntoIter = std::vec::IntoIter<Trb>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.trbs.into_iter()
     }
 }
 
-impl TryFrom<Vec<TransferRequestBlock>> for TransferDescriptor {
-    type Error = ();
-    fn try_from(
-        trbs: Vec<TransferRequestBlock>,
-    ) -> core::result::Result<Self, Self::Error> {
+impl TryFrom<Vec<Trb>> for TransferDescriptor {
+    type Error = Never;
+    fn try_from(trbs: Vec<Trb>) -> core::result::Result<Self, Self::Error> {
         Ok(Self { trbs })
     }
 }
@@ -1195,13 +1171,15 @@ bitstruct! {
 
 #[cfg(test)]
 mod tests {
+    use crate::vmm::PhysMap;
+
     use super::*;
 
     #[test]
     fn test_get_device_descriptor_transfer_ring() {
         // mimicking pg. 85 of xHCI 1.2
         let ring_contents = vec![
-            TransferRequestBlock {
+            Trb {
                 parameter: 0, // todo!("bmRequestType 0x80, bRequest 6, wValue 0x100, wIndex 0, wLength 8"),
                 status: TrbStatusField {
                     transfer: TrbStatusFieldTransfer::default()
@@ -1216,7 +1194,7 @@ mod tests {
                         .with_transfer_type(TrbTransferType::InDataStage),
                 },
             },
-            TransferRequestBlock {
+            Trb {
                 parameter: 0x123456789abcdef0u64,
                 status: TrbStatusField {
                     transfer: TrbStatusFieldTransfer::default()
@@ -1229,7 +1207,7 @@ mod tests {
                         .with_direction(TrbDirection::In),
                 },
             },
-            TransferRequestBlock {
+            Trb {
                 parameter: 0,
                 status: TrbStatusField::default(),
                 control: TrbControlField {
@@ -1240,7 +1218,7 @@ mod tests {
                         .with_direction(TrbDirection::Out),
                 },
             },
-            TransferRequestBlock::default(),
+            Trb::default(),
         ];
 
         let mut ring = TransferRing::new_synthetic(ring_contents);
@@ -1263,5 +1241,138 @@ mod tests {
 
     // TODO: test chained TD
     // TODO: test incomplete work items
-    // TODO: tests for event ring writing
+
+    #[test]
+    fn test_event_ring_enqueue() {
+        let mut phys_map = PhysMap::new_test(16 * 1024);
+        phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024);
+        let memctx = phys_map.memctx();
+
+        let erstba = GuestAddr(0);
+        let erstsz = 2;
+        let erst_entries = [
+            EventRingSegment {
+                base_address: GuestAddr(1024),
+                segment_trb_count: 16,
+            },
+            EventRingSegment {
+                base_address: GuestAddr(2048),
+                segment_trb_count: 16,
+            },
+        ];
+
+        memctx.write_many(erstba, &erst_entries);
+
+        let erdp = erst_entries[0].base_address;
+
+        let mut ring = EventRing::new(erstba, erstsz, erdp, &memctx).unwrap();
+
+        let mut ed_trb = Trb {
+            parameter: 0,
+            status: TrbStatusField {
+                event: TrbStatusFieldEvent::default()
+                    .with_completion_code(TrbCompletionCode::Success),
+            },
+            control: TrbControlField {
+                normal: TrbControlFieldNormal::default()
+                    .with_trb_type(TrbType::EventData),
+            },
+        };
+        // enqueue 31 out of 32 (EventRing must leave room for one final
+        // event in case of a full ring: the EventRingFullError event!)
+        for i in 1..32 {
+            ring.enqueue(EventDescriptor(ed_trb), &memctx).unwrap();
+            ed_trb.parameter = i;
+        }
+        ring.enqueue(EventDescriptor(ed_trb), &memctx).unwrap_err();
+
+        // further additions should do nothing until we write a new ERDP
+        ring.enqueue(EventDescriptor(ed_trb), &memctx).unwrap_err();
+
+        let mut ring_contents = Vec::new();
+        for erste in &erst_entries {
+            ring_contents.extend(
+                memctx
+                    .read_many::<Trb>(
+                        erste.base_address,
+                        erste.segment_trb_count,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(ring_contents.len(), 32);
+        // cycle bits should be set in all these
+        for i in 0..31 {
+            assert_eq!(ring_contents[i].parameter, i as u64);
+            assert_eq!(ring_contents[i].control.trb_type(), TrbType::EventData);
+            assert_eq!(ring_contents[i].control.cycle(), true);
+            assert_eq!(
+                unsafe { ring_contents[i].status.event.completion_code() },
+                TrbCompletionCode::Success
+            );
+        }
+        {
+            let hce = ring_contents[31];
+            assert_eq!(hce.control.cycle(), true);
+            assert_eq!(hce.control.trb_type(), TrbType::HostControllerEvent);
+            assert_eq!(
+                unsafe { hce.status.event.completion_code() },
+                TrbCompletionCode::EventRingFullError
+            );
+        }
+
+        // let's say we (the "software") processed the first 8 events.
+        ring.update_dequeue_pointer(
+            erst_entries[0].base_address.offset::<Trb>(8),
+        );
+
+        // try to enqueue another 8 events!
+        for i in 32..39 {
+            ed_trb.parameter = i;
+            ring.enqueue(EventDescriptor(ed_trb), &memctx).unwrap();
+        }
+        ring.enqueue(EventDescriptor(ed_trb), &memctx).unwrap_err();
+
+        // check that they've overwritten previous entries appropriately
+        ring_contents.clear();
+        for erste in &erst_entries {
+            ring_contents.extend(
+                memctx
+                    .read_many::<Trb>(
+                        erste.base_address,
+                        erste.segment_trb_count,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        // cycle bits should be cleared on the new entries
+        for i in 0..7 {
+            assert_eq!(ring_contents[i].parameter, 32 + i as u64);
+            assert_eq!(ring_contents[i].control.trb_type(), TrbType::EventData);
+            assert_eq!(ring_contents[i].control.cycle(), false);
+            assert_eq!(
+                unsafe { ring_contents[i].status.event.completion_code() },
+                TrbCompletionCode::Success
+            );
+        }
+        {
+            let hce = ring_contents[7];
+            assert_eq!(hce.control.cycle(), false);
+            assert_eq!(hce.control.trb_type(), TrbType::HostControllerEvent);
+            assert_eq!(
+                unsafe { hce.status.event.completion_code() },
+                TrbCompletionCode::EventRingFullError
+            );
+
+            // haven't overwritten this one (only wrote one EventRingFullError)
+            let prev = ring_contents[8];
+            assert_eq!(prev.parameter, 8);
+            assert_eq!(prev.control.cycle(), true);
+            assert_eq!(prev.control.trb_type(), TrbType::EventData);
+        }
+
+        // TODO: test event ring segment table resizes
+    }
 }
