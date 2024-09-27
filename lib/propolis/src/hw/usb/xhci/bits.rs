@@ -3,7 +3,10 @@
 // Not all of these fields may be relevant to us, but they're here for completeness.
 #![allow(dead_code)]
 
+use crate::common::GuestAddr;
 use bitstruct::bitstruct;
+
+pub mod ring_data;
 
 /// Size of the USB-specific PCI configuration space.
 ///
@@ -670,23 +673,38 @@ bitstruct! {
     }
 }
 
-bitstruct! {
-    /// Representation of the Event Ring Segment Table Base Address Register (ERSTBA)
-    ///
-    /// See xHCI 1.2 Section 5.5.2.3.2
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct EventRingSegmentTableBaseAddress(pub u64) {
-        /// Reserved
-        reserved: u8 = 0..6;
+/// Representation of the Event Ring Segment Table Base Address Register (ERSTBA).
+///
+/// Writing this register starts the Event Ring State Machine.
+/// Secondary interrupters may modify the field at any time.
+/// Primary interrupters  shall not modify this if
+/// [UsbStatus::host_controller_halted] is true.
+///
+/// See xHCI 1.2 Section 5.5.2.3.2
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EventRingSegmentTableBaseAddress {
+    /// Default 0. Defines the high-order bits (6..=63) of the start address
+    /// of the Event Ring Segment Table. (Lower six bits are reserved.)
+    address: u64,
+}
 
-        /// Default 0. Defines the high-order bits (6..=63) of the start address
-        /// of the Event Ring Segment Table.
-        ///
-        /// Writing this register starts the Event Ring State Machine.
-        /// Secondary interrupters may modify the field at any time.
-        /// Primary interrupters  shall not modify this if
-        /// [UsbStatus::host_controller_halted] is true.
-        pub address: u64 = 6..64;
+impl EventRingSegmentTableBaseAddress {
+    pub const fn from_raw(address: u64) -> Self {
+        Self { address }
+    }
+
+    pub const fn address(&self) -> GuestAddr {
+        GuestAddr(self.address & !0b111111)
+    }
+
+    #[must_use]
+    pub const fn with_address(mut self, value: GuestAddr) -> Self {
+        self.address = value.0 & !0b111111;
+        self
+    }
+
+    pub fn set_address(&mut self, value: GuestAddr) {
+        self.address = value.0 & !0b111111;
     }
 }
 

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp, PAGE_SIZE};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
+use crate::hw::usb::xhci::rings::producer::EventRing;
 
 use super::bits;
 use super::registers::*;
@@ -46,6 +47,8 @@ struct XhciState {
 
     /// Interrupter register sets
     intr_reg_sets: [IntrRegSet; NUM_INTRS as usize],
+
+    event_rings: [Option<EventRing>; NUM_INTRS as usize],
 
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
@@ -106,11 +109,11 @@ impl PciXhci {
                 moderation: bits::InterrupterModeration(0)
                     .with_interval(0x4000),
                 evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
-                evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress(
-                    0,
-                ),
+                evt_ring_seg_base_addr:
+                    bits::EventRingSegmentTableBaseAddress::default(),
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
             }],
+            event_rings: [None; NUM_INTRS as usize],
         });
 
         Arc::new(Self { pci_state, state })
@@ -268,7 +271,7 @@ impl PciXhci {
                             ro.write_u32(reg_set.evt_ring_seg_tbl_size.0);
                         }
                         InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                            ro.write_u64(reg_set.evt_ring_seg_base_addr.0);
+                            ro.write_u64(reg_set.evt_ring_seg_base_addr.address().0);
                         }
                         InterrupterRegisters::EventRingDequeuePointer => {
                             ro.write_u64(reg_set.evt_ring_deq_ptr.0);
@@ -437,23 +440,47 @@ impl PciXhci {
             Runtime(Interrupter(i, intr_regs)) => {
                 let i = i as usize;
                 if i < NUM_INTRS as usize {
-                    let state = self.state.lock().unwrap();
-                    let _reg_set = &state.intr_reg_sets[i];
+                    let mut state = self.state.lock().unwrap();
                     match intr_regs {
                         InterrupterRegisters::Management => {
-                            todo!("xhci: rt reg write intr mgmt");
+                            state.intr_reg_sets[i].management = bits::InterrupterManagement(wo.read_u32());
                         }
                         InterrupterRegisters::Moderation => {
-                            todo!("xhci: rt reg write intr mod");
+                            state.intr_reg_sets[i].moderation = bits::InterrupterModeration(wo.read_u32());
                         }
                         InterrupterRegisters::EventRingSegmentTableSize => {
-                            todo!("xhci: rt reg write erstsz");
+                            state.intr_reg_sets[i].evt_ring_seg_tbl_size = bits::EventRingSegmentTableSize(wo.read_u32());
                         }
                         InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                            todo!("xhci: rt reg write erstba");
+                            state.intr_reg_sets[i].evt_ring_seg_base_addr = bits::EventRingSegmentTableBaseAddress::from_raw(wo.read_u64());
                         }
                         InterrupterRegisters::EventRingDequeuePointer => {
-                            todo!("xhci: rt reg write erdp");
+                            state.intr_reg_sets[i].evt_ring_deq_ptr = bits::EventRingDequeuePointer(wo.read_u64());
+                        }
+                    }
+
+                    let erstba =
+                        state.intr_reg_sets[i].evt_ring_seg_base_addr.address();
+                    let erstsz = state.intr_reg_sets[i]
+                        .evt_ring_seg_tbl_size
+                        .size() as usize;
+                    // TODO: make that <<4 not necessary..
+                    let erdp = GuestAddr(
+                        state.intr_reg_sets[i].evt_ring_deq_ptr.pointer() << 4,
+                    );
+                    if let Some(event_ring) = &mut state.event_rings[i] {
+                        match intr_regs {
+                            InterrupterRegisters::EventRingSegmentTableSize | InterrupterRegisters::EventRingSegmentTableBaseAddress => 
+                                event_ring.update_segment_table(erstba, erstsz, todo!("memctx")).unwrap(),
+                            InterrupterRegisters::EventRingDequeuePointer => event_ring.update_dequeue_pointer(erdp),
+                            _ => (),
+                        }
+                    } else {
+                        match intr_regs {
+                            InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                                state.event_rings[i] = Some(EventRing::new(erstba, erstsz, erdp, todo!("memctx")).unwrap())
+                            }
+                            _ => ()
                         }
                     }
                 } else {
@@ -471,7 +498,7 @@ impl PciXhci {
     }
 
     fn reset_controller(&self) {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
         todo!("xhci: reset all device slots");
     }
 }
