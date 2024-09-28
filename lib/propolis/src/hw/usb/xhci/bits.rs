@@ -549,8 +549,8 @@ bitstruct! {
 impl CommandRingControl {
     /// The Command Ring Dequeue Pointer.
     #[inline]
-    pub fn command_ring_pointer(&self) -> u64 {
-        self.command_ring_pointer_() << 6
+    pub fn command_ring_pointer(&self) -> GuestAddr {
+        GuestAddr(self.command_ring_pointer_() << 6)
     }
 }
 
@@ -673,38 +673,34 @@ bitstruct! {
     }
 }
 
-/// Representation of the Event Ring Segment Table Base Address Register (ERSTBA).
-///
-/// Writing this register starts the Event Ring State Machine.
-/// Secondary interrupters may modify the field at any time.
-/// Primary interrupters  shall not modify this if
-/// [UsbStatus::host_controller_halted] is true.
-///
-/// See xHCI 1.2 Section 5.5.2.3.2
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EventRingSegmentTableBaseAddress {
-    /// Default 0. Defines the high-order bits (6..=63) of the start address
-    /// of the Event Ring Segment Table. (Lower six bits are reserved.)
-    address: u64,
+bitstruct! {
+    /// Representation of the Event Ring Segment Table Base Address Register (ERSTBA).
+    ///
+    /// Writing this register starts the Event Ring State Machine.
+    /// Secondary interrupters may modify the field at any time.
+    /// Primary interrupters  shall not modify this if
+    /// [UsbStatus::host_controller_halted] is true.
+    ///
+    /// See xHCI 1.2 Section 5.5.2.3.2
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct EventRingSegmentTableBaseAddress(pub u64) {
+        reserved: u8 = 0..6;
+        /// Default 0. Defines the high-order bits (6..=63) of the start address
+        /// of the Event Ring Segment Table.
+        address_: u64 = 6..64;
+    }
 }
 
 impl EventRingSegmentTableBaseAddress {
-    pub const fn from_raw(address: u64) -> Self {
-        Self { address }
+    pub fn address(&self) -> GuestAddr {
+        GuestAddr(self.address_() << 6)
     }
-
-    pub const fn address(&self) -> GuestAddr {
-        GuestAddr(self.address & !0b111111)
-    }
-
     #[must_use]
-    pub const fn with_address(mut self, value: GuestAddr) -> Self {
-        self.address = value.0 & !0b111111;
-        self
+    pub const fn with_address(self, value: GuestAddr) -> Self {
+        self.with_address_(value.0 >> 6)
     }
-
     pub fn set_address(&mut self, value: GuestAddr) {
-        self.address = value.0 & !0b111111;
+        self.set_address_(value.0 >> 6);
     }
 }
 
@@ -725,7 +721,19 @@ bitstruct! {
         /// Default 0. Defines the high-order bits (4..=63) of the address of
         /// the current Event Ring Dequeue Pointer.
         // TODO: double check spec's wording - is this a pointer or a double-pointer?
-        pub pointer: u64 = 4..64;
+        pub pointer_: u64 = 4..64;
+    }
+}
+impl EventRingDequeuePointer {
+    pub fn pointer(&self) -> GuestAddr {
+        GuestAddr(self.pointer_() << 4)
+    }
+    #[must_use]
+    pub const fn with_pointer(self, value: GuestAddr) -> Self {
+        self.with_pointer_(value.0 >> 4)
+    }
+    pub fn set_pointer(&mut self, value: GuestAddr) {
+        self.set_pointer_(value.0 >> 4);
     }
 }
 

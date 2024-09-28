@@ -40,7 +40,7 @@ pub trait WorkItem: Sized + IntoIterator<Item = Trb> {
 
 /// See xHCI 1.2 section 4.14 "Managing Transfer Rings"
 impl<T: WorkItem> ConsumerRing<T> {
-    fn new(addr: GuestAddr) -> Self {
+    pub fn new(addr: GuestAddr) -> Self {
         Self {
             addr,
             shadow_copy: vec![Trb::default()],
@@ -60,7 +60,7 @@ impl<T: WorkItem> ConsumerRing<T> {
     /// xHCI 1.2 sect 4.9.2: When a Transfer Ring is enabled or reset,
     /// the xHC initializes its copies of the Enqueue and Dequeue Pointers
     /// with the value of the Endpoint/Stream Context TR Dequeue Pointer field.
-    fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
+    pub fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
         let index =
             (tr_dequeue_pointer.0 - self.addr.0) as usize / size_of::<Trb>();
         self.dequeue_index = index;
@@ -71,7 +71,7 @@ impl<T: WorkItem> ConsumerRing<T> {
     // xHCI 1.2 sect 4.11.5.1: "The Ring Segment Pointer field in a Link TRB
     // is not required to point to the beginning of a physical memory page."
     // (They *are* required to be at least 16-byte aligned, i.e. sizeof::<TRB>())
-    fn update_from_guest(&mut self, memctx: &MemCtx) -> Result<()> {
+    pub fn update_from_guest(&mut self, memctx: &MemCtx) -> Result<()> {
         let mut new_shadow = Vec::<Trb>::with_capacity(self.shadow_copy.len());
         let mut addr = self.addr;
 
@@ -141,7 +141,7 @@ impl<T: WorkItem> ConsumerRing<T> {
         }
     }
 
-    fn dequeue_work_item(&mut self) -> Option<Result<T>> {
+    pub fn dequeue_work_item(&mut self) -> Option<Result<T>> {
         let start_index = self.dequeue_index;
         let mut trbs = vec![self.dequeue_trb()?];
         while trbs.last().unwrap().control.chain_bit().unwrap_or(false) {

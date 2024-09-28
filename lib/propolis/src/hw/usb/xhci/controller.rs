@@ -9,6 +9,7 @@ use crate::hw::usb::xhci::rings::producer::EventRing;
 
 use super::bits;
 use super::registers::*;
+use super::rings::consumer::CommandRing;
 
 /// The number of USB2 ports the controller supports.
 pub(super) const NUM_USB2_PORTS: u8 = 4;
@@ -49,6 +50,7 @@ struct XhciState {
     intr_reg_sets: [IntrRegSet; NUM_INTRS as usize],
 
     event_rings: [Option<EventRing>; NUM_INTRS as usize],
+    command_ring: Option<CommandRing>,
 
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
@@ -114,6 +116,7 @@ impl PciXhci {
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
             }],
             event_rings: [None; NUM_INTRS as usize],
+            command_ring: None,
         });
 
         Arc::new(Self { pci_state, state })
@@ -419,6 +422,9 @@ impl PciXhci {
             }
             Op(CommandRingControlRegister) => {
                 let crcr = bits::CommandRingControl(wo.read_u64());
+                let mut state = self.state.lock().unwrap();
+                state.command_ring =
+                    Some(CommandRing::new(crcr.command_ring_pointer()));
                 todo!("xhci: opreg write crcr");
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
@@ -452,7 +458,7 @@ impl PciXhci {
                             state.intr_reg_sets[i].evt_ring_seg_tbl_size = bits::EventRingSegmentTableSize(wo.read_u32());
                         }
                         InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                            state.intr_reg_sets[i].evt_ring_seg_base_addr = bits::EventRingSegmentTableBaseAddress::from_raw(wo.read_u64());
+                            state.intr_reg_sets[i].evt_ring_seg_base_addr = bits::EventRingSegmentTableBaseAddress(wo.read_u64());
                         }
                         InterrupterRegisters::EventRingDequeuePointer => {
                             state.intr_reg_sets[i].evt_ring_deq_ptr = bits::EventRingDequeuePointer(wo.read_u64());
@@ -464,21 +470,26 @@ impl PciXhci {
                     let erstsz = state.intr_reg_sets[i]
                         .evt_ring_seg_tbl_size
                         .size() as usize;
-                    // TODO: make that <<4 not necessary..
-                    let erdp = GuestAddr(
-                        state.intr_reg_sets[i].evt_ring_deq_ptr.pointer() << 4,
-                    );
+                    let erdp =
+                        state.intr_reg_sets[i].evt_ring_deq_ptr.pointer();
+
+                    // TODO: get rid of unwraps
+                    let memctx = self.pci_state.acc_mem.access().unwrap();
                     if let Some(event_ring) = &mut state.event_rings[i] {
                         match intr_regs {
-                            InterrupterRegisters::EventRingSegmentTableSize | InterrupterRegisters::EventRingSegmentTableBaseAddress => 
-                                event_ring.update_segment_table(erstba, erstsz, todo!("memctx")).unwrap(),
-                            InterrupterRegisters::EventRingDequeuePointer => event_ring.update_dequeue_pointer(erdp),
+                            InterrupterRegisters::EventRingSegmentTableSize
+                            | InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                                event_ring.update_segment_table(erstba, erstsz, &memctx).unwrap()
+                            }
+                            InterrupterRegisters::EventRingDequeuePointer => {
+                                event_ring.update_dequeue_pointer(erdp)
+                            }
                             _ => (),
                         }
                     } else {
                         match intr_regs {
                             InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                                state.event_rings[i] = Some(EventRing::new(erstba, erstsz, erdp, todo!("memctx")).unwrap())
+                                state.event_rings[i] = Some(EventRing::new(erstba, erstsz, erdp, &memctx).unwrap())
                             }
                             _ => ()
                         }
