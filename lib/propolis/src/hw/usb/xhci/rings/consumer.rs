@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use crate::common::GuestAddr;
@@ -25,7 +26,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub enum Never {}
 
 pub struct ConsumerRing<T: WorkItem> {
+    // where the ring *starts*, but note that it may be disjoint via Link TRBs
     addr: GuestAddr,
+    // it would be great to link_indeces.upper_bound(Bound::Included(x))
+    // but alas, unstable API
+    // link_indeces: BTreeMap<(usize, GuestAddr)>,
+    link_indeces: Vec<(usize, GuestAddr)>,
     shadow_copy: Vec<Trb>,
     dequeue_index: usize,
     consumer_cycle_state: bool,
@@ -43,6 +49,7 @@ impl<T: WorkItem> ConsumerRing<T> {
     pub fn new(addr: GuestAddr) -> Self {
         Self {
             addr,
+            link_indeces: [(0, addr)].into_iter().collect(),
             shadow_copy: vec![Trb::default()],
             dequeue_index: 0,
             consumer_cycle_state: true,
@@ -55,6 +62,15 @@ impl<T: WorkItem> ConsumerRing<T> {
     }
     fn queue_next_index(&mut self) -> usize {
         (self.dequeue_index + 1) % self.shadow_copy.len()
+    }
+
+    /// xHCI 1.2 sects 4.6.10, 6.4.3.9
+    pub fn set_dequeue_pointer(&mut self) {
+        todo!("need to deal with segmenting w/ link trbs");
+    }
+
+    pub fn current_dequeue_pointer(&self) -> GuestAddr {
+        todo!("need to deal with segmenting w/ link trbs");
     }
 
     /// xHCI 1.2 sect 4.9.2: When a Transfer Ring is enabled or reset,
