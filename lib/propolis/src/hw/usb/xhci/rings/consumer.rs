@@ -21,17 +21,35 @@ pub enum Error {
     IncompleteWorkItem(Vec<Trb>),
     #[error("Incomplete TD: TRBs with chain bit set formed a full ring circuit: {0:?}")]
     IncompleteWorkItemChainCyclic(Vec<Trb>),
+    #[error("TRB Ring Dequeue Pointer was not aligned to size_of<Trb>: {0:?}")]
+    InvalidDequeuePointer(GuestAddr),
+    #[error("TRB Ring Dequeue Pointer was not contained in any linked TRB segment: {0:?}")]
+    NoSegmentContainsDequeuePointer(GuestAddr),
 }
 pub type Result<T> = core::result::Result<T, Error>;
 pub enum Never {}
+
+#[derive(Copy, Clone)]
+struct SegmentInfo {
+    addr: GuestAddr,
+    trb_count: usize,
+}
+// TODO: just put this on GuestRegion tbh
+impl SegmentInfo {
+    fn contains(&self, ptr: GuestAddr) -> bool {
+        ptr.0 >= self.addr.0
+            && (ptr.0 as usize)
+                < self.addr.0 as usize + self.trb_count * size_of::<Trb>()
+    }
+}
 
 pub struct ConsumerRing<T: WorkItem> {
     // where the ring *starts*, but note that it may be disjoint via Link TRBs
     addr: GuestAddr,
     // it would be great to link_indeces.upper_bound(Bound::Included(x))
     // but alas, unstable API
-    // link_indeces: BTreeMap<(usize, GuestAddr)>,
-    link_indeces: Vec<(usize, GuestAddr)>,
+    // link_indeces: BTreeMap<(usize, SegmentInfo)>,
+    link_indeces: Vec<(usize, SegmentInfo)>,
     shadow_copy: Vec<Trb>,
     dequeue_index: usize,
     consumer_cycle_state: bool,
@@ -49,7 +67,9 @@ impl<T: WorkItem> ConsumerRing<T> {
     pub fn new(addr: GuestAddr) -> Self {
         Self {
             addr,
-            link_indeces: [(0, addr)].into_iter().collect(),
+            link_indeces: [(0, SegmentInfo { addr, trb_count: 0 })]
+                .into_iter()
+                .collect(),
             shadow_copy: vec![Trb::default()],
             dequeue_index: 0,
             consumer_cycle_state: true,
@@ -65,12 +85,33 @@ impl<T: WorkItem> ConsumerRing<T> {
     }
 
     /// xHCI 1.2 sects 4.6.10, 6.4.3.9
-    pub fn set_dequeue_pointer(&mut self) {
-        todo!("need to deal with segmenting w/ link trbs");
+    pub fn set_dequeue_pointer(&mut self, deq_ptr: GuestAddr) -> Result<()> {
+        if deq_ptr.0 as usize % size_of::<Trb>() != 0 {
+            return Err(Error::InvalidDequeuePointer(deq_ptr));
+        }
+        for (index, region) in self.link_indeces.iter() {
+            if region.contains(deq_ptr) {
+                self.dequeue_index = index
+                    + (deq_ptr.0 - region.addr.0) as usize / size_of::<Trb>();
+                return Ok(());
+            }
+        }
+        Err(Error::NoSegmentContainsDequeuePointer(deq_ptr))
     }
 
+    /// Return the guest address corresponding to the current dequeue pointer.
     pub fn current_dequeue_pointer(&self) -> GuestAddr {
-        todo!("need to deal with segmenting w/ link trbs");
+        let mut iter = self.link_indeces.iter().copied();
+        // always at least has (0, self.addr)
+        let (mut index, mut region) = iter.next().unwrap();
+        while let Some((next_index, next_region)) = iter.next() {
+            if next_index > self.dequeue_index {
+                break;
+            }
+            index = next_index;
+            region = next_region;
+        }
+        region.addr.offset::<Trb>(self.dequeue_index - index)
     }
 
     /// xHCI 1.2 sect 4.9.2: When a Transfer Ring is enabled or reset,
@@ -89,6 +130,7 @@ impl<T: WorkItem> ConsumerRing<T> {
     // (They *are* required to be at least 16-byte aligned, i.e. sizeof::<TRB>())
     pub fn update_from_guest(&mut self, memctx: &MemCtx) -> Result<()> {
         let mut new_shadow = Vec::<Trb>::with_capacity(self.shadow_copy.len());
+        let mut new_link_indeces = Vec::with_capacity(self.link_indeces.len());
         let mut addr = self.addr;
 
         // arbitrary upper limit: if a ring is larger than this, assume
@@ -96,10 +138,13 @@ impl<T: WorkItem> ConsumerRing<T> {
         let mut trb_count = 0;
         const UPPER_LIMIT: usize = 1024 * 1024 * 1024 / size_of::<Trb>();
 
+        new_link_indeces.push((trb_count, SegmentInfo { addr, trb_count: 0 }));
+
         loop {
             if let Some(val) = memctx.read(addr) {
                 new_shadow.push(val);
                 trb_count += 1;
+                new_link_indeces.last_mut().unwrap().1.trb_count += 1;
                 if trb_count >= UPPER_LIMIT {
                     return Err(Error::SegmentedRingTooLarge);
                 }
@@ -108,6 +153,11 @@ impl<T: WorkItem> ConsumerRing<T> {
                     addr = GuestAddr(val.parameter & !15);
                     if addr == self.addr {
                         break;
+                    } else {
+                        new_link_indeces.push((
+                            trb_count,
+                            SegmentInfo { addr, trb_count: 0 },
+                        ));
                     }
                 } else {
                     addr = addr.offset::<Trb>(1);
@@ -123,6 +173,7 @@ impl<T: WorkItem> ConsumerRing<T> {
             Err(Error::MissingLink(self.addr, last_trb_type))
         } else {
             self.shadow_copy = new_shadow;
+            self.link_indeces = new_link_indeces;
             Ok(())
         }
     }
