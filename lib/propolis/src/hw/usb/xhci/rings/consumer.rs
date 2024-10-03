@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use crate::common::GuestAddr;
@@ -228,6 +227,7 @@ impl<T: WorkItem> ConsumerRing<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct CommandDescriptor(Trb);
 impl WorkItem for CommandDescriptor {
     fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
@@ -403,8 +403,44 @@ mod tests {
         ring.update_from_guest(&memctx).unwrap();
 
         let setup_td = ring.dequeue_work_item().unwrap().unwrap();
+
+        assert_eq!(
+            ring.current_dequeue_pointer(),
+            GuestAddr(1024).offset::<Trb>(1)
+        );
+
         let data_td = ring.dequeue_work_item().unwrap().unwrap();
+
+        assert_eq!(
+            ring.current_dequeue_pointer(),
+            GuestAddr(1024).offset::<Trb>(2)
+        );
+
+        // test setting the dequeue pointer
+        ring.set_dequeue_pointer(GuestAddr(1024).offset::<Trb>(1)).unwrap();
+
+        assert_eq!(
+            ring.current_dequeue_pointer(),
+            GuestAddr(1024).offset::<Trb>(1)
+        );
+
+        let data_td_copy = ring.dequeue_work_item().unwrap().unwrap();
+
+        assert_eq!(data_td.trb0_type(), data_td_copy.trb0_type());
+
+        assert_eq!(
+            ring.current_dequeue_pointer(),
+            GuestAddr(1024).offset::<Trb>(2)
+        );
+
         let status_td = ring.dequeue_work_item().unwrap().unwrap();
+
+        // skips link trbs
+        assert_eq!(
+            ring.current_dequeue_pointer(),
+            GuestAddr(2048).offset::<Trb>(1)
+        );
+
         assert!(ring.dequeue_work_item().is_none());
 
         assert_eq!(setup_td.trbs.len(), 1);
