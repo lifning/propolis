@@ -44,11 +44,11 @@ impl SegmentInfo {
 
 pub struct ConsumerRing<T: WorkItem> {
     // where the ring *starts*, but note that it may be disjoint via Link TRBs
-    addr: GuestAddr,
+    start_addr: GuestAddr,
     // it would be great to link_indeces.upper_bound(Bound::Included(x))
     // but alas, unstable API
     // link_indeces: BTreeMap<(usize, SegmentInfo)>,
-    link_indeces: Vec<(usize, SegmentInfo)>,
+    link_indices: Vec<(usize, SegmentInfo)>,
     shadow_copy: Vec<Trb>,
     dequeue_index: usize,
     consumer_cycle_state: bool,
@@ -63,15 +63,15 @@ pub trait WorkItem: Sized + IntoIterator<Item = Trb> {
 
 /// See xHCI 1.2 section 4.14 "Managing Transfer Rings"
 impl<T: WorkItem> ConsumerRing<T> {
-    pub fn new(addr: GuestAddr) -> Self {
+    pub fn new(addr: GuestAddr, cycle_state: bool) -> Self {
         Self {
-            addr,
-            link_indeces: [(0, SegmentInfo { addr, trb_count: 0 })]
+            start_addr: addr,
+            link_indices: [(0, SegmentInfo { addr, trb_count: 0 })]
                 .into_iter()
                 .collect(),
             shadow_copy: vec![Trb::default()],
             dequeue_index: 0,
-            consumer_cycle_state: true,
+            consumer_cycle_state: cycle_state,
             _ghost: PhantomData,
         }
     }
@@ -84,14 +84,19 @@ impl<T: WorkItem> ConsumerRing<T> {
     }
 
     /// xHCI 1.2 sects 4.6.10, 6.4.3.9
-    pub fn set_dequeue_pointer(&mut self, deq_ptr: GuestAddr) -> Result<()> {
+    pub fn set_dequeue_pointer_and_cycle(
+        &mut self,
+        deq_ptr: GuestAddr,
+        cycle_state: bool,
+    ) -> Result<()> {
         if deq_ptr.0 as usize % size_of::<Trb>() != 0 {
             return Err(Error::InvalidDequeuePointer(deq_ptr));
         }
-        for (index, region) in self.link_indeces.iter() {
+        for (index, region) in self.link_indices.iter() {
             if region.contains(deq_ptr) {
                 self.dequeue_index = index
                     + (deq_ptr.0 - region.addr.0) as usize / size_of::<Trb>();
+                self.consumer_cycle_state = cycle_state;
                 return Ok(());
             }
         }
@@ -100,7 +105,7 @@ impl<T: WorkItem> ConsumerRing<T> {
 
     /// Return the guest address corresponding to the current dequeue pointer.
     pub fn current_dequeue_pointer(&self) -> GuestAddr {
-        let mut iter = self.link_indeces.iter().copied();
+        let mut iter = self.link_indices.iter().copied();
         // always at least has (0, self.addr)
         let (mut index, mut region) = iter.next().unwrap();
         while let Some((next_index, next_region)) = iter.next() {
@@ -117,8 +122,8 @@ impl<T: WorkItem> ConsumerRing<T> {
     /// the xHC initializes its copies of the Enqueue and Dequeue Pointers
     /// with the value of the Endpoint/Stream Context TR Dequeue Pointer field.
     pub fn reset(&mut self, tr_dequeue_pointer: GuestAddr) {
-        let index =
-            (tr_dequeue_pointer.0 - self.addr.0) as usize / size_of::<Trb>();
+        let index = (tr_dequeue_pointer.0 - self.start_addr.0) as usize
+            / size_of::<Trb>();
         self.dequeue_index = index;
     }
 
@@ -129,8 +134,8 @@ impl<T: WorkItem> ConsumerRing<T> {
     // (They *are* required to be at least 16-byte aligned, i.e. sizeof::<TRB>())
     pub fn update_from_guest(&mut self, memctx: &MemCtx) -> Result<()> {
         let mut new_shadow = Vec::<Trb>::with_capacity(self.shadow_copy.len());
-        let mut new_link_indeces = Vec::with_capacity(self.link_indeces.len());
-        let mut addr = self.addr;
+        let mut new_link_indeces = Vec::with_capacity(self.link_indices.len());
+        let mut addr = self.start_addr;
 
         // arbitrary upper limit: if a ring is larger than this, assume
         // something may be trying to attack us from a compromised guest
@@ -150,7 +155,7 @@ impl<T: WorkItem> ConsumerRing<T> {
                 if val.control.trb_type() == TrbType::Link {
                     // xHCI 1.2 figure 6-38
                     addr = GuestAddr(val.parameter & !15);
-                    if addr == self.addr {
+                    if addr == self.start_addr {
                         break;
                     } else {
                         new_link_indeces.push((
@@ -160,21 +165,25 @@ impl<T: WorkItem> ConsumerRing<T> {
                     }
                 } else {
                     addr = addr.offset::<Trb>(1);
+                    if addr == self.start_addr {
+                        break;
+                    }
                 }
             } else {
                 return Err(Error::FailedReadingTRB);
             }
         }
 
-        // xHCI 1.2 sect 4.9.2.1: The last TRB in a Ring Segment is always a Link TRB.
-        let last_trb_type = new_shadow.last().unwrap().control.trb_type();
-        if last_trb_type != TrbType::Link {
-            Err(Error::MissingLink(self.addr, last_trb_type))
-        } else {
-            self.shadow_copy = new_shadow;
-            self.link_indeces = new_link_indeces;
-            Ok(())
-        }
+        // actually we might've been given an initial pointer that's in the middle of a segment...
+        // // xHCI 1.2 sect 4.9.2.1: The last TRB in a Ring Segment is always a Link TRB.
+        // let last_trb_type = new_shadow.last().unwrap().control.trb_type();
+        // if last_trb_type != TrbType::Link {
+        //     Err(Error::MissingLink(self.addr, last_trb_type))
+        // } else {
+        self.shadow_copy = new_shadow;
+        self.link_indices = new_link_indeces;
+        Ok(())
+        //}
     }
 
     /// Find the first transfer-related TRB, if one exists.
@@ -399,7 +408,7 @@ mod tests {
             memctx.write_many(GuestAddr((i as u64 + 1) * 1024), seg);
         }
 
-        let mut ring = TransferRing::new(GuestAddr(1024));
+        let mut ring = TransferRing::new(GuestAddr(1024), true);
         ring.update_from_guest(&memctx).unwrap();
 
         let setup_td = ring.dequeue_work_item().unwrap().unwrap();
@@ -417,7 +426,11 @@ mod tests {
         );
 
         // test setting the dequeue pointer
-        ring.set_dequeue_pointer(GuestAddr(1024).offset::<Trb>(1)).unwrap();
+        ring.set_dequeue_pointer_and_cycle(
+            GuestAddr(1024).offset::<Trb>(1),
+            true,
+        )
+        .unwrap();
 
         assert_eq!(
             ring.current_dequeue_pointer(),

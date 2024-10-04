@@ -51,6 +51,7 @@ struct XhciState {
 
     event_rings: [Option<EventRing>; NUM_INTRS as usize],
     command_ring: Option<CommandRing>,
+    command_ring_running: bool,
 
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
@@ -117,6 +118,7 @@ impl PciXhci {
             }],
             event_rings: [None; NUM_INTRS as usize],
             command_ring: None,
+            command_ring_running: false,
         });
 
         Arc::new(Self { pci_state, state })
@@ -236,10 +238,9 @@ impl PciXhci {
             }
             Op(CommandRingControlRegister) => {
                 // Most of these fields read as 0, except for CRR
+                let state = self.state.lock().unwrap();
                 let crcr = bits::CommandRingControl(0)
-                    .with_command_ring_running(
-                        /* TODO: processing commands */ false,
-                    );
+                    .with_command_ring_running(state.command_ring_running);
                 ro.write_u64(crcr.0);
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
@@ -320,7 +321,8 @@ impl PciXhci {
                 } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
                     // TODO: can we *actually* stop on a dime like this?:
                     state.usb_sts.set_host_controller_halted(true);
-                    // TODO: do we stop CRCR too?
+                    // xHCI 1.2 table 5-24: cleared to 0 when R/S is.
+                    state.command_ring_running = false;
                     todo!("xhci: stop");
                 }
 
@@ -423,9 +425,24 @@ impl PciXhci {
             Op(CommandRingControlRegister) => {
                 let crcr = bits::CommandRingControl(wo.read_u64());
                 let mut state = self.state.lock().unwrap();
-                state.command_ring =
-                    Some(CommandRing::new(crcr.command_ring_pointer()));
-                todo!("xhci: opreg write crcr");
+                // xHCI 1.2 sections 4.9.3, 5.4.5
+                if !state.command_ring_running {
+                    state.command_ring = Some(CommandRing::new(
+                        crcr.command_ring_pointer(),
+                        crcr.ring_cycle_state(),
+                    ));
+                } else {
+                    // xHCI 1.2 table 5-24
+                    if crcr.command_stop() {
+                        state.command_ring_running = false;
+                        todo!("xhci: wait for command ring idle, generate command completion event");
+                    } else if crcr.command_abort() {
+                        state.command_ring_running = false;
+                        todo!("xhci: abort command ring processing, generate command completion event");
+                    } else {
+                        // TODO log error?
+                    }
+                }
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
                 let mut state = self.state.lock().unwrap();
@@ -500,10 +517,32 @@ impl PciXhci {
             }
 
             Doorbell(0) => {
-                todo!("xhci: doorbell zero write");
+                // xHCI 1.2 section 4.9.3, table 5-43
+                if wo.read_u32() & 0xff == 0 {
+                    let mut state = self.state.lock().unwrap();
+                    // xHCI 1.2 table 5-24: only set to 1 if R/S is 1
+                    if state.usb_cmd.run_stop() {
+                        state.command_ring_running = true;
+                    }
+                }
             }
             Doorbell(i) => {
                 todo!("xhci: doorbell {} write", i);
+            }
+        }
+    }
+
+    fn process(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.command_ring_running {
+            if let Some(ref mut cmd_ring) = state.command_ring {
+                // TODO: get rid of unwraps
+                let memctx = self.pci_state.acc_mem.access().unwrap();
+                cmd_ring.update_from_guest(&memctx).unwrap();
+                while let Some(cmd_desc_res) = cmd_ring.dequeue_work_item() {
+                    let cmd_desc = cmd_desc_res.unwrap();
+                    todo!("xhci: process command {cmd_desc:?}");
+                }
             }
         }
     }
