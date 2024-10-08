@@ -53,6 +53,7 @@ pub union TrbControlField {
     pub data_stage: TrbControlFieldDataStage,
     pub status_stage: TrbControlFieldStatusStage,
     pub link: TrbControlFieldLink,
+    pub event: TrbControlFieldEvent,
 }
 
 impl TrbControlField {
@@ -271,6 +272,25 @@ bitstruct! {
     }
 }
 
+bitstruct! {
+    /// Status Stage TRB control fields (xHCI 1.2 table 6-31)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldEvent(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u16 = 1..10;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        pub virtual_function_id: u8 = 16..24;
+
+        /// ID of the Device Slot corresponding to this event.
+        pub slot_id: u8 = 24..32;
+    }
+}
+
 #[derive(Copy, Clone)]
 pub union TrbStatusField {
     pub transfer: TrbStatusFieldTransfer,
@@ -313,7 +333,7 @@ bitstruct! {
 bitstruct! {
     #[derive(Clone, Copy, Debug, Default)]
     pub struct TrbStatusFieldEvent(pub u32) {
-        reserved: u32 = 0..24;
+        pub completion_parameter: u32 = 0..24;
         pub completion_code: TrbCompletionCode = 24..32;
     }
 }

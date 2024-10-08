@@ -2,10 +2,17 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::accessors::Accessor;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp, PAGE_SIZE};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
-use crate::hw::usb::xhci::rings::producer::EventRing;
+use crate::hw::usb::xhci::bits::ring_data::{TrbCompletionCode, TrbType};
+use crate::hw::usb::xhci::rings::consumer::CommandInfo;
+use crate::hw::usb::xhci::rings::producer::{
+    EventDescriptor, EventInfo, EventRing,
+};
+use crate::tasks::ThreadGroup;
+use crate::vmm::MemCtx;
 
 use super::bits;
 use super::registers::*;
@@ -65,6 +72,36 @@ struct XhciState {
     config: bits::Configure,
 }
 
+impl Default for XhciState {
+    fn default() -> Self {
+        // The controller is initially halted and asserts CNR (controller not ready)
+        let usb_sts = bits::UsbStatus(0)
+            .with_host_controller_halted(true)
+            .with_controller_not_ready(true);
+
+        XhciState {
+            usb_cmd: bits::UsbCommand(0),
+            usb_sts,
+            dnctrl: bits::DeviceNotificationControl::new([0]),
+            dev_ctx_table_base: None,
+            config: bits::Configure(0),
+            mf_index: bits::MicroframeIndex(0),
+            intr_reg_sets: [IntrRegSet {
+                management: bits::InterrupterManagement(0),
+                moderation: bits::InterrupterModeration(0)
+                    .with_interval(0x4000),
+                evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
+                evt_ring_seg_base_addr:
+                    bits::EventRingSegmentTableBaseAddress::default(),
+                evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
+            }],
+            event_rings: [None; NUM_INTRS as usize],
+            command_ring: None,
+            command_ring_running: false,
+        }
+    }
+}
+
 /// An emulated USB Host Controller attached over PCI
 pub struct PciXhci {
     /// PCI device state
@@ -72,6 +109,9 @@ pub struct PciXhci {
 
     /// Controller state
     state: Mutex<XhciState>,
+
+    /// Threads for processing rings
+    workers: ThreadGroup,
 }
 
 impl PciXhci {
@@ -95,33 +135,20 @@ impl PciXhci {
             .add_custom_cfg(bits::USB_PCI_CFG_OFFSET, bits::USB_PCI_CFG_REG_SZ)
             .finish();
 
-        // The controller is initially halted and asserts CNR (controller not ready)
-        let usb_sts = bits::UsbStatus(0)
-            .with_host_controller_halted(true)
-            .with_controller_not_ready(true);
+        let state = Arc::new(Mutex::new(XhciState::default()));
 
-        let state = Mutex::new(XhciState {
-            usb_cmd: bits::UsbCommand(0),
-            usb_sts,
-            dnctrl: bits::DeviceNotificationControl::new([0]),
-            dev_ctx_table_base: None,
-            config: bits::Configure(0),
-            mf_index: bits::MicroframeIndex(0),
-            intr_reg_sets: [IntrRegSet {
-                management: bits::InterrupterManagement(0),
-                moderation: bits::InterrupterModeration(0)
-                    .with_interval(0x4000),
-                evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
-                evt_ring_seg_base_addr:
-                    bits::EventRingSegmentTableBaseAddress::default(),
-                evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
-            }],
-            event_rings: [None; NUM_INTRS as usize],
-            command_ring: None,
-            command_ring_running: false,
-        });
+        // TODO: more than just cmd ring
+        let workers = ThreadGroup::new();
+        let worker_acc =
+            pci_state.acc_mem.child(Some(format!("xhci command ring")));
+        let worker_state = state.clone();
+        let worker_thread = std::thread::Builder::new()
+            .name(format!("xhci command ring"))
+            .spawn(|| Self::process_command_ring(worker_state, worker_acc));
 
-        Arc::new(Self { pci_state, state })
+        workers.extend(core::iter::once(worker_thread));
+
+        Arc::new(Self { pci_state, state, workers })
     }
 
     /// Handle read of register in USB-specific PCI configuration space
@@ -317,19 +344,25 @@ impl PciXhci {
                         );
                     }
                     state.usb_sts.set_host_controller_halted(false);
-                    todo!("xhci: run");
+                    todo!("xhci: run dev slots");
                 } else if !cmd.run_stop() && state.usb_cmd.run_stop() {
                     // TODO: can we *actually* stop on a dime like this?:
                     state.usb_sts.set_host_controller_halted(true);
                     // xHCI 1.2 table 5-24: cleared to 0 when R/S is.
                     state.command_ring_running = false;
-                    todo!("xhci: stop");
+                    todo!("xhci: stop dev slots");
                 }
 
+                // xHCI 1.2 table 5-20: Any transactions in progress are
+                // immediately terminated; all internal pipelines, registers,
+                // timers, counters, state machines, etc. are reset to their
+                // initial value.
                 if cmd.host_controller_reset() {
+                    *state = XhciState::default();
                     todo!("xhci: host controller reset");
                 }
 
+                /*
                 if cmd.interrupter_enable() {
                     todo!("xhci: interrupter enable");
                 }
@@ -386,6 +419,7 @@ impl PciXhci {
                 if cmd.vtio_enable() {
                     todo!("xhci: vtio enable");
                 }
+                */
 
                 // LHCRST is optional, and when it is not implemented
                 // (HCCPARAMS1), it must always return 0 when read.
@@ -427,6 +461,7 @@ impl PciXhci {
                 let mut state = self.state.lock().unwrap();
                 // xHCI 1.2 sections 4.9.3, 5.4.5
                 if !state.command_ring_running {
+                    // if CRCR written while ring is stopped, init ring
                     state.command_ring = Some(CommandRing::new(
                         crcr.command_ring_pointer(),
                         crcr.ring_cycle_state(),
@@ -532,16 +567,43 @@ impl PciXhci {
         }
     }
 
-    fn process(&self) {
-        let mut state = self.state.lock().unwrap();
-        if state.command_ring_running {
-            if let Some(ref mut cmd_ring) = state.command_ring {
-                // TODO: get rid of unwraps
-                let memctx = self.pci_state.acc_mem.access().unwrap();
-                cmd_ring.update_from_guest(&memctx).unwrap();
-                while let Some(cmd_desc_res) = cmd_ring.dequeue_work_item() {
-                    let cmd_desc = cmd_desc_res.unwrap();
-                    todo!("xhci: process command {cmd_desc:?}");
+    fn process_command_ring(
+        &self,
+        state: Arc<Mutex<XhciState>>,
+        acc_mem: Accessor<MemCtx>,
+    ) {
+        loop {
+            // todo!("xhci: wait for doorbell 0 signal");
+            let mut state = state.lock().unwrap();
+            if state.command_ring_running {
+                if let Some(ref mut cmd_ring) = state.command_ring {
+                    // TODO: get rid of unwraps
+                    let memctx = acc_mem.access().unwrap();
+                    cmd_ring.update_from_guest(&memctx).unwrap();
+                    // TODO: do we do one command at a time or all available?
+                    let cmd_trb_addr = cmd_ring.current_dequeue_pointer();
+                    while let Some(cmd_desc_res) = cmd_ring.dequeue_work_item()
+                    {
+                        let cmd: CommandInfo =
+                            cmd_desc_res.unwrap().try_into().unwrap();
+                        // TODO: cmd_desc.0 not pub, instead have an Into
+                        match cmd {
+                            CommandInfo::NoOp => {
+                                let event_desc: EventDescriptor =
+                                    EventInfo::CommandCompletion {
+                                        code: TrbCompletionCode::Success,
+                                        slot_id: 0, // 0 for no-op (table 6-42)
+                                        cmd_trb_addr,
+                                    }
+                                    .into();
+                                todo!(
+                                    "xhci: write {event_desc:?} to event ring"
+                                );
+                            }
+                            _ => {}
+                        }
+                        todo!("xhci: process command {cmd:?}");
+                    }
                 }
             }
         }

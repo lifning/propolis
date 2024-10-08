@@ -24,6 +24,8 @@ pub enum Error {
     InvalidDequeuePointer(GuestAddr),
     #[error("TRB Ring Dequeue Pointer was not contained in any linked TRB segment: {0:?}")]
     NoSegmentContainsDequeuePointer(GuestAddr),
+    #[error("Invalid TRB type for a Command Descriptor: {0:?}")]
+    InvalidCommandDescriptor(Trb),
 }
 pub type Result<T> = core::result::Result<T, Error>;
 pub enum Never {}
@@ -237,7 +239,7 @@ impl<T: WorkItem> ConsumerRing<T> {
 }
 
 #[derive(Debug)]
-pub struct CommandDescriptor(Trb);
+pub struct CommandDescriptor(pub Trb);
 impl WorkItem for CommandDescriptor {
     fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
         let mut trbs = trbs.into_iter();
@@ -245,7 +247,27 @@ impl WorkItem for CommandDescriptor {
             if trbs.next().is_some() {
                 Err(Error::CommandDescriptorSize)
             } else {
-                Ok(Self(trb))
+                // xHCI 1.2 sect 6.4.3
+                match trb.control.trb_type() {
+                    TrbType::NoOpCmd
+                    | TrbType::EnableSlotCmd
+                    | TrbType::DisableSlotCmd
+                    | TrbType::AddressDeviceCmd
+                    | TrbType::ConfigureEndpointCmd
+                    | TrbType::EvaluateContextCmd
+                    | TrbType::ResetEndpointCmd
+                    | TrbType::StopEndpointCmd
+                    | TrbType::SetTRDequeuePointerCmd
+                    | TrbType::ResetDeviceCmd
+                    | TrbType::ForceEventCmd
+                    | TrbType::NegotiateBandwidthCmd
+                    | TrbType::SetLatencyToleranceValueCmd
+                    | TrbType::GetPortBandwidthCmd
+                    | TrbType::ForceHeaderCmd
+                    | TrbType::GetExtendedPropertyCmd
+                    | TrbType::SetExtendedPropertyCmd => Ok(Self(trb)),
+                    _ => Err(Error::InvalidCommandDescriptor(trb)),
+                }
             }
         } else {
             Err(Error::CommandDescriptorSize)
@@ -259,6 +281,38 @@ impl IntoIterator for CommandDescriptor {
     fn into_iter(self) -> Self::IntoIter {
         std::iter::once(self.0)
     }
+}
+
+impl TryInto<CommandInfo> for CommandDescriptor {
+    type Error = Error;
+
+    fn try_into(self) -> Result<CommandInfo> {
+        Ok(match self.0.control.trb_type() {
+            TrbType::NoOpCmd => CommandInfo::NoOp,
+            TrbType::EnableSlotCmd => todo!(),
+            TrbType::DisableSlotCmd => todo!(),
+            TrbType::AddressDeviceCmd => todo!(),
+            TrbType::ConfigureEndpointCmd => todo!(),
+            TrbType::EvaluateContextCmd => todo!(),
+            TrbType::ResetEndpointCmd => todo!(),
+            TrbType::StopEndpointCmd => todo!(),
+            TrbType::SetTRDequeuePointerCmd => todo!(),
+            TrbType::ResetDeviceCmd => todo!(),
+            TrbType::ForceEventCmd => todo!(),
+            TrbType::NegotiateBandwidthCmd => todo!(),
+            TrbType::SetLatencyToleranceValueCmd => todo!(),
+            TrbType::GetPortBandwidthCmd => todo!(),
+            TrbType::ForceHeaderCmd => todo!(),
+            TrbType::GetExtendedPropertyCmd => todo!(),
+            TrbType::SetExtendedPropertyCmd => todo!(),
+            _ => unreachable!(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum CommandInfo {
+    NoOp,
 }
 
 #[derive(Debug)]

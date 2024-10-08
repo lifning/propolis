@@ -170,7 +170,38 @@ impl EventRing {
 }
 
 /// xHCI 1.2 sect 4.11.3: Event Descriptors comprised of only one TRB
+#[derive(Debug)]
 pub struct EventDescriptor(pub Trb);
+
+pub enum EventInfo {
+    CommandCompletion {
+        code: TrbCompletionCode,
+        slot_id: u8,
+        cmd_trb_addr: GuestAddr,
+    },
+}
+
+impl Into<EventDescriptor> for EventInfo {
+    fn into(self) -> EventDescriptor {
+        match self {
+            // xHCI 1.2 sect 6.4.2.2
+            Self::CommandCompletion { code, slot_id, cmd_trb_addr } => {
+                EventDescriptor(Trb {
+                    parameter: cmd_trb_addr.0,
+                    status: TrbStatusField {
+                        event: TrbStatusFieldEvent::default()
+                            .with_completion_code(code),
+                    },
+                    control: TrbControlField {
+                        event: TrbControlFieldEvent::default()
+                            .with_trb_type(TrbType::CommandCompletionEvent)
+                            .with_slot_id(slot_id),
+                    },
+                })
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
