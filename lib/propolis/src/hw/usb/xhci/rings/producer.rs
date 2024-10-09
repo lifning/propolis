@@ -174,28 +174,147 @@ impl EventRing {
 pub struct EventDescriptor(pub Trb);
 
 pub enum EventInfo {
+    Transfer {
+        trb_pointer: GuestAddr,
+        completion_code: TrbCompletionCode,
+        trb_transfer_length: u32,
+        slot_id: u8,
+        endpoint_id: u8,
+        event_data: bool,
+    },
     CommandCompletion {
-        code: TrbCompletionCode,
+        completion_code: TrbCompletionCode,
         slot_id: u8,
         cmd_trb_addr: GuestAddr,
+    },
+    PortStatusChange {
+        port_id: u8,
+        completion_code: TrbCompletionCode,
+    },
+    // optional
+    BandwidthRequest,
+    // optional, for 'virtualization' (not the kind we're doing)
+    Doorbell,
+    HostController {
+        completion_code: TrbCompletionCode,
+    },
+    /// Several fields correspond to that of the received USB Device
+    /// Notification Transaction Packet (DNTP) (xHCI 1.2 table 6-53)
+    DeviceNotification {
+        /// Notification Type field of the USB DNTP
+        notification_type: u8,
+        /// the value of bytes 5 through 0x0B of the USB DNTP
+        /// (leave most-significant byte empty)
+        // TODO: just union/bitstruct this so we can use a [u8; 7]...
+        notification_data: u64,
+        completion_code: TrbCompletionCode,
+        slot_id: u8,
+    },
+    MfIndexWrap {
+        completion_code: TrbCompletionCode,
     },
 }
 
 impl Into<EventDescriptor> for EventInfo {
     fn into(self) -> EventDescriptor {
         match self {
+            EventInfo::Transfer {
+                trb_pointer,
+                completion_code,
+                trb_transfer_length,
+                slot_id,
+                endpoint_id,
+                event_data,
+            } => EventDescriptor(Trb {
+                parameter: trb_pointer.0,
+                status: TrbStatusField {
+                    event: TrbStatusFieldEvent::default()
+                        .with_completion_code(completion_code)
+                        .with_completion_parameter(trb_transfer_length),
+                },
+                control: TrbControlField {
+                    transfer_event: TrbControlFieldTransferEvent::default()
+                        .with_trb_type(TrbType::TransferEvent)
+                        .with_slot_id(slot_id)
+                        .with_endpoint_id(endpoint_id)
+                        .with_event_data(event_data),
+                },
+            }),
             // xHCI 1.2 sect 6.4.2.2
-            Self::CommandCompletion { code, slot_id, cmd_trb_addr } => {
+            Self::CommandCompletion {
+                completion_code: code,
+                slot_id,
+                cmd_trb_addr,
+            } => EventDescriptor(Trb {
+                parameter: cmd_trb_addr.0,
+                status: TrbStatusField {
+                    event: TrbStatusFieldEvent::default()
+                        .with_completion_code(code),
+                },
+                control: TrbControlField {
+                    event: TrbControlFieldEvent::default()
+                        .with_trb_type(TrbType::CommandCompletionEvent)
+                        .with_slot_id(slot_id),
+                },
+            }),
+            EventInfo::PortStatusChange { port_id, completion_code } => {
                 EventDescriptor(Trb {
-                    parameter: cmd_trb_addr.0,
+                    parameter: (port_id as u64) << 24,
                     status: TrbStatusField {
                         event: TrbStatusFieldEvent::default()
-                            .with_completion_code(code),
+                            .with_completion_code(completion_code),
                     },
                     control: TrbControlField {
                         event: TrbControlFieldEvent::default()
-                            .with_trb_type(TrbType::CommandCompletionEvent)
-                            .with_slot_id(slot_id),
+                            .with_trb_type(TrbType::PortStatusChangeEvent),
+                    },
+                })
+            }
+            EventInfo::BandwidthRequest => {
+                unimplemented!("xhci: Bandwidth Request Event TRB")
+            }
+            EventInfo::Doorbell => unimplemented!("xhci: Doorbell Event TRB"),
+            EventInfo::HostController { completion_code } => {
+                EventDescriptor(Trb {
+                    parameter: 0,
+                    status: TrbStatusField {
+                        event: TrbStatusFieldEvent::default()
+                            .with_completion_code(completion_code),
+                    },
+                    control: TrbControlField {
+                        event: TrbControlFieldEvent::default()
+                            .with_trb_type(TrbType::HostControllerEvent),
+                    },
+                })
+            }
+            EventInfo::DeviceNotification {
+                notification_type,
+                notification_data,
+                completion_code,
+                slot_id,
+            } => EventDescriptor(Trb {
+                parameter: ((notification_type as u64) << 4)
+                    | notification_data << 8,
+                status: TrbStatusField {
+                    event: TrbStatusFieldEvent::default()
+                        .with_completion_code(completion_code),
+                },
+                control: TrbControlField {
+                    event: TrbControlFieldEvent::default()
+                        .with_trb_type(TrbType::DeviceNotificationEvent)
+                        .with_slot_id(slot_id),
+                },
+            }),
+            EventInfo::MfIndexWrap { completion_code } => {
+                EventDescriptor(Trb {
+                    parameter: 0,
+                    status: TrbStatusField {
+                        event: TrbStatusFieldEvent::default()
+                            .with_completion_code(completion_code),
+                    },
+                    control: TrbControlField {
+                        event: TrbControlFieldEvent::default()
+                            .with_trb_type(TrbType::MfIndexWrapEvent),
                     },
                 })
             }

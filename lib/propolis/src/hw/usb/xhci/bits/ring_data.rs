@@ -54,6 +54,7 @@ pub union TrbControlField {
     pub status_stage: TrbControlFieldStatusStage,
     pub link: TrbControlFieldLink,
     pub event: TrbControlFieldEvent,
+    pub transfer_event: TrbControlFieldTransferEvent,
     pub slot_cmd: TrbControlFieldSlotCmd,
     pub endpoint_cmd: TrbControlFieldEndpointCmd,
     pub get_port_bw_cmd: TrbControlFieldGetPortBandwidthCmd,
@@ -289,6 +290,31 @@ bitstruct! {
         pub trb_type: TrbType = 10..16;
 
         pub virtual_function_id: u8 = 16..24;
+
+        /// ID of the Device Slot corresponding to this event.
+        pub slot_id: u8 = 24..32;
+    }
+}
+
+bitstruct! {
+    /// Common control fields in Event TRBs
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldTransferEvent(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved0: bool = 1;
+
+        pub event_data: bool = 2;
+
+        reserved1: u16 = 3..10;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        pub endpoint_id: u8 = 16..21;
+
+        reserved2: u16 = 21..24;
 
         /// ID of the Device Slot corresponding to this event.
         pub slot_id: u8 = 24..32;

@@ -350,6 +350,7 @@ impl TryInto<CommandInfo> for CommandDescriptor {
             TrbType::SetLatencyToleranceValueCmd => {
                 CommandInfo::SetLatencyToleranceValue
             }
+            // optional
             TrbType::GetPortBandwidthCmd => CommandInfo::GetPortBandwidth {
                 port_bandwidth_ctx_ptr: GuestAddr(self.0.parameter & !0b1111),
                 hub_slot_id: unsafe {
@@ -368,6 +369,7 @@ impl TryInto<CommandInfo> for CommandDescriptor {
                     self.0.control.get_port_bw_cmd.hub_slot_id()
                 },
             },
+            // optional
             TrbType::GetExtendedPropertyCmd => unsafe {
                 CommandInfo::GetExtendedProperty {
                     extended_property_ctx_ptr: GuestAddr(
@@ -383,6 +385,7 @@ impl TryInto<CommandInfo> for CommandDescriptor {
                     slot_id: self.0.control.ext_props_cmd.slot_id(),
                 }
             },
+            // optional
             TrbType::SetExtendedPropertyCmd => unsafe {
                 CommandInfo::SetExtendedProperty {
                     extended_capability_id: self
