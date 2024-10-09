@@ -54,6 +54,10 @@ pub union TrbControlField {
     pub status_stage: TrbControlFieldStatusStage,
     pub link: TrbControlFieldLink,
     pub event: TrbControlFieldEvent,
+    pub slot_cmd: TrbControlFieldSlotCmd,
+    pub endpoint_cmd: TrbControlFieldEndpointCmd,
+    pub get_port_bw_cmd: TrbControlFieldGetPortBandwidthCmd,
+    pub ext_props_cmd: TrbControlFieldExtendedPropsCmd,
 }
 
 impl TrbControlField {
@@ -273,7 +277,7 @@ bitstruct! {
 }
 
 bitstruct! {
-    /// Status Stage TRB control fields (xHCI 1.2 table 6-31)
+    /// Common control fields in Event TRBs
     #[derive(Clone, Copy, Debug, Default)]
     pub struct TrbControlFieldEvent(pub u32) {
         /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
@@ -291,10 +295,119 @@ bitstruct! {
     }
 }
 
+bitstruct! {
+    /// Common control fields in Command TRBs to do with slot enablement
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldSlotCmd(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u16 = 1..9;
+
+        /// In an Address Device Command TRB, this is BSR (Block SetAddress Request).
+        /// When true, the Address Device Command shall not generate a USB
+        /// SET_ADDRESS request. (xHCI 1.2 section 4.6.5, table 6-62)
+        ///
+        /// In a Configure Endpoint Command TRB, this is DC (Deconfigure).
+        pub bit9: bool = 9;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        pub slot_type: u8 = 16..21;
+
+        reserved2: u8 = 21..24;
+
+        /// ID of the Device Slot corresponding to this event.
+        pub slot_id: u8 = 24..32;
+    }
+}
+
+bitstruct! {
+    /// Common control fields in Command TRBs to do with endpoint start/stop/reset
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldEndpointCmd(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u16 = 1..9;
+
+        /// Only in Reset Endpoint Command TRB.
+        /// If true, the Reset operation doesn't affect the current transfer
+        /// state of the endpoint. (See also xHCI 1.2 sect 4.6.8.1)
+        pub transfer_state_preserve: bool = 9;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        pub endpoint_id: u8 = 16..21;
+
+        reserved2: u8 = 21..23;
+
+        /// Only in Stop Endpoint Command TRB.
+        /// If true, we're stopping activity on an endpoint that's about to be
+        /// suspended, and the endpoint shall be stopped for at least 10ms.
+        pub suspend: bool = 23;
+
+        /// ID of the Device Slot corresponding to this event.
+        pub slot_id: u8 = 24..32;
+    }
+}
+
+bitstruct! {
+    /// Control fields of Get Port Bandwidth Command TRB
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldGetPortBandwidthCmd(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u16 = 1..9;
+
+        /// Only in Reset Endpoint Command TRB.
+        /// If true, the Reset operation doesn't affect the current transfer
+        /// state of the endpoint. (See also xHCI 1.2 sect 4.6.8.1)
+        pub transfer_state_preserve: bool = 9;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        /// The bus speed of interest (See 'Port Speed' in xHCI 1.2 table 5-27,
+        /// but no Undefined or Reserved speeds allowed here)
+        pub dev_speed: u8 = 16..20;
+
+        reserved2: u8 = 20..24;
+
+        /// ID of the Hub Slot of which the bandwidth shall be returned.
+        pub hub_slot_id: u8 = 24..32;
+    }
+}
+
+bitstruct! {
+    /// Common control fields in Command TRBs to do with endpoint start/stop/reset
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbControlFieldExtendedPropsCmd(pub u32) {
+        /// Used to mark the Enqueue Pointer of the Transfer or Command Ring.
+        pub cycle: bool = 0;
+
+        reserved1: u16 = 1..10;
+
+        // TODO: description
+        pub trb_type: TrbType = 10..16;
+
+        pub subtype: u8 = 16..19;
+
+        pub endpoint_id: u8 = 19..24;
+
+        /// ID of the Device Slot whose extended properties we're interested in.
+        pub slot_id: u8 = 24..32;
+    }
+}
+
 #[derive(Copy, Clone)]
 pub union TrbStatusField {
     pub transfer: TrbStatusFieldTransfer,
     pub event: TrbStatusFieldEvent,
+    pub command_ext: TrbStatusFieldCommandExtProp,
 }
 impl Default for TrbStatusField {
     fn default() -> Self {
@@ -335,6 +448,15 @@ bitstruct! {
     pub struct TrbStatusFieldEvent(pub u32) {
         pub completion_parameter: u32 = 0..24;
         pub completion_code: TrbCompletionCode = 24..32;
+    }
+}
+
+bitstruct! {
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct TrbStatusFieldCommandExtProp(pub u32) {
+        pub extended_capability_id: u16 = 0..16;
+        pub capability_parameter: u8 = 16..24;
+        reserved: u8 = 24..32;
     }
 }
 

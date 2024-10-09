@@ -286,25 +286,120 @@ impl IntoIterator for CommandDescriptor {
 impl TryInto<CommandInfo> for CommandDescriptor {
     type Error = Error;
 
+    // xHCI 1.2 section 6.4.3
     fn try_into(self) -> Result<CommandInfo> {
         Ok(match self.0.control.trb_type() {
             TrbType::NoOpCmd => CommandInfo::NoOp,
-            TrbType::EnableSlotCmd => todo!(),
-            TrbType::DisableSlotCmd => todo!(),
-            TrbType::AddressDeviceCmd => todo!(),
-            TrbType::ConfigureEndpointCmd => todo!(),
-            TrbType::EvaluateContextCmd => todo!(),
-            TrbType::ResetEndpointCmd => todo!(),
-            TrbType::StopEndpointCmd => todo!(),
-            TrbType::SetTRDequeuePointerCmd => todo!(),
-            TrbType::ResetDeviceCmd => todo!(),
-            TrbType::ForceEventCmd => todo!(),
-            TrbType::NegotiateBandwidthCmd => todo!(),
-            TrbType::SetLatencyToleranceValueCmd => todo!(),
-            TrbType::GetPortBandwidthCmd => todo!(),
-            TrbType::ForceHeaderCmd => todo!(),
-            TrbType::GetExtendedPropertyCmd => todo!(),
-            TrbType::SetExtendedPropertyCmd => todo!(),
+            TrbType::EnableSlotCmd => CommandInfo::EnableSlot {
+                slot_type: unsafe { self.0.control.slot_cmd.slot_type() },
+            },
+            TrbType::DisableSlotCmd => CommandInfo::DisableSlot {
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+            },
+            TrbType::AddressDeviceCmd => CommandInfo::AddressDevice {
+                input_context_ptr: GuestAddr(self.0.parameter & !0b1111),
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+                block_set_address_request: unsafe {
+                    self.0.control.slot_cmd.bit9()
+                },
+            },
+            TrbType::ConfigureEndpointCmd => CommandInfo::ConfigureEndpoint {
+                input_context_ptr: GuestAddr(self.0.parameter & !0b1111),
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+                deconfigure: unsafe { self.0.control.slot_cmd.bit9() },
+            },
+            TrbType::EvaluateContextCmd => CommandInfo::EvaluateContext {
+                input_context_ptr: GuestAddr(self.0.parameter & !0b1111),
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+            },
+            TrbType::ResetEndpointCmd => CommandInfo::ResetEndpoint {
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+                endpoint_id: unsafe {
+                    self.0.control.endpoint_cmd.endpoint_id()
+                },
+                transfer_state_preserve: unsafe {
+                    self.0.control.endpoint_cmd.transfer_state_preserve()
+                },
+            },
+            TrbType::StopEndpointCmd => CommandInfo::StopEndpoint {
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+                endpoint_id: unsafe {
+                    self.0.control.endpoint_cmd.endpoint_id()
+                },
+                suspend: unsafe { self.0.control.endpoint_cmd.suspend() },
+            },
+            TrbType::SetTRDequeuePointerCmd => unsafe {
+                CommandInfo::SetTRDequeuePointer {
+                    new_tr_dequeue_ptr: GuestAddr(self.0.parameter & !0b1111),
+                    dequeue_cycle_state: (self.0.parameter & 1) != 0,
+                    // (streams not implemented)
+                    // stream_context_type: ((self.0.parameter >> 1) & 0b111) as u8,
+                    // stream_id: self.0.status.command.stream_id(),
+                    slot_id: self.0.control.endpoint_cmd.slot_id(),
+                    endpoint_id: self.0.control.endpoint_cmd.endpoint_id(),
+                }
+            },
+            TrbType::ResetDeviceCmd => CommandInfo::ResetDevice {
+                slot_id: unsafe { self.0.control.slot_cmd.slot_id() },
+            },
+            // optional normative, ignored by us
+            TrbType::ForceEventCmd => CommandInfo::ForceEvent,
+            // optional normative, ignored by us
+            TrbType::NegotiateBandwidthCmd => CommandInfo::NegotiateBandwidth,
+            // optional normative, ignored by us
+            TrbType::SetLatencyToleranceValueCmd => {
+                CommandInfo::SetLatencyToleranceValue
+            }
+            TrbType::GetPortBandwidthCmd => CommandInfo::GetPortBandwidth {
+                port_bandwidth_ctx_ptr: GuestAddr(self.0.parameter & !0b1111),
+                hub_slot_id: unsafe {
+                    self.0.control.get_port_bw_cmd.hub_slot_id()
+                },
+                dev_speed: unsafe {
+                    self.0.control.get_port_bw_cmd.dev_speed()
+                },
+            },
+            TrbType::ForceHeaderCmd => CommandInfo::ForceHeader {
+                packet_type: (self.0.parameter & 0b1_1111) as u8,
+                header_info: (self.0.parameter >> 5) as u128
+                    | ((unsafe { self.0.status.command_ext.0 } as u128) << 59),
+                root_hub_port_number: unsafe {
+                    // hack, same bits
+                    self.0.control.get_port_bw_cmd.hub_slot_id()
+                },
+            },
+            TrbType::GetExtendedPropertyCmd => unsafe {
+                CommandInfo::GetExtendedProperty {
+                    extended_property_ctx_ptr: GuestAddr(
+                        self.0.parameter & !0b1111,
+                    ),
+                    extended_capability_id: self
+                        .0
+                        .status
+                        .command_ext
+                        .extended_capability_id(),
+                    command_subtype: self.0.control.ext_props_cmd.subtype(),
+                    endpoint_id: self.0.control.ext_props_cmd.endpoint_id(),
+                    slot_id: self.0.control.ext_props_cmd.slot_id(),
+                }
+            },
+            TrbType::SetExtendedPropertyCmd => unsafe {
+                CommandInfo::SetExtendedProperty {
+                    extended_capability_id: self
+                        .0
+                        .status
+                        .command_ext
+                        .extended_capability_id(),
+                    capability_parameter: self
+                        .0
+                        .status
+                        .command_ext
+                        .capability_parameter(),
+                    command_subtype: self.0.control.ext_props_cmd.subtype(),
+                    endpoint_id: self.0.control.ext_props_cmd.endpoint_id(),
+                    slot_id: self.0.control.ext_props_cmd.slot_id(),
+                }
+            },
             _ => unreachable!(),
         })
     }
@@ -313,6 +408,72 @@ impl TryInto<CommandInfo> for CommandDescriptor {
 #[derive(Debug)]
 pub enum CommandInfo {
     NoOp,
+    EnableSlot {
+        slot_type: u8,
+    },
+    DisableSlot {
+        slot_id: u8,
+    },
+    AddressDevice {
+        input_context_ptr: GuestAddr,
+        slot_id: u8,
+        block_set_address_request: bool,
+    },
+    ConfigureEndpoint {
+        input_context_ptr: GuestAddr,
+        slot_id: u8,
+        deconfigure: bool,
+    },
+    EvaluateContext {
+        input_context_ptr: GuestAddr,
+        slot_id: u8,
+    },
+    ResetEndpoint {
+        slot_id: u8,
+        endpoint_id: u8,
+        transfer_state_preserve: bool,
+    },
+    StopEndpoint {
+        slot_id: u8,
+        endpoint_id: u8,
+        suspend: bool,
+    },
+    SetTRDequeuePointer {
+        new_tr_dequeue_ptr: GuestAddr,
+        dequeue_cycle_state: bool,
+        slot_id: u8,
+        endpoint_id: u8,
+    },
+    ResetDevice {
+        slot_id: u8,
+    },
+    ForceEvent,
+    NegotiateBandwidth,
+    SetLatencyToleranceValue,
+    GetPortBandwidth {
+        port_bandwidth_ctx_ptr: GuestAddr,
+        hub_slot_id: u8,
+        dev_speed: u8,
+    },
+    ForceHeader {
+        packet_type: u8,
+        header_info: u128,
+        root_hub_port_number: u8,
+    },
+    GetExtendedProperty {
+        extended_property_ctx_ptr: GuestAddr,
+        extended_capability_id: u16,
+        command_subtype: u8,
+        endpoint_id: u8,
+        slot_id: u8,
+    },
+    SetExtendedProperty {
+        extended_capability_id: u16,
+        capability_parameter: u8,
+        command_subtype: u8,
+        endpoint_id: u8,
+        slot_id: u8,
+    },
 }
 
 #[derive(Debug)]
