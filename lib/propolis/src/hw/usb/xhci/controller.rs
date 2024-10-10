@@ -6,7 +6,7 @@ use crate::accessors::Accessor;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp, PAGE_SIZE};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
-use crate::hw::usb::xhci::bits::ring_data::{TrbCompletionCode, TrbType};
+use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::rings::consumer::CommandInfo;
 use crate::hw::usb::xhci::rings::producer::{
     EventDescriptor, EventInfo, EventRing,
@@ -40,6 +40,13 @@ struct IntrRegSet {
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
 }
 
+struct DeviceSlot {}
+impl DeviceSlot {
+    fn new(slot_type: u8) -> Self {
+        Self {}
+    }
+}
+
 struct XhciState {
     /// USB Command Register
     usb_cmd: bits::UsbCommand,
@@ -59,6 +66,8 @@ struct XhciState {
     event_rings: [Option<EventRing>; NUM_INTRS as usize],
     command_ring: Option<CommandRing>,
     command_ring_running: bool,
+
+    device_slots: Vec<Option<DeviceSlot>>,
 
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
@@ -98,6 +107,8 @@ impl Default for XhciState {
             event_rings: [None; NUM_INTRS as usize],
             command_ring: None,
             command_ring_running: false,
+            // HACK: placeholder at slot 0
+            device_slots: vec![Some(DeviceSlot {})],
         }
     }
 }
@@ -108,7 +119,7 @@ pub struct PciXhci {
     pci_state: pci::DeviceState,
 
     /// Controller state
-    state: Mutex<XhciState>,
+    state: Arc<Mutex<XhciState>>,
 
     /// Threads for processing rings
     workers: ThreadGroup,
@@ -146,7 +157,7 @@ impl PciXhci {
             .name(format!("xhci command ring"))
             .spawn(|| Self::process_command_ring(worker_state, worker_acc));
 
-        workers.extend(core::iter::once(worker_thread));
+        workers.extend(core::iter::once(worker_thread)).unwrap();
 
         Arc::new(Self { pci_state, state, workers })
     }
@@ -568,44 +579,142 @@ impl PciXhci {
     }
 
     fn process_command_ring(
-        &self,
         state: Arc<Mutex<XhciState>>,
         acc_mem: Accessor<MemCtx>,
     ) {
+        // TODO: get rid of unwraps
         loop {
             // todo!("xhci: wait for doorbell 0 signal");
             let mut state = state.lock().unwrap();
             if state.command_ring_running {
-                if let Some(ref mut cmd_ring) = state.command_ring {
-                    // TODO: get rid of unwraps
-                    let memctx = acc_mem.access().unwrap();
+                let memctx = acc_mem.access().unwrap();
+                let cmd_opt = if let Some(ref mut cmd_ring) = state.command_ring
+                {
                     cmd_ring.update_from_guest(&memctx).unwrap();
                     // TODO: do we do one command at a time or all available?
                     let cmd_trb_addr = cmd_ring.current_dequeue_pointer();
-                    while let Some(cmd_desc_res) = cmd_ring.dequeue_work_item()
-                    {
-                        let cmd: CommandInfo =
-                            cmd_desc_res.unwrap().try_into().unwrap();
-                        // TODO: cmd_desc.0 not pub, instead have an Into
-                        match cmd {
-                            CommandInfo::NoOp => {
-                                let event_desc: EventDescriptor =
-                                    EventInfo::CommandCompletion {
-                                        code: TrbCompletionCode::Success,
-                                        slot_id: 0, // 0 for no-op (table 6-42)
-                                        cmd_trb_addr,
-                                    }
-                                    .into();
-                                todo!(
-                                    "xhci: write {event_desc:?} to event ring"
-                                );
-                            }
-                            _ => {}
-                        }
-                        todo!("xhci: process command {cmd:?}");
-                    }
+                    cmd_ring.dequeue_work_item().map(|x| (x, cmd_trb_addr))
+                } else {
+                    None
+                };
+                if let Some((Ok(cmd_desc), cmd_trb_addr)) = cmd_opt {
+                    let event_info = Self::run_command(
+                        cmd_desc.try_into().unwrap(),
+                        cmd_trb_addr,
+                        &mut state,
+                    );
+                    state.event_rings[0]
+                        .as_mut()
+                        .expect("event ring not initialized")
+                        .enqueue(event_info.into(), &memctx)
+                        .expect("event ring: enqueue completion");
                 }
             }
+        }
+    }
+
+    fn run_command(
+        cmd: CommandInfo,
+        cmd_trb_addr: GuestAddr,
+        state: &mut std::sync::MutexGuard<XhciState>,
+    ) -> EventInfo {
+        match cmd {
+            // xHCI 1.2 sect 4.6.2
+            CommandInfo::NoOp => EventInfo::CommandCompletion {
+                completion_code: TrbCompletionCode::Success,
+                slot_id: 0, // 0 for no-op (table 6-42)
+                cmd_trb_addr,
+            },
+            // xHCI 1.2 sect 4.6.3
+            CommandInfo::EnableSlot { slot_type } => {
+                let slot_id_opt =
+                    match state.device_slots.iter().position(Option::is_none) {
+                        Some(i) => Some(i),
+                        None => {
+                            if state.device_slots.len()
+                                < MAX_DEVICE_SLOTS as usize
+                            {
+                                state.device_slots.push(None);
+                                Some(state.device_slots.len() - 1)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                match slot_id_opt.map(|x| x as u8) {
+                    Some(slot_id) => {
+                        state.device_slots[i] =
+                            Some(DeviceSlot::new(slot_type));
+                        EventInfo::CommandCompletion {
+                            completion_code: TrbCompletionCode::Success,
+                            slot_id,
+                            cmd_trb_addr,
+                        }
+                    }
+                    None => EventInfo::CommandCompletion {
+                        completion_code:
+                            TrbCompletionCode::NoSlotsAvailableError,
+                        slot_id: 0,
+                        cmd_trb_addr,
+                    },
+                }
+            }
+            CommandInfo::DisableSlot { slot_id } => todo!(),
+            CommandInfo::AddressDevice {
+                input_context_ptr,
+                slot_id,
+                block_set_address_request,
+            } => todo!(),
+            CommandInfo::ConfigureEndpoint {
+                input_context_ptr,
+                slot_id,
+                deconfigure,
+            } => todo!(),
+            CommandInfo::EvaluateContext { input_context_ptr, slot_id } => {
+                todo!()
+            }
+            CommandInfo::ResetEndpoint {
+                slot_id,
+                endpoint_id,
+                transfer_state_preserve,
+            } => todo!(),
+            CommandInfo::StopEndpoint { slot_id, endpoint_id, suspend } => {
+                todo!()
+            }
+            CommandInfo::SetTRDequeuePointer {
+                new_tr_dequeue_ptr,
+                dequeue_cycle_state,
+                slot_id,
+                endpoint_id,
+            } => todo!(),
+            CommandInfo::ResetDevice { slot_id } => todo!(),
+            CommandInfo::ForceEvent => todo!(),
+            CommandInfo::NegotiateBandwidth => todo!(),
+            CommandInfo::SetLatencyToleranceValue => todo!(),
+            CommandInfo::GetPortBandwidth {
+                port_bandwidth_ctx_ptr,
+                hub_slot_id,
+                dev_speed,
+            } => todo!(),
+            CommandInfo::ForceHeader {
+                packet_type,
+                header_info,
+                root_hub_port_number,
+            } => todo!(),
+            CommandInfo::GetExtendedProperty {
+                extended_property_ctx_ptr,
+                extended_capability_id,
+                command_subtype,
+                endpoint_id,
+                slot_id,
+            } => todo!(),
+            CommandInfo::SetExtendedProperty {
+                extended_capability_id,
+                capability_parameter,
+                command_subtype,
+                endpoint_id,
+                slot_id,
+            } => todo!(),
         }
     }
 
