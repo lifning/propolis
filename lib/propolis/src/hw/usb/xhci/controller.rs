@@ -616,38 +616,37 @@ impl PciXhci {
     fn run_command(
         cmd: CommandInfo,
         cmd_trb_addr: GuestAddr,
-        state: &mut std::sync::MutexGuard<XhciState>,
+        state: &mut XhciState,
     ) -> EventInfo {
         match cmd {
-            // xHCI 1.2 sect 4.6.2
+            // xHCI 1.2 sect 3.3.1, 4.6.2
             CommandInfo::NoOp => EventInfo::CommandCompletion {
                 completion_code: TrbCompletionCode::Success,
                 slot_id: 0, // 0 for no-op (table 6-42)
                 cmd_trb_addr,
             },
-            // xHCI 1.2 sect 4.6.3
+            // xHCI 1.2 sect 3.3.2, 4.6.3
             CommandInfo::EnableSlot { slot_type } => {
-                let slot_id_opt =
-                    match state.device_slots.iter().position(Option::is_none) {
-                        Some(i) => Some(i),
-                        None => {
-                            if state.device_slots.len()
-                                < MAX_DEVICE_SLOTS as usize
-                            {
-                                state.device_slots.push(None);
-                                Some(state.device_slots.len() - 1)
-                            } else {
-                                None
-                            }
+                let slot_id_opt = state
+                    .device_slots
+                    .iter()
+                    .position(Option::is_none)
+                    .or_else(|| {
+                        if state.device_slots.len() < MAX_DEVICE_SLOTS as usize
+                        {
+                            state.device_slots.push(None);
+                            Some(state.device_slots.len() - 1)
+                        } else {
+                            None
                         }
-                    };
-                match slot_id_opt.map(|x| x as u8) {
+                    });
+                match slot_id_opt {
                     Some(slot_id) => {
-                        state.device_slots[i] =
+                        state.device_slots[slot_id] =
                             Some(DeviceSlot::new(slot_type));
                         EventInfo::CommandCompletion {
                             completion_code: TrbCompletionCode::Success,
-                            slot_id,
+                            slot_id: slot_id as u8,
                             cmd_trb_addr,
                         }
                     }
@@ -659,12 +658,73 @@ impl PciXhci {
                     },
                 }
             }
-            CommandInfo::DisableSlot { slot_id } => todo!(),
+            // xHCI 1.2 sect 3.3.3, 4.6.4
+            CommandInfo::DisableSlot { slot_id } => {
+                let slot_id = slot_id as usize;
+                let completion_code = if state
+                    .device_slots
+                    .get(slot_id)
+                    .map(|opt| *opt)
+                    .is_some()
+                {
+                    // TODO: terminate any transfers on the slot
+                    // TODO: set Slot Context to Disabled
+                    state.device_slots[slot_id] = None;
+                    TrbCompletionCode::Success
+                } else {
+                    TrbCompletionCode::SlotNotEnabledError
+                };
+                EventInfo::CommandCompletion {
+                    completion_code,
+                    slot_id: slot_id as u8,
+                    cmd_trb_addr,
+                }
+            }
+            // xHCI 1.2 sect 3.3.4, 4.6.5
             CommandInfo::AddressDevice {
                 input_context_ptr,
                 slot_id,
                 block_set_address_request,
-            } => todo!(),
+            } => {
+                // xHCI 1.2 pg. 113
+                let slot_id = slot_id as usize;
+                let completion_code = if state
+                    .device_slots
+                    .get(slot_id)
+                    .and_then(|opt| *opt)
+                    .is_none()
+                {
+                    TrbCompletionCode::SlotNotEnabledError
+                } else if block_set_address_request {
+                    if "slot state enabled" {
+                        // copy input slot ctx to output slot ctx
+                        // copy input ep0 ctx to output ep0 ctx
+                        // set output ep0 state to running
+                        // set usb device address in output slot ctx to 0
+                        TrbCompletionCode::Success
+                    } else {
+                        TrbCompletionCode::ContextStateError
+                    }
+                } else {
+                    if "slot state enabled or default" {
+                        // select address, issue 'set address' to device
+                        // copy input slot ctx to output slot ctx
+                        // copy input ep0 ctx to output ep0 ctx
+                        // set output ep0 state to running
+                        // set output slot context state to addressed
+                        // set usb device address in output slot ctx to chosen addr
+                        TrbCompletionCode::Success
+                    } else {
+                        TrbCompletionCode::ContextStateError
+                    }
+                };
+                EventInfo::CommandCompletion {
+                    completion_code,
+                    slot_id,
+                    cmd_trb_addr,
+                }
+            }
+            // xHCI 1.2 sect 3.3.5, 4.6.6
             CommandInfo::ConfigureEndpoint {
                 input_context_ptr,
                 slot_id,
@@ -688,33 +748,31 @@ impl PciXhci {
                 endpoint_id,
             } => todo!(),
             CommandInfo::ResetDevice { slot_id } => todo!(),
-            CommandInfo::ForceEvent => todo!(),
-            CommandInfo::NegotiateBandwidth => todo!(),
-            CommandInfo::SetLatencyToleranceValue => todo!(),
-            CommandInfo::GetPortBandwidth {
-                port_bandwidth_ctx_ptr,
-                hub_slot_id,
-                dev_speed,
-            } => todo!(),
             CommandInfo::ForceHeader {
                 packet_type,
                 header_info,
                 root_hub_port_number,
             } => todo!(),
-            CommandInfo::GetExtendedProperty {
-                extended_property_ctx_ptr,
-                extended_capability_id,
-                command_subtype,
-                endpoint_id,
-                slot_id,
-            } => todo!(),
-            CommandInfo::SetExtendedProperty {
-                extended_capability_id,
-                capability_parameter,
-                command_subtype,
-                endpoint_id,
-                slot_id,
-            } => todo!(),
+            // optional, unimplemented
+            CommandInfo::ForceEvent
+            | CommandInfo::NegotiateBandwidth
+            | CommandInfo::SetLatencyToleranceValue => {
+                EventInfo::CommandCompletion {
+                    completion_code: TrbCompletionCode::TrbError,
+                    slot_id: 0,
+                    cmd_trb_addr,
+                }
+            }
+            // optional, unimplemented
+            CommandInfo::GetPortBandwidth { hub_slot_id: slot_id, .. }
+            | CommandInfo::GetExtendedProperty { slot_id, .. }
+            | CommandInfo::SetExtendedProperty { slot_id, .. } => {
+                EventInfo::CommandCompletion {
+                    completion_code: TrbCompletionCode::TrbError,
+                    slot_id,
+                    cmd_trb_addr,
+                }
+            }
         }
     }
 
