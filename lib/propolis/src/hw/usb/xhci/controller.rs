@@ -8,13 +8,14 @@ use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci;
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::rings::consumer::CommandInfo;
-use crate::hw::usb::xhci::rings::producer::{
-    EventDescriptor, EventInfo, EventRing,
-};
+use crate::hw::usb::xhci::rings::producer::{EventInfo, EventRing};
 use crate::tasks::ThreadGroup;
 use crate::vmm::MemCtx;
 
 use super::bits;
+use super::bits::device_context::{
+    EndpointContext, SlotContext, SlotContextFirst, SlotState,
+};
 use super::registers::*;
 use super::rings::consumer::CommandRing;
 
@@ -47,6 +48,141 @@ impl DeviceSlot {
     }
 }
 
+struct DeviceSlotTable {
+    /// Device Context Base Address Array Pointer (DCBAAP)
+    ///
+    /// Points to an array of address pointers referencing the device context
+    /// structures for each attached device.
+    ///
+    /// See xHCI 1.2 Section 5.4.6
+    dcbaap: Option<GuestAddr>,
+    slots: Vec<Option<DeviceSlot>>,
+}
+
+impl Default for DeviceSlotTable {
+    fn default() -> Self {
+        Self {
+            dcbaap: None,
+            // HACK: placeholder at slot 0, which is where the scratch
+            // pointer goes in the DCBAA & has a special doorbell &c.
+            slots: vec![Some(DeviceSlot {})],
+        }
+    }
+}
+
+impl DeviceSlotTable {
+    fn slot(&self, slot_id: u8) -> Option<&DeviceSlot> {
+        self.slots.get(slot_id as usize).and_then(|opt| opt.as_ref())
+    }
+
+    fn enable_slot(&mut self, slot_type: u8) -> Option<u8> {
+        let slot_id_opt =
+            self.slots.iter().position(Option::is_none).or_else(|| {
+                if self.slots.len() < MAX_DEVICE_SLOTS as usize {
+                    self.slots.push(None);
+                    Some(self.slots.len() - 1)
+                } else {
+                    None
+                }
+            });
+        if let Some(slot_id) = slot_id_opt {
+            self.slots[slot_id] = Some(DeviceSlot::new(slot_type));
+        }
+        slot_id_opt.map(|x| x as u8)
+    }
+
+    fn disable_slot(
+        &mut self,
+        slot_id: u8,
+        memctx: &MemCtx,
+    ) -> TrbCompletionCode {
+        if self.slot(slot_id).is_some() {
+            // TODO: terminate any transfers on the slot
+
+            // slot ctx is first element of dev context table
+            if let Some(slot_ptr) = self.dev_context_addr(slot_id, memctx) {
+                if let Some(mut slot_ctx) =
+                    memctx.read::<SlotContextFirst>(slot_ptr)
+                {
+                    slot_ctx.set_slot_state(SlotState::DisabledEnabled);
+                    memctx.write(slot_ptr, &slot_ctx);
+                }
+            }
+            self.slots[slot_id as usize] = None;
+            TrbCompletionCode::Success
+        } else {
+            TrbCompletionCode::SlotNotEnabledError
+        }
+    }
+
+    fn dev_context_addr(
+        &self,
+        slot_id: u8,
+        memctx: &MemCtx,
+    ) -> Option<GuestAddr> {
+        self.dcbaap.as_ref().and_then(|base_ptr| {
+            memctx
+                .read::<u64>(
+                    // lower 6 bits are reserved (xHCI 1.2 table 6-2)
+                    // software is supposed to clear them to 0, but
+                    // let's double-tap for safety's sake.
+                    base_ptr.offset::<u64>(slot_id as usize) & !0b11_1111,
+                )
+                .map(GuestAddr)
+        })
+    }
+
+    fn address_device(
+        &self,
+        slot_id: u8,
+        input_context_ptr: GuestAddr,
+        block_set_address_request: bool,
+        memctx: &MemCtx,
+    ) -> Option<TrbCompletionCode> {
+        if self.slot(slot_id).is_none() {
+            return Some(TrbCompletionCode::SlotNotEnabledError);
+        }
+        let slot_ptr = self.dev_context_addr(slot_id, memctx)?;
+        let mut input_slot_ctx =
+            memctx.read::<SlotContext>(input_context_ptr)?;
+        let mut input_ep0_ctx = memctx.read::<EndpointContext>(
+            input_context_ptr.offset::<SlotContext>(1),
+        )?;
+
+        Some(if block_set_address_request {
+            if matches!(input_slot_ctx.slot_state(), SlotState::DisabledEnabled)
+            {
+                // copy input slot ctx to output slot ctx, and
+                // set usb device address in output slot ctx to 0
+                input_slot_ctx.set_usb_device_address(0);
+                memctx.write(slot_ptr, &input_slot_ctx);
+                // copy input ep0 ctx to output ep0 ctx, and
+                // set output ep0 state to running
+                input_ep0_ctx.set_state("running"); // TODO
+                memctx.write(slot_ptr.offset::<SlotContext>(1), &input_ep0_ctx);
+                TrbCompletionCode::Success
+            } else {
+                TrbCompletionCode::ContextStateError
+            }
+        } else {
+            if matches!(
+                input_slot_ctx.slot_state(),
+                SlotState::DisabledEnabled | SlotState::Default
+            ) {
+                // select address, issue 'set address' to device
+                // copy input slot ctx to output slot ctx
+                // copy input ep0 ctx to output ep0 ctx
+                // set output ep0 state to running
+                // set output slot context state to addressed
+                // set usb device address in output slot ctx to chosen addr
+                TrbCompletionCode::Success
+            } else {
+                TrbCompletionCode::ContextStateError
+            }
+        })
+    }
+}
+
 struct XhciState {
     /// USB Command Register
     usb_cmd: bits::UsbCommand,
@@ -67,15 +203,7 @@ struct XhciState {
     command_ring: Option<CommandRing>,
     command_ring_running: bool,
 
-    device_slots: Vec<Option<DeviceSlot>>,
-
-    /// Device Context Base Address Array Pointer (DCBAAP)
-    ///
-    /// Points to an array of address pointers referencing the device context
-    /// structures for each attached device.
-    ///
-    /// See xHCI 1.2 Section 5.4.6
-    dev_ctx_table_base: Option<GuestAddr>,
+    dev_slots: DeviceSlotTable,
 
     /// Configure Register
     config: bits::Configure,
@@ -92,7 +220,7 @@ impl Default for XhciState {
             usb_cmd: bits::UsbCommand(0),
             usb_sts,
             dnctrl: bits::DeviceNotificationControl::new([0]),
-            dev_ctx_table_base: None,
+            dev_slots: DeviceSlotTable::default(),
             config: bits::Configure(0),
             mf_index: bits::MicroframeIndex(0),
             intr_reg_sets: [IntrRegSet {
@@ -107,8 +235,6 @@ impl Default for XhciState {
             event_rings: [None; NUM_INTRS as usize],
             command_ring: None,
             command_ring_running: false,
-            // HACK: placeholder at slot 0
-            device_slots: vec![Some(DeviceSlot {})],
         }
     }
 }
@@ -283,7 +409,8 @@ impl PciXhci {
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
                 let state = self.state.lock().unwrap();
-                let addr = state.dev_ctx_table_base.unwrap_or(GuestAddr(0)).0;
+                let addr =
+                    state.dev_slots.dcbaap.as_ref().map(|x| x.0).unwrap_or(0);
                 ro.write_u64(addr);
             }
             Op(Configure) => {
@@ -492,7 +619,7 @@ impl PciXhci {
             }
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
                 let mut state = self.state.lock().unwrap();
-                state.dev_ctx_table_base = Some(GuestAddr(wo.read_u64()));
+                state.dev_slots.dcbaap = Some(GuestAddr(wo.read_u64()));
                 todo!("xhci: opreg write devctxbaseaddrarrptrreg (gesundheit)");
             }
             Op(Configure) => {
@@ -602,6 +729,7 @@ impl PciXhci {
                         cmd_desc.try_into().unwrap(),
                         cmd_trb_addr,
                         &mut state,
+                        &memctx,
                     );
                     state.event_rings[0]
                         .as_mut()
@@ -617,6 +745,7 @@ impl PciXhci {
         cmd: CommandInfo,
         cmd_trb_addr: GuestAddr,
         state: &mut XhciState,
+        memctx: &MemCtx,
     ) -> EventInfo {
         match cmd {
             // xHCI 1.2 sect 3.3.1, 4.6.2
@@ -627,29 +756,12 @@ impl PciXhci {
             },
             // xHCI 1.2 sect 3.3.2, 4.6.3
             CommandInfo::EnableSlot { slot_type } => {
-                let slot_id_opt = state
-                    .device_slots
-                    .iter()
-                    .position(Option::is_none)
-                    .or_else(|| {
-                        if state.device_slots.len() < MAX_DEVICE_SLOTS as usize
-                        {
-                            state.device_slots.push(None);
-                            Some(state.device_slots.len() - 1)
-                        } else {
-                            None
-                        }
-                    });
-                match slot_id_opt {
-                    Some(slot_id) => {
-                        state.device_slots[slot_id] =
-                            Some(DeviceSlot::new(slot_type));
-                        EventInfo::CommandCompletion {
-                            completion_code: TrbCompletionCode::Success,
-                            slot_id: slot_id as u8,
-                            cmd_trb_addr,
-                        }
-                    }
+                match state.dev_slots.enable_slot(slot_type) {
+                    Some(slot_id) => EventInfo::CommandCompletion {
+                        completion_code: TrbCompletionCode::Success,
+                        slot_id,
+                        cmd_trb_addr,
+                    },
                     None => EventInfo::CommandCompletion {
                         completion_code:
                             TrbCompletionCode::NoSlotsAvailableError,
@@ -660,23 +772,11 @@ impl PciXhci {
             }
             // xHCI 1.2 sect 3.3.3, 4.6.4
             CommandInfo::DisableSlot { slot_id } => {
-                let slot_id = slot_id as usize;
-                let completion_code = if state
-                    .device_slots
-                    .get(slot_id)
-                    .map(|opt| *opt)
-                    .is_some()
-                {
-                    // TODO: terminate any transfers on the slot
-                    // TODO: set Slot Context to Disabled
-                    state.device_slots[slot_id] = None;
-                    TrbCompletionCode::Success
-                } else {
-                    TrbCompletionCode::SlotNotEnabledError
-                };
                 EventInfo::CommandCompletion {
-                    completion_code,
-                    slot_id: slot_id as u8,
+                    completion_code: state
+                        .dev_slots
+                        .disable_slot(slot_id, memctx),
+                    slot_id,
                     cmd_trb_addr,
                 }
             }
@@ -687,40 +787,16 @@ impl PciXhci {
                 block_set_address_request,
             } => {
                 // xHCI 1.2 pg. 113
-                let slot_id = slot_id as usize;
-                let completion_code = if state
-                    .device_slots
-                    .get(slot_id)
-                    .and_then(|opt| *opt)
-                    .is_none()
-                {
-                    TrbCompletionCode::SlotNotEnabledError
-                } else if block_set_address_request {
-                    if "slot state enabled" {
-                        // copy input slot ctx to output slot ctx
-                        // copy input ep0 ctx to output ep0 ctx
-                        // set output ep0 state to running
-                        // set usb device address in output slot ctx to 0
-                        TrbCompletionCode::Success
-                    } else {
-                        TrbCompletionCode::ContextStateError
-                    }
-                } else {
-                    if "slot state enabled or default" {
-                        // select address, issue 'set address' to device
-                        // copy input slot ctx to output slot ctx
-                        // copy input ep0 ctx to output ep0 ctx
-                        // set output ep0 state to running
-                        // set output slot context state to addressed
-                        // set usb device address in output slot ctx to chosen addr
-                        TrbCompletionCode::Success
-                    } else {
-                        TrbCompletionCode::ContextStateError
-                    }
-                };
+                let completion_code = state.dev_slots.address_device(
+                    slot_id,
+                    input_context_ptr,
+                    block_set_address_request,
+                    memctx,
+                );
+
                 EventInfo::CommandCompletion {
                     completion_code,
-                    slot_id,
+                    slot_id: slot_id as u8,
                     cmd_trb_addr,
                 }
             }

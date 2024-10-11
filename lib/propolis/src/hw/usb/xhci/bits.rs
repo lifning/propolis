@@ -6,6 +6,7 @@
 use crate::common::GuestAddr;
 use bitstruct::bitstruct;
 
+pub mod device_context;
 pub mod ring_data;
 
 /// Size of the USB-specific PCI configuration space.
