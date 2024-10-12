@@ -14,7 +14,7 @@ use crate::vmm::MemCtx;
 
 use super::bits;
 use super::bits::device_context::{
-    EndpointContext, SlotContext, SlotContextFirst, SlotState,
+    EndpointContext, EndpointState, SlotContext, SlotContextFirst, SlotState,
 };
 use super::registers::*;
 use super::rings::consumer::CommandRing;
@@ -143,43 +143,74 @@ impl DeviceSlotTable {
             return Some(TrbCompletionCode::SlotNotEnabledError);
         }
         let slot_ptr = self.dev_context_addr(slot_id, memctx)?;
-        let mut input_slot_ctx =
-            memctx.read::<SlotContext>(input_context_ptr)?;
-        let mut input_ep0_ctx = memctx.read::<EndpointContext>(
+        let mut slot_ctx = memctx.read::<SlotContext>(input_context_ptr)?;
+        let mut ep0_ctx = memctx.read::<EndpointContext>(
             input_context_ptr.offset::<SlotContext>(1),
         )?;
 
         Some(if block_set_address_request {
-            if matches!(input_slot_ctx.slot_state(), SlotState::DisabledEnabled)
-            {
+            if matches!(slot_ctx.slot_state(), SlotState::DisabledEnabled) {
                 // copy input slot ctx to output slot ctx, and
                 // set usb device address in output slot ctx to 0
-                input_slot_ctx.set_usb_device_address(0);
-                memctx.write(slot_ptr, &input_slot_ctx);
+                slot_ctx.set_usb_device_address(0);
+                memctx.write(slot_ptr, &slot_ctx);
                 // copy input ep0 ctx to output ep0 ctx, and
                 // set output ep0 state to running
-                input_ep0_ctx.set_state("running"); // TODO
-                memctx.write(slot_ptr.offset::<SlotContext>(1), &input_ep0_ctx);
+                ep0_ctx.set_endpoint_state(EndpointState::Running);
+                memctx.write(slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
                 TrbCompletionCode::Success
             } else {
                 TrbCompletionCode::ContextStateError
             }
         } else {
             if matches!(
-                input_slot_ctx.slot_state(),
+                slot_ctx.slot_state(),
                 SlotState::DisabledEnabled | SlotState::Default
             ) {
                 // select address, issue 'set address' to device
                 // copy input slot ctx to output slot ctx
-                // copy input ep0 ctx to output ep0 ctx
-                // set output ep0 state to running
                 // set output slot context state to addressed
                 // set usb device address in output slot ctx to chosen addr
+                const HARDCODED_USB_ADDRESS: u8 = 1; // FIXME, obviously
+                slot_ctx.set_usb_device_address(HARDCODED_USB_ADDRESS);
+                slot_ctx.set_slot_state(SlotState::Addressed);
+                memctx.write(slot_ptr, &slot_ctx);
+                // copy input ep0 ctx to output ep0 ctx
+                // set output ep0 state to running
+                ep0_ctx.set_endpoint_state(EndpointState::Running);
+                memctx.write(slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
                 TrbCompletionCode::Success
             } else {
                 TrbCompletionCode::ContextStateError
             }
         })
+    }
+
+    fn evaluate_context(
+        &self,
+        slot_id: u8,
+        input_context_ptr: GuestAddr,
+        memctx: &MemCtx,
+    ) -> TrbCompletionCode {
+        if self.slot(slot_id).is_none() {
+            return TrbCompletionCode::SlotNotEnabledError;
+        }
+
+        if let Some(slot_ctx) = self
+            .dev_context_addr(slot_id, memctx)
+            .and_then(|slot_addr| memctx.read::<SlotContext>(slot_addr))
+        {
+            match slot_ctx.slot_state() {
+                // TODO: actually act on it
+                SlotState::Default
+                | SlotState::Addressed
+                | SlotState::Configured => TrbCompletionCode::Success,
+                _ => TrbCompletionCode::ContextStateError,
+            }
+        } else {
+            // TODO: handle properly. for now just:
+            TrbCompletionCode::ContextStateError
+        }
     }
 }
 
@@ -787,16 +818,20 @@ impl PciXhci {
                 block_set_address_request,
             } => {
                 // xHCI 1.2 pg. 113
-                let completion_code = state.dev_slots.address_device(
-                    slot_id,
-                    input_context_ptr,
-                    block_set_address_request,
-                    memctx,
-                );
+                let completion_code = state
+                    .dev_slots
+                    .address_device(
+                        slot_id,
+                        input_context_ptr,
+                        block_set_address_request,
+                        memctx,
+                    )
+                    // we'll call invalid pointers a context state error
+                    .unwrap_or(TrbCompletionCode::ContextStateError);
 
                 EventInfo::CommandCompletion {
                     completion_code,
-                    slot_id: slot_id as u8,
+                    slot_id,
                     cmd_trb_addr,
                 }
             }
@@ -805,9 +840,25 @@ impl PciXhci {
                 input_context_ptr,
                 slot_id,
                 deconfigure,
-            } => todo!(),
+            } => {
+                // TODO: implement. right now we just say we ran out of internal resources
+                EventInfo::CommandCompletion {
+                    completion_code: TrbCompletionCode::ResourceError,
+                    slot_id,
+                    cmd_trb_addr,
+                }
+            }
             CommandInfo::EvaluateContext { input_context_ptr, slot_id } => {
-                todo!()
+                let completion_code = state.dev_slots.evaluate_context(
+                    slot_id,
+                    input_context_ptr,
+                    memctx,
+                );
+                EventInfo::CommandCompletion {
+                    completion_code,
+                    slot_id,
+                    cmd_trb_addr,
+                }
             }
             CommandInfo::ResetEndpoint {
                 slot_id,
