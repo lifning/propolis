@@ -14,7 +14,8 @@ use crate::vmm::MemCtx;
 
 use super::bits;
 use super::bits::device_context::{
-    EndpointContext, EndpointState, SlotContext, SlotContextFirst, SlotState,
+    EndpointContext, EndpointState, InputControlContext, SlotContext,
+    SlotContextFirst, SlotState,
 };
 use super::registers::*;
 use super::rings::consumer::CommandRing;
@@ -143,9 +144,15 @@ impl DeviceSlotTable {
             return Some(TrbCompletionCode::SlotNotEnabledError);
         }
         let slot_ptr = self.dev_context_addr(slot_id, memctx)?;
-        let mut slot_ctx = memctx.read::<SlotContext>(input_context_ptr)?;
+        // xHCI 1.2 Figure 6-5: differences between input context indeces
+        // and device context indeces.
+        let mut slot_ctx = memctx.read::<SlotContext>(
+            input_context_ptr.offset::<InputControlContext>(1),
+        )?;
         let mut ep0_ctx = memctx.read::<EndpointContext>(
-            input_context_ptr.offset::<SlotContext>(1),
+            input_context_ptr
+                .offset::<InputControlContext>(1)
+                .offset::<SlotContext>(1),
         )?;
 
         Some(if block_set_address_request {
@@ -186,30 +193,43 @@ impl DeviceSlotTable {
         })
     }
 
+    // xHCI 1.2 sect 4.6.7, 6.2.2.3, 6.2.3.3
     fn evaluate_context(
         &self,
         slot_id: u8,
         input_context_ptr: GuestAddr,
         memctx: &MemCtx,
-    ) -> TrbCompletionCode {
+    ) -> Option<TrbCompletionCode> {
         if self.slot(slot_id).is_none() {
-            return TrbCompletionCode::SlotNotEnabledError;
+            return Some(TrbCompletionCode::SlotNotEnabledError);
         }
 
-        if let Some(slot_ctx) = self
+        let input_ctx =
+            memctx.read::<InputControlContext>(input_context_ptr)?;
+
+        if let Some(output_slot_ctx) = self
             .dev_context_addr(slot_id, memctx)
             .and_then(|slot_addr| memctx.read::<SlotContext>(slot_addr))
         {
-            match slot_ctx.slot_state() {
+            Some(match output_slot_ctx.slot_state() {
                 // TODO: actually act on it
                 SlotState::Default
                 | SlotState::Addressed
-                | SlotState::Configured => TrbCompletionCode::Success,
+                | SlotState::Configured => {
+                    if input_ctx.add_context(0).unwrap() {
+                        // xHCI 1.2 sect 6.2.2.3: interrupter target & max exit latency
+                    }
+                    if input_ctx.add_context(1).unwrap() {
+                        // xHCI 1.2 sect 6.2.3.3: pay attention to max packet size
+                    }
+                    // xHCI 1.2 sect 6.2.3.3: contexts 2 through 31 are not evaluated by this command.
+                    TrbCompletionCode::Success
+                }
                 _ => TrbCompletionCode::ContextStateError,
-            }
+            })
         } else {
             // TODO: handle properly. for now just:
-            TrbCompletionCode::ContextStateError
+            Some(TrbCompletionCode::ContextStateError)
         }
     }
 }
@@ -849,11 +869,10 @@ impl PciXhci {
                 }
             }
             CommandInfo::EvaluateContext { input_context_ptr, slot_id } => {
-                let completion_code = state.dev_slots.evaluate_context(
-                    slot_id,
-                    input_context_ptr,
-                    memctx,
-                );
+                let completion_code = state
+                    .dev_slots
+                    .evaluate_context(slot_id, input_context_ptr, memctx)
+                    .unwrap_or(todo!());
                 EventInfo::CommandCompletion {
                     completion_code,
                     slot_id,
@@ -864,7 +883,9 @@ impl PciXhci {
                 slot_id,
                 endpoint_id,
                 transfer_state_preserve,
-            } => todo!(),
+            } => {
+                todo!()
+            }
             CommandInfo::StopEndpoint { slot_id, endpoint_id, suspend } => {
                 todo!()
             }
@@ -873,13 +894,19 @@ impl PciXhci {
                 dequeue_cycle_state,
                 slot_id,
                 endpoint_id,
-            } => todo!(),
-            CommandInfo::ResetDevice { slot_id } => todo!(),
+            } => {
+                todo!()
+            }
+            CommandInfo::ResetDevice { slot_id } => {
+                todo!()
+            }
             CommandInfo::ForceHeader {
                 packet_type,
                 header_info,
                 root_hub_port_number,
-            } => todo!(),
+            } => {
+                todo!()
+            }
             // optional, unimplemented
             CommandInfo::ForceEvent
             | CommandInfo::NegotiateBandwidth
