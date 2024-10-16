@@ -1,5 +1,6 @@
 //! Emulated USB Host Controller
 
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
 use crate::accessors::Accessor;
@@ -40,6 +41,10 @@ struct IntrRegSet {
     evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize,
     evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress,
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
+}
+
+enum CommandRingTaskMessage {
+    ProcessOneCommand,
 }
 
 struct DeviceSlot {}
@@ -207,30 +212,70 @@ impl DeviceSlotTable {
         let input_ctx =
             memctx.read::<InputControlContext>(input_context_ptr)?;
 
-        if let Some(output_slot_ctx) = self
-            .dev_context_addr(slot_id, memctx)
-            .and_then(|slot_addr| memctx.read::<SlotContext>(slot_addr))
-        {
-            Some(match output_slot_ctx.slot_state() {
-                // TODO: actually act on it
-                SlotState::Default
-                | SlotState::Addressed
-                | SlotState::Configured => {
-                    if input_ctx.add_context(0).unwrap() {
-                        // xHCI 1.2 sect 6.2.2.3: interrupter target & max exit latency
-                    }
-                    if input_ctx.add_context(1).unwrap() {
-                        // xHCI 1.2 sect 6.2.3.3: pay attention to max packet size
-                    }
-                    // xHCI 1.2 sect 6.2.3.3: contexts 2 through 31 are not evaluated by this command.
-                    TrbCompletionCode::Success
+        let slot_addr = self.dev_context_addr(slot_id, memctx)?;
+
+        let mut output_slot_ctx = memctx.read::<SlotContext>(slot_addr)?;
+        Some(match output_slot_ctx.slot_state() {
+            SlotState::Default
+            | SlotState::Addressed
+            | SlotState::Configured => {
+                // xHCI 1.2 sect 6.2.2.3: interrupter target & max exit latency
+                if input_ctx.add_context(0).unwrap() {
+                    let input_slot_ctx = memctx.read::<SlotContext>(
+                        input_context_ptr.offset::<InputControlContext>(1),
+                    )?;
+                    output_slot_ctx.set_interrupter_target(
+                        input_slot_ctx.interrupter_target(),
+                    );
+                    output_slot_ctx.set_max_exit_latency_micros(
+                        input_slot_ctx.max_exit_latency_micros(),
+                    );
+                    memctx.write(slot_addr, &output_slot_ctx);
                 }
-                _ => TrbCompletionCode::ContextStateError,
-            })
-        } else {
-            // TODO: handle properly. for now just:
-            Some(TrbCompletionCode::ContextStateError)
-        }
+                // xHCI 1.2 sect 6.2.3.3: pay attention to max packet size
+                if input_ctx.add_context(1).unwrap() {
+                    let input_ep0_ctx = memctx.read::<EndpointContext>(
+                        input_context_ptr
+                            .offset::<InputControlContext>(1)
+                            .offset::<SlotContext>(1),
+                    )?;
+                    let ep0_addr = slot_addr.offset::<SlotContext>(1);
+                    let mut output_ep0_ctx =
+                        memctx.read::<EndpointContext>(ep0_addr)?;
+                    output_ep0_ctx
+                        .set_max_packet_size(input_ep0_ctx.max_packet_size());
+                    memctx.write(ep0_addr, &output_ep0_ctx);
+                }
+                // per xHCI 1.2 sect 6.2.3.3: contexts 2 through 31 are not evaluated by this command.
+                TrbCompletionCode::Success
+            }
+            _ => TrbCompletionCode::ContextStateError,
+        })
+    }
+
+    fn reset_endpoint(
+        &self,
+        slot_id: u8,
+        endpoint_id: u8,
+        transfer_state_preserve: bool,
+        memctx: &MemCtx,
+    ) -> Option<TrbCompletionCode> {
+        let ep_addr = self
+            .dev_context_addr(slot_id, memctx)?
+            .offset::<SlotContext>(1)
+            .offset::<EndpointContext>(endpoint_id as usize);
+
+        let mut ep_ctx = memctx.read::<EndpointContext>(ep_addr)?;
+        Some(match ep_ctx.endpoint_state() {
+            EndpointState::Halted => TrbCompletionCode::ContextStateError,
+            _ => {
+                if transfer_state_preserve {
+                    todo!()
+                } else {
+                    todo!()
+                }
+            }
+        })
     }
 }
 
@@ -300,6 +345,7 @@ pub struct PciXhci {
 
     /// Threads for processing rings
     workers: ThreadGroup,
+    cmd_send: SyncSender<CommandRingTaskMessage>,
 }
 
 impl PciXhci {
@@ -330,13 +376,18 @@ impl PciXhci {
         let worker_acc =
             pci_state.acc_mem.child(Some(format!("xhci command ring")));
         let worker_state = state.clone();
+        // size 0: rendesvous (sender blocks until receiver receives)
+        let (cmd_send, cmd_recv) =
+            std::sync::mpsc::sync_channel::<CommandRingTaskMessage>(0);
         let worker_thread = std::thread::Builder::new()
             .name(format!("xhci command ring"))
-            .spawn(|| Self::process_command_ring(worker_state, worker_acc));
+            .spawn(|| {
+                Self::process_command_ring(cmd_recv, worker_state, worker_acc)
+            });
 
         workers.extend(core::iter::once(worker_thread)).unwrap();
 
-        Arc::new(Self { pci_state, state, workers })
+        Arc::new(Self { pci_state, state, workers, cmd_send })
     }
 
     /// Handle read of register in USB-specific PCI configuration space
@@ -743,11 +794,17 @@ impl PciXhci {
             Doorbell(0) => {
                 // xHCI 1.2 section 4.9.3, table 5-43
                 if wo.read_u32() & 0xff == 0 {
-                    let mut state = self.state.lock().unwrap();
-                    // xHCI 1.2 table 5-24: only set to 1 if R/S is 1
-                    if state.usb_cmd.run_stop() {
-                        state.command_ring_running = true;
+                    {
+                        let mut state = self.state.lock().unwrap();
+                        // xHCI 1.2 table 5-24: only set to 1 if R/S is 1
+                        if state.usb_cmd.run_stop() {
+                            state.command_ring_running = true;
+                        }
+                        // drop state lock
                     }
+                    // blocks until cmd ring task receives it
+                    self.cmd_send
+                        .send(CommandRingTaskMessage::ProcessOneCommand);
                 }
             }
             Doorbell(i) => {
@@ -757,37 +814,60 @@ impl PciXhci {
     }
 
     fn process_command_ring(
+        cmd_recv: Receiver<CommandRingTaskMessage>,
         state: Arc<Mutex<XhciState>>,
         acc_mem: Accessor<MemCtx>,
     ) {
-        // TODO: get rid of unwraps
         loop {
-            // todo!("xhci: wait for doorbell 0 signal");
-            let mut state = state.lock().unwrap();
-            if state.command_ring_running {
-                let memctx = acc_mem.access().unwrap();
-                let cmd_opt = if let Some(ref mut cmd_ring) = state.command_ring
-                {
-                    cmd_ring.update_from_guest(&memctx).unwrap();
-                    // TODO: do we do one command at a time or all available?
-                    let cmd_trb_addr = cmd_ring.current_dequeue_pointer();
-                    cmd_ring.dequeue_work_item().map(|x| (x, cmd_trb_addr))
-                } else {
-                    None
-                };
-                if let Some((Ok(cmd_desc), cmd_trb_addr)) = cmd_opt {
-                    let event_info = Self::run_command(
-                        cmd_desc.try_into().unwrap(),
-                        cmd_trb_addr,
-                        &mut state,
-                        &memctx,
-                    );
-                    state.event_rings[0]
-                        .as_mut()
-                        .expect("event ring not initialized")
-                        .enqueue(event_info.into(), &memctx)
-                        .expect("event ring: enqueue completion");
+            match cmd_recv.recv() {
+                Ok(CommandRingTaskMessage::ProcessOneCommand) => {
+                    let mut state = state.lock().unwrap();
+                    if state.command_ring_running {
+                        let Some(memctx) = acc_mem.access() else { break };
+                        let cmd_opt = if let Some(ref mut cmd_ring) =
+                            state.command_ring
+                        {
+                            if let Err(_) = cmd_ring.update_from_guest(&memctx)
+                            {
+                                break;
+                            }
+                            // TODO: do we do one command at a time or all available?
+                            let cmd_trb_addr =
+                                cmd_ring.current_dequeue_pointer();
+                            cmd_ring
+                                .dequeue_work_item()
+                                .map(|x| (x, cmd_trb_addr))
+                        } else {
+                            None
+                        };
+                        if let Some((Ok(cmd_desc), cmd_trb_addr)) = cmd_opt {
+                            match cmd_desc.try_into() {
+                                Ok(cmd) => {
+                                    let event_info = Self::run_command(
+                                        cmd,
+                                        cmd_trb_addr,
+                                        &mut state,
+                                        &memctx,
+                                    );
+                                    if let Some(evt_ring) =
+                                        state.event_rings[0].as_mut()
+                                    {
+                                        evt_ring.enqueue(
+                                            event_info.into(),
+                                            &memctx,
+                                        );
+                                    } else {
+                                        // TODO: log error: event ring not init'd before command run
+                                    }
+                                }
+                                Err(_) => {
+                                    // TODO: log error: invalid command trb
+                                }
+                            }
+                        }
+                    }
                 }
+                Err(_) => break,
             }
         }
     }
@@ -872,7 +952,8 @@ impl PciXhci {
                 let completion_code = state
                     .dev_slots
                     .evaluate_context(slot_id, input_context_ptr, memctx)
-                    .unwrap_or(todo!());
+                    // TODO: handle properly. for now just:
+                    .unwrap_or(TrbCompletionCode::ContextStateError);
                 EventInfo::CommandCompletion {
                     completion_code,
                     slot_id,
@@ -884,7 +965,20 @@ impl PciXhci {
                 endpoint_id,
                 transfer_state_preserve,
             } => {
-                todo!()
+                let completion_code = state
+                    .dev_slots
+                    .reset_endpoint(
+                        slot_id,
+                        endpoint_id,
+                        transfer_state_preserve,
+                        memctx,
+                    )
+                    .unwrap_or(TrbCompletionCode::ContextStateError);
+                EventInfo::CommandCompletion {
+                    completion_code,
+                    slot_id,
+                    cmd_trb_addr,
+                }
             }
             CommandInfo::StopEndpoint { slot_id, endpoint_id, suspend } => {
                 todo!()
