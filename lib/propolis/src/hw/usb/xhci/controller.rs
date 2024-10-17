@@ -1,5 +1,6 @@
 //! Emulated USB Host Controller
 
+use std::ops::{Deref, DerefMut};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
@@ -41,6 +42,42 @@ struct IntrRegSet {
     evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize,
     evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress,
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
+}
+
+struct WritebackGuard<'a, T: Copy> {
+    value: T,
+    addr: GuestAddr,
+    memctx: &'a MemCtx,
+    mutated: bool,
+}
+
+impl<'a, T: Copy> WritebackGuard<'a, T> {
+    pub fn new(addr: GuestAddr, memctx: &'a MemCtx) -> Option<Self> {
+        let value = memctx.read(addr)?;
+        Some(Self { value, addr, memctx, mutated: false })
+    }
+}
+
+impl<'a, T: Copy> Deref for WritebackGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<'a, T: Copy> DerefMut for WritebackGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.mutated = true;
+        &mut self.value
+    }
+}
+
+impl<'a, T: Copy> Drop for WritebackGuard<'a, T> {
+    fn drop(&mut self) {
+        if self.mutated {
+            self.memctx.write(self.addr, &self.value);
+        }
+    }
 }
 
 enum CommandRingTaskMessage {
@@ -108,10 +145,9 @@ impl DeviceSlotTable {
             // slot ctx is first element of dev context table
             if let Some(slot_ptr) = self.dev_context_addr(slot_id, memctx) {
                 if let Some(mut slot_ctx) =
-                    memctx.read::<SlotContextFirst>(slot_ptr)
+                    WritebackGuard::<SlotContextFirst>::new(slot_ptr, memctx)
                 {
                     slot_ctx.set_slot_state(SlotState::DisabledEnabled);
-                    memctx.write(slot_ptr, &slot_ctx);
                 }
             }
             self.slots[slot_id as usize] = None;
@@ -148,7 +184,7 @@ impl DeviceSlotTable {
         if self.slot(slot_id).is_none() {
             return Some(TrbCompletionCode::SlotNotEnabledError);
         }
-        let slot_ptr = self.dev_context_addr(slot_id, memctx)?;
+        let out_slot_ptr = self.dev_context_addr(slot_id, memctx)?;
         // xHCI 1.2 Figure 6-5: differences between input context indeces
         // and device context indeces.
         let mut slot_ctx = memctx.read::<SlotContext>(
@@ -165,11 +201,11 @@ impl DeviceSlotTable {
                 // copy input slot ctx to output slot ctx, and
                 // set usb device address in output slot ctx to 0
                 slot_ctx.set_usb_device_address(0);
-                memctx.write(slot_ptr, &slot_ctx);
+                memctx.write(out_slot_ptr, &slot_ctx);
                 // copy input ep0 ctx to output ep0 ctx, and
                 // set output ep0 state to running
                 ep0_ctx.set_endpoint_state(EndpointState::Running);
-                memctx.write(slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
+                memctx.write(out_slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
                 TrbCompletionCode::Success
             } else {
                 TrbCompletionCode::ContextStateError
@@ -186,11 +222,11 @@ impl DeviceSlotTable {
                 const HARDCODED_USB_ADDRESS: u8 = 1; // FIXME, obviously
                 slot_ctx.set_usb_device_address(HARDCODED_USB_ADDRESS);
                 slot_ctx.set_slot_state(SlotState::Addressed);
-                memctx.write(slot_ptr, &slot_ctx);
+                memctx.write(out_slot_ptr, &slot_ctx);
                 // copy input ep0 ctx to output ep0 ctx
                 // set output ep0 state to running
                 ep0_ctx.set_endpoint_state(EndpointState::Running);
-                memctx.write(slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
+                memctx.write(out_slot_ptr.offset::<SlotContext>(1), &ep0_ctx);
                 TrbCompletionCode::Success
             } else {
                 TrbCompletionCode::ContextStateError
@@ -214,7 +250,8 @@ impl DeviceSlotTable {
 
         let slot_addr = self.dev_context_addr(slot_id, memctx)?;
 
-        let mut output_slot_ctx = memctx.read::<SlotContext>(slot_addr)?;
+        let mut output_slot_ctx =
+            WritebackGuard::<SlotContext>::new(slot_addr, memctx)?;
         Some(match output_slot_ctx.slot_state() {
             SlotState::Default
             | SlotState::Addressed
@@ -230,7 +267,6 @@ impl DeviceSlotTable {
                     output_slot_ctx.set_max_exit_latency_micros(
                         input_slot_ctx.max_exit_latency_micros(),
                     );
-                    memctx.write(slot_addr, &output_slot_ctx);
                 }
                 // xHCI 1.2 sect 6.2.3.3: pay attention to max packet size
                 if input_ctx.add_context(1).unwrap() {
@@ -241,10 +277,11 @@ impl DeviceSlotTable {
                     )?;
                     let ep0_addr = slot_addr.offset::<SlotContext>(1);
                     let mut output_ep0_ctx =
-                        memctx.read::<EndpointContext>(ep0_addr)?;
+                        WritebackGuard::<EndpointContext>::new(
+                            ep0_addr, memctx,
+                        )?;
                     output_ep0_ctx
                         .set_max_packet_size(input_ep0_ctx.max_packet_size());
-                    memctx.write(ep0_addr, &output_ep0_ctx);
                 }
                 // per xHCI 1.2 sect 6.2.3.3: contexts 2 through 31 are not evaluated by this command.
                 TrbCompletionCode::Success
@@ -253,6 +290,7 @@ impl DeviceSlotTable {
         })
     }
 
+    // xHCI 1.2 sect 4.6.8
     fn reset_endpoint(
         &self,
         slot_id: u8,
@@ -265,15 +303,22 @@ impl DeviceSlotTable {
             .offset::<SlotContext>(1)
             .offset::<EndpointContext>(endpoint_id as usize);
 
-        let mut ep_ctx = memctx.read::<EndpointContext>(ep_addr)?;
+        let mut ep_ctx =
+            WritebackGuard::<EndpointContext>::new(ep_addr, memctx)?;
         Some(match ep_ctx.endpoint_state() {
             EndpointState::Halted => TrbCompletionCode::ContextStateError,
             _ => {
                 if transfer_state_preserve {
-                    todo!()
+                    // retry last transaction the next time the doorbell is rung,
+                    // if no other commands have been issued to the endpoint
                 } else {
-                    todo!()
+                    // reset data toggle for usb2 device / sequence number for usb3 device
+                    // reset any usb2 split transaction state on this endpoint
+                    // invalidate cached Transfer TRBs
                 }
+                ep_ctx.set_endpoint_state(EndpointState::Stopped);
+                todo!("enable doorbell register");
+                TrbCompletionCode::Success
             }
         })
     }
