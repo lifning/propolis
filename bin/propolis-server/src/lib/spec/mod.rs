@@ -27,7 +27,7 @@ use propolis_api_types::instance_spec::{
         board::{Chipset, GuestHypervisorInterface, I440Fx},
         devices::{
             NvmeDisk, PciPciBridge, QemuPvpanic as QemuPvpanicDesc,
-            SerialPortNumber, VirtioDisk, VirtioNic,
+            SerialPortNumber, UsbDevice, VirtioDisk, VirtioNic, XhciController,
         },
     },
     v0::{ComponentV0, InstanceSpecV0},
@@ -90,6 +90,8 @@ pub(crate) struct Spec {
     pub cpuid: CpuidSet,
     pub disks: BTreeMap<SpecKey, Disk>,
     pub nics: BTreeMap<SpecKey, Nic>,
+    pub xhcs: BTreeMap<SpecKey, XhciController>,
+    pub usbdevs: BTreeMap<SpecKey, UsbDevice>,
     pub boot_settings: Option<BootSettings>,
 
     pub serial: BTreeMap<SpecKey, SerialPort>,

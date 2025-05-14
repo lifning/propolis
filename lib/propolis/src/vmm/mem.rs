@@ -39,6 +39,7 @@ bitflags! {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct MapSeg {
     id: i32,
 
@@ -51,12 +52,14 @@ pub(crate) struct MapSeg {
     map_seg: Arc<Mapping>,
 }
 
+#[derive(Debug)]
 pub(crate) enum MapKind {
     Dram(MapSeg),
     Rom(MapSeg),
     MmioReserve,
 }
 
+#[derive(Debug)]
 pub(crate) struct MapEnt {
     name: String,
     kind: MapKind,
@@ -1178,6 +1181,7 @@ impl MemCtx {
                 MapKind::Rom(seg) => Some((Prot::READ, seg)),
                 MapKind::MmioReserve => None,
             }?;
+            // XXX .unwrap_or_else(|| panic!("start {start:#x} end {end:#x} addr {addr:#x} rlen {rlen:#x} ent {ent:?}"));
 
             let guest_map = SubMapping::new_base(&seg.map_guest)
                 .constrain_access(prot)
@@ -1225,6 +1229,12 @@ impl MemCtx {
             .highest_addr(|entry| matches!(entry.kind, MapKind::Dram(_)))?
             as u64;
         Some(GuestAddr(lowest)..=GuestAddr(highest))
+    }
+}
+
+impl core::fmt::Debug for MemCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        core::fmt::Debug::fmt(&self.map.lock().unwrap(), f)
     }
 }
 

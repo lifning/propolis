@@ -2,6 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -11,7 +12,7 @@ use propolis_client::{
         Board, BootOrderEntry, BootSettings, Chipset, ComponentV0, Cpuid,
         CpuidEntry, CpuidVendor, GuestHypervisorInterface, InstanceMetadata,
         InstanceSpec, MigrationFailureInjector, NvmeDisk, PciPath, SerialPort,
-        SerialPortNumber, SpecKey, VirtioDisk,
+        SerialPortNumber, SpecKey, UsbDevice, VirtioDisk, XhciController,
     },
     support::nvme_serial_from_str,
 };
@@ -56,6 +57,7 @@ pub struct VmConfig<'dr> {
     disks: Vec<DiskRequest<'dr>>,
     migration_failure: Option<MigrationFailureInjector>,
     guest_hv_interface: Option<GuestHypervisorInterface>,
+    xhc_usb_devs: BTreeMap<SpecKey, (XhciController, Vec<UsbDevice>)>,
 }
 
 impl<'dr> VmConfig<'dr> {
@@ -76,6 +78,7 @@ impl<'dr> VmConfig<'dr> {
             disks: Vec::new(),
             migration_failure: None,
             guest_hv_interface: None,
+            xhc_usb_devs: BTreeMap::new(),
         };
 
         config.boot_disk(
@@ -207,6 +210,25 @@ impl<'dr> VmConfig<'dr> {
         self
     }
 
+    pub fn xhci_controller(
+        &mut self,
+        name: SpecKey,
+        xhc: XhciController,
+    ) -> &mut Self {
+        let _old = self.xhc_usb_devs.insert(name, (xhc, Vec::new()));
+        assert!(_old.is_none());
+        self
+    }
+
+    pub fn usb_device(&mut self, usb_dev: UsbDevice) -> &mut Self {
+        self.xhc_usb_devs
+            .get_mut(&usb_dev.xhc_device)
+            .expect("must add xhc first")
+            .1
+            .push(usb_dev);
+        self
+    }
+
     pub async fn vm_spec(&self, ctx: &TestCtx) -> anyhow::Result<VmSpec> {
         let VmConfig {
             vm_name,
@@ -218,6 +240,7 @@ impl<'dr> VmConfig<'dr> {
             disks,
             migration_failure,
             guest_hv_interface,
+            xhc_usb_devs,
         } = self;
         let framework = &ctx.framework;
         let bootrom_path = framework
@@ -375,6 +398,18 @@ impl<'dr> VmConfig<'dr> {
                 ComponentV0::MigrationFailureInjector(mig.clone()),
             );
             assert!(_old.is_none());
+        }
+
+        for (xhc_key, (xhc, usb_devs)) in xhc_usb_devs {
+            spec.components
+                .insert(xhc_key.to_owned(), ComponentV0::Xhci(xhc.to_owned()));
+            for usb_dev in usb_devs {
+                let _old = spec.components.insert(
+                    format!("{xhc_key}-{}", usb_dev.root_hub_port_num).into(),
+                    ComponentV0::UsbPlaceholder(usb_dev.to_owned()),
+                );
+                assert!(_old.is_none());
+            }
         }
 
         // Generate random identifiers for this instance's timeseries metadata.
