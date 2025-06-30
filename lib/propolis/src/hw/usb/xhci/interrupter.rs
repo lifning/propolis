@@ -201,8 +201,8 @@ impl XhciInterrupter {
                 // RW1C
                 if erdp.handler_busy() {
                     regulation.evt_ring_deq_ptr.set_handler_busy(false);
-                    self.interrupts.1.notify_one();
                 }
+                self.interrupts.1.notify_one();
                 U64(erdp.0)
             }
         };
@@ -231,6 +231,7 @@ impl XhciInterrupter {
                     if !empty_before && event_ring.is_empty() {
                         // IPE should be set to 0 "when the Event Ring transitions to empty"
                         regulation.intr_pending_enable = false;
+                        self.interrupts.1.notify_one();
                     }
                 }
                 _ => (),
@@ -349,6 +350,8 @@ impl InterruptRegulation {
                 break;
             }
 
+            // FIXME - double-check correctness of conditionals here,
+            // observing some flakiness of interrupts not firing
             if guard.pci_intr.pci_intr_mode == pci::IntrMode::INTxPin
                 && guard.management.pending()
             {
