@@ -4,6 +4,7 @@
 
 //! Emulated USB Host Controller
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,6 +57,11 @@ pub struct XhciState {
     /// Interrupters, including registers and the Event Ring
     pub(super) interrupters: [interrupter::XhciInterrupter; NUM_INTRS as usize],
 
+    /// EINT in USBSTS is set when any interrupters IP changes from 0 to 1.
+    /// we give a weak reference to this to our interrupters, and set the flag
+    /// in USBSTS before reading it when it's true.
+    any_interrupt_pending_raised: Arc<AtomicBool>,
+
     pub(super) command_ring: Option<CommandRing>,
 
     /// Command Ring Control Register (CRCR).
@@ -88,11 +94,14 @@ impl XhciState {
             .with_host_controller_halted(true)
             .with_controller_not_ready(true);
 
+        let any_interrupt_pending_raised = Arc::new(AtomicBool::new(false));
+
         let pci_intr = interrupter::XhciPciIntr::new(&pci_state, log.clone());
         let interrupters = [interrupter::XhciInterrupter::new(
             0,
             pci_intr,
             vmm_hdl.clone(),
+            Arc::downgrade(&any_interrupt_pending_raised),
             log.clone(),
         )];
 
@@ -108,6 +117,7 @@ impl XhciState {
             mfindex_wrap_thread: None,
             mfindex_wrap_thread_generation: 0,
             interrupters,
+            any_interrupt_pending_raised,
             command_ring: None,
             crcr: bits::CommandRingControl(0),
             port_regs: [
@@ -124,6 +134,16 @@ impl XhciState {
             ],
             evt_data_xfer_len_accum: 0,
             queued_device_connections: vec![],
+        }
+    }
+
+    fn apply_ip_raise_to_usbsts_eint(&mut self) {
+        if self
+            .any_interrupt_pending_raised
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.usbsts.set_event_interrupt(true);
         }
     }
 }
@@ -246,7 +266,11 @@ impl PciXhci {
 
             // Operational registers
             Op(UsbCommand) => U32(self.state.lock().unwrap().usbcmd.0),
-            Op(UsbStatus) => U32(self.state.lock().unwrap().usbsts.0),
+            Op(UsbStatus) => {
+                let mut state = self.state.lock().unwrap();
+                state.apply_ip_raise_to_usbsts_eint();
+                U32(state.usbsts.0)
+            }
 
             Op(PageSize) => U32(PAGESIZE_XHCI),
 
@@ -412,7 +436,6 @@ impl PciXhci {
                                 port_id,
                             )
                         {
-                            state.usbsts.set_event_interrupt(true);
                             if let Err(e) = state.interrupters[0]
                                 .enqueue_event(evt, &memctx, false)
                             {
@@ -709,7 +732,6 @@ impl PciXhci {
                             },
                             port_id,
                         ) {
-                            state.usbsts.set_event_interrupt(true);
                             if let Err(e) = state.interrupters[0]
                                 .enqueue_event(evt, &memctx, false)
                             {
@@ -848,7 +870,6 @@ impl PciXhci {
                     };
                     if state.mfindex_wrap_thread_generation == generation {
                         let memctx = acc_mem.access().unwrap();
-                        state.usbsts.set_event_interrupt(true);
                         state.interrupters[0]
                             .enqueue_event(
                                 EventInfo::MfIndexWrap,
@@ -921,7 +942,8 @@ impl MigrateMulti for PciXhci {
         output: &mut crate::migrate::PayloadOutputs,
         ctx: &crate::migrate::MigrateCtx,
     ) -> Result<(), crate::migrate::MigrateStateError> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.apply_ip_raise_to_usbsts_eint();
 
         let XhciState {
             usbcmd,
@@ -932,6 +954,7 @@ impl MigrateMulti for PciXhci {
             mfindex_wrap_thread,
             mfindex_wrap_thread_generation,
             interrupters,
+            any_interrupt_pending_raised: _,
             command_ring,
             crcr,
             dev_slots,

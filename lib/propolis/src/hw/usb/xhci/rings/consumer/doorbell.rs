@@ -31,7 +31,6 @@ pub fn command_ring_stop(
         slot_id: SlotId::from(0),
         cmd_trb_addr,
     };
-    state.usbsts.set_event_interrupt(true);
     // xHCI 1.2 table 5-24
     if let Err(e) =
         state.interrupters[0].enqueue_event(event_info, &memctx, false)
@@ -89,19 +88,14 @@ pub fn process_transfer_ring(
                 ) {
                     slog::debug!(log, "Transfer Event: {evt_info:?}");
 
-                    if state.interrupters.get(interrupter as usize).is_some()
-                    // not an if let Some() because mut borrow for usb_sts
+                    if let Some(intr) =
+                        state.interrupters.get_mut(interrupter as usize)
                     {
-                        state
-                            .usbsts
-                            .set_event_interrupt(!block_event_interrupt);
-                        if let Err(e) = state.interrupters[interrupter as usize]
-                            .enqueue_event(
-                                evt_info,
-                                &memctx,
-                                block_event_interrupt,
-                            )
-                        {
+                        if let Err(e) = intr.enqueue_event(
+                            evt_info,
+                            &memctx,
+                            block_event_interrupt,
+                        ) {
                             slog::error!(
                                 log,
                                 "enqueueing Event Data Transfer Event failed: {e}"
@@ -168,7 +162,6 @@ pub fn process_command_ring(
                     let event_info =
                         cmd.run(cmd_trb_addr, &mut state.dev_slots, memctx);
                     slog::debug!(log, "Command result: {event_info:?}");
-                    state.usbsts.set_event_interrupt(true);
                     if let Err(e) = state.interrupters[0]
                         .enqueue_event(event_info, &memctx, false)
                     {
