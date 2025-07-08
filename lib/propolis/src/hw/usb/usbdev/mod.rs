@@ -6,7 +6,11 @@ pub mod descriptor;
 pub mod requests;
 
 pub mod demo_state_tracker {
-    use crate::{common::GuestRegion, vmm::MemCtx};
+    use crate::{
+        common::{GuestData, GuestRegion},
+        hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate,
+        vmm::MemCtx,
+    };
 
     use super::{
         descriptor::*,
@@ -17,6 +21,8 @@ pub mod demo_state_tracker {
     #[derive(Default)]
     pub struct NullUsbDevice {
         current_setup: Option<SetupData>,
+        payload: Vec<u8>,
+        bytes_transferred: usize,
     }
 
     impl NullUsbDevice {
@@ -95,29 +101,68 @@ pub mod demo_state_tracker {
             }
         }
 
-        pub fn set_request(&mut self, req: SetupData) -> Option<SetupData> {
+        pub fn set_request(
+            &mut self,
+            req: SetupData,
+            log: &slog::Logger,
+        ) -> Option<SetupData> {
+            match req.direction() {
+                RequestDirection::DeviceToHost => {
+                    self.payload = self.payload_for(&req, log);
+                }
+                RequestDirection::HostToDevice => {
+                    self.payload.clear();
+                }
+            }
+            self.bytes_transferred = 0;
             self.current_setup.replace(req)
         }
 
         pub fn data_stage(
             &mut self,
-            region: GuestRegion,
+            data_buffer: PointerOrImmediate,
             memctx: &MemCtx,
-            log: &slog::Logger,
         ) -> Result<usize, &'static str> {
             if let Some(setup_data) = self.current_setup.as_ref() {
-                match setup_data.direction() {
+                let count = match setup_data.direction() {
                     RequestDirection::DeviceToHost => {
-                        let mut payload = vec![0u8; region.1];
-                        let count =
-                            self.payload_for(setup_data, &mut payload, log);
-                        memctx.write_many(region.0, &payload[..count]);
-                        Ok(count)
+                        let PointerOrImmediate::Pointer(region) = data_buffer
+                        else {
+                            return Err(
+                                "given an immediate for out data stage",
+                            );
+                        };
+                        memctx
+                            .write_from(
+                                region.0,
+                                &self.payload[self.bytes_transferred..],
+                                region.1,
+                            )
+                            .ok_or("data stage write failed")?
                     }
-                    RequestDirection::HostToDevice => {
-                        Err("host-to-device unimplemented")
-                    }
-                }
+                    RequestDirection::HostToDevice => match data_buffer {
+                        PointerOrImmediate::Pointer(GuestRegion(ptr, len)) => {
+                            self.payload
+                                .resize(self.bytes_transferred + len, 0u8);
+                            memctx
+                                .read_into(
+                                    ptr,
+                                    &mut GuestData::from(
+                                        &mut self.payload
+                                            [self.bytes_transferred..],
+                                    ),
+                                    len,
+                                )
+                                .ok_or("data stage read failed")?
+                        }
+                        PointerOrImmediate::Immediate(arr, len) => {
+                            self.payload.extend_from_slice(&arr[..len]);
+                            len
+                        }
+                    },
+                };
+                self.bytes_transferred += count;
+                Ok(count)
             } else {
                 Err("no setup data")
             }
@@ -126,9 +171,8 @@ pub mod demo_state_tracker {
         fn payload_for(
             &self,
             setup_data: &SetupData,
-            dest_buf: &mut [u8],
             log: &slog::Logger,
-        ) -> usize {
+        ) -> Vec<u8> {
             match setup_data.request() {
                 Request::Standard(StandardRequest::GetDescriptor) => {
                     let [desc, idx] = setup_data.value().to_be_bytes();
@@ -151,37 +195,64 @@ pub mod demo_state_tracker {
                                     log,
                                     "usb: unimplemented descriptor: GetDescriptor({x:?})"
                                 );
-                                return 0;
+                                return Vec::new();
                             }
                             None => {
                                 slog::error!(
                                     log,
                                     "usb: unknown descriptor type: GetDescriptor({desc:#x})"
                                 );
-                                return 0;
+                                return Vec::new();
                             }
                         };
                     slog::debug!(log, "usb: GET_DESCRIPTOR({descriptor:?})");
-                    descriptor
-                        .serialize()
-                        .zip(dest_buf.iter_mut())
-                        .map(|(src, dest)| *dest = src)
-                        .count()
+                    descriptor.serialize().collect()
+                }
+                Request::Standard(StandardRequest::GetStatus) => {
+                    // USB 2.0 sect 9.4.5 - two-byte response where lowest-order
+                    // bits are 'self powered' and 'remote wakeup'
+                    let attrib = Self::config_descriptor().attributes;
+                    (attrib.self_powered() as u16
+                        | (attrib.remote_wakeup() as u16 * 2))
+                        .to_le_bytes()
+                        .to_vec()
                 }
                 Request::Standard(x) => {
                     slog::error!(
                         log,
                         "usb: unimplemented request: Standard({x:?})"
                     );
-                    return 0;
+                    return Vec::new();
                 }
                 Request::Other(x) => {
                     slog::error!(
                         log,
-                        "usb: unimplementd request: Other({x:#x})"
+                        "usb: unimplemented request: Other({x:#x})"
                     );
-                    return 0;
+                    return Vec::new();
                 }
+            }
+        }
+
+        pub fn status_stage(
+            &mut self,
+            status_direction: RequestDirection,
+            log: &slog::Logger,
+        ) {
+            if let Some(setup) = self.current_setup.take() {
+                if status_direction == setup.direction() {
+                    slog::warn!(log, "usb: Status and Setup directions must be opposite, but both are {status_direction:?}");
+                }
+                if setup.direction() == RequestDirection::HostToDevice {
+                    slog::error!(
+                        log,
+                        "TODO: parse {:#x?} for {:?}",
+                        &self.payload,
+                        setup.request()
+                    );
+                }
+                self.payload.clear();
+                self.bytes_transferred = 0;
             }
         }
 

@@ -4,7 +4,9 @@
 
 use crate::common::{GuestAddr, GuestRegion};
 use crate::hw::usb::usbdev::demo_state_tracker::NullUsbDevice;
-use crate::hw::usb::usbdev::requests::{Request, SetupData, StandardRequest};
+use crate::hw::usb::usbdev::requests::{
+    Request, RequestDirection, SetupData, StandardRequest,
+};
 use crate::hw::usb::xhci::bits::ring_data::{
     Trb, TrbDirection, TrbTransferType, TrbType,
 };
@@ -100,6 +102,16 @@ pub enum PointerOrImmediate {
     #[allow(dead_code)]
     // have not yet implemented anything with out payloads that can use this
     Immediate([u8; 8], usize),
+}
+
+impl PointerOrImmediate {
+    /// size in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            PointerOrImmediate::Pointer(GuestRegion(_, len))
+            | PointerOrImmediate::Immediate(_, len) => *len,
+        }
+    }
 }
 
 impl From<&Trb> for PointerOrImmediate {
@@ -407,6 +419,12 @@ impl TransferInfo {
                 interrupt_target_on_completion,
                 transfer_type,
             } => {
+                if transfer_type == TrbTransferType::Reserved {
+                    slog::error!(
+                        log,
+                        "usb: Setup Stage TRT reserved ({data:x?})"
+                    );
+                }
                 // xHCI 1.2 sect 4.6.5
                 let completion_code = if matches!(
                     data.request(),
@@ -415,15 +433,9 @@ impl TransferInfo {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
                 } else {
-                    dummy_usbdev_stub.set_request(data);
+                    dummy_usbdev_stub.set_request(data, log);
                     TrbCompletionCode::Success
                 };
-                if transfer_type != TrbTransferType::InDataStage {
-                    slog::warn!(
-                        log,
-                        "unimplemented Setup Stage TRT: {transfer_type:?}"
-                    );
-                }
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {
@@ -446,95 +458,93 @@ impl TransferInfo {
                 direction,
                 payload,
                 event_data,
-            } => match data_buffer {
-                PointerOrImmediate::Pointer(guest_region) => {
-                    // TODO: Out
-                    if direction != TrbDirection::In {
-                        slog::warn!(
-                            log,
-                            "unimplemented Data Stage direction {direction:?}"
-                        );
-                    }
-                    if !payload.is_empty() {
-                        slog::warn!(
-                            log,
-                            "ignoring {} Normal TDs in Data Stage",
-                            payload.len(),
-                        )
-                    }
+            } => {
+                // TODO: Out
+                if direction != TrbDirection::In {
+                    slog::warn!(
+                        log,
+                        "unimplemented Data Stage direction {direction:?}"
+                    );
+                }
+                if !payload.is_empty() {
+                    slog::warn!(
+                        log,
+                        "ignoring {} Normal TDs in Data Stage",
+                        payload.len(),
+                    )
+                }
 
-                    let (trb_transfer_length, completion_code) =
-                        match dummy_usbdev_stub.data_stage(
-                            guest_region,
-                            &memctx,
-                            &log,
-                        ) {
-                            Ok(x) => (x as u32, TrbCompletionCode::Success),
-                            Err(e) => {
-                                slog::error!(log, "USB Data Stage: {e}");
-                                (0, TrbCompletionCode::UsbTransactionError)
-                            }
-                        };
-                    // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
-                    // the number of bytes transferred are added to the EDTLA
-                    // (we wrap to 24-bits before using the value elsewhere)
-                    *evt_data_xfer_len_accum += trb_transfer_length;
+                let (trb_transfer_length, completion_code) =
+                    match dummy_usbdev_stub.data_stage(data_buffer, &memctx) {
+                        Ok(x) => (x as u32, TrbCompletionCode::Success),
+                        Err(e) => {
+                            slog::error!(log, "USB Data Stage: {e}");
+                            (0, TrbCompletionCode::UsbTransactionError)
+                        }
+                    };
+                // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
+                // the number of bytes transferred are added to the EDTLA
+                // (we wrap to 24-bits before using the value elsewhere)
+                *evt_data_xfer_len_accum += trb_transfer_length;
 
-                    interrupt_target_on_completion
-                        .map(|interrupter| TransferEventParams {
-                            evt_info: EventInfo::Transfer {
-                                trb_pointer,
-                                completion_code,
-                                trb_transfer_length,
-                                slot_id,
-                                endpoint_id,
-                                event_data: false,
-                            },
-                            interrupter,
-                            block_event_interrupt: false,
-                        })
-                        .into_iter()
-                        .chain(event_data.and_then(
-                            |TDEventData {
-                                 event_data,
-                                 interrupt_target_on_completion,
-                                 block_event_interrupt,
-                             }| {
-                                interrupt_target_on_completion.map(
-                                    |interrupter| TransferEventParams {
-                                        evt_info: EventInfo::Transfer {
-                                            trb_pointer: GuestAddr(event_data),
-                                            completion_code:
-                                                TrbCompletionCode::Success,
-                                            trb_transfer_length: 0,
-                                            slot_id,
-                                            endpoint_id,
-                                            event_data: true,
-                                        },
-                                        interrupter,
-                                        block_event_interrupt,
+                interrupt_target_on_completion
+                    .map(|interrupter| TransferEventParams {
+                        evt_info: EventInfo::Transfer {
+                            trb_pointer,
+                            completion_code,
+                            trb_transfer_length,
+                            slot_id,
+                            endpoint_id,
+                            event_data: false,
+                        },
+                        interrupter,
+                        block_event_interrupt: false,
+                    })
+                    .into_iter()
+                    .chain(event_data.and_then(
+                        |TDEventData {
+                             event_data,
+                             interrupt_target_on_completion,
+                             block_event_interrupt,
+                         }| {
+                            interrupt_target_on_completion.map(|interrupter| {
+                                TransferEventParams {
+                                    evt_info: EventInfo::Transfer {
+                                        trb_pointer: GuestAddr(event_data),
+                                        completion_code:
+                                            TrbCompletionCode::Success,
+                                        trb_transfer_length: 0,
+                                        slot_id,
+                                        endpoint_id,
+                                        event_data: true,
                                     },
-                                )
-                            },
-                        ))
-                        .collect()
-                }
-                PointerOrImmediate::Immediate(..) => {
-                    slog::error!(log, "Immediate data stage TRB unimplemented");
-                    Vec::new()
-                }
-            },
+                                    interrupter,
+                                    block_event_interrupt,
+                                }
+                            })
+                        },
+                    ))
+                    .collect()
+            }
             TransferInfo::StatusStage {
                 interrupt_target_on_completion,
                 direction,
                 event_data,
             } => {
-                if direction != TrbDirection::In {
+                // TODO: In
+                if direction != TrbDirection::Out {
                     slog::warn!(
                         log,
                         "unimplemented Status Stage direction {direction:?}"
                     );
                 }
+
+                let req_dir = match direction {
+                    TrbDirection::Out => RequestDirection::HostToDevice,
+                    TrbDirection::In => RequestDirection::DeviceToHost,
+                };
+                dummy_usbdev_stub.status_stage(req_dir, log);
+
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {

@@ -6,7 +6,7 @@ use bitstruct::bitstruct;
 use strum::FromRepr;
 
 #[repr(u8)]
-#[derive(FromRepr, Debug)]
+#[derive(FromRepr, Debug, PartialEq, Eq)]
 pub enum RequestDirection {
     HostToDevice = 0,
     DeviceToHost = 1,
