@@ -433,7 +433,7 @@ impl TransferInfo {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
                 } else {
-                    dummy_usbdev_stub.set_request(data, log);
+                    dummy_usbdev_stub.setup_stage(data, log);
                     TrbCompletionCode::Success
                 };
                 interrupt_target_on_completion
@@ -459,13 +459,11 @@ impl TransferInfo {
                 payload,
                 event_data,
             } => {
-                // TODO: Out
-                if direction != TrbDirection::In {
-                    slog::warn!(
-                        log,
-                        "unimplemented Data Stage direction {direction:?}"
-                    );
-                }
+                let req_dir = match direction {
+                    TrbDirection::Out => RequestDirection::HostToDevice,
+                    TrbDirection::In => RequestDirection::DeviceToHost,
+                };
+
                 if !payload.is_empty() {
                     slog::warn!(
                         log,
@@ -475,7 +473,11 @@ impl TransferInfo {
                 }
 
                 let (trb_transfer_length, completion_code) =
-                    match dummy_usbdev_stub.data_stage(data_buffer, &memctx) {
+                    match dummy_usbdev_stub.data_stage(
+                        data_buffer,
+                        req_dir,
+                        &memctx,
+                    ) {
                         Ok(x) => (x as u32, TrbCompletionCode::Success),
                         Err(e) => {
                             slog::error!(log, "USB Data Stage: {e}");
@@ -511,8 +513,10 @@ impl TransferInfo {
                                 TransferEventParams {
                                     evt_info: EventInfo::Transfer {
                                         trb_pointer: GuestAddr(event_data),
-                                        completion_code:
-                                            TrbCompletionCode::Success,
+                                        // xHCI 1.2 sect 4.11.5.2: Event Data
+                                        // inherits the completion code of the
+                                        // previous TRB
+                                        completion_code,
                                         trb_transfer_length: 0,
                                         slot_id,
                                         endpoint_id,
@@ -531,25 +535,25 @@ impl TransferInfo {
                 direction,
                 event_data,
             } => {
-                // TODO: In
-                if direction != TrbDirection::Out {
-                    slog::warn!(
-                        log,
-                        "unimplemented Status Stage direction {direction:?}"
-                    );
-                }
-
                 let req_dir = match direction {
                     TrbDirection::Out => RequestDirection::HostToDevice,
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
-                dummy_usbdev_stub.status_stage(req_dir, log);
+
+                let completion_code =
+                    match dummy_usbdev_stub.status_stage(req_dir, log) {
+                        Ok(()) => TrbCompletionCode::Success,
+                        Err(e) => {
+                            slog::error!(log, "USB Status Stage: {e}");
+                            TrbCompletionCode::UsbTransactionError
+                        }
+                    };
 
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {
                             trb_pointer,
-                            completion_code: TrbCompletionCode::Success,
+                            completion_code,
                             trb_transfer_length: 0,
                             slot_id,
                             endpoint_id,
@@ -569,8 +573,7 @@ impl TransferInfo {
                                 TransferEventParams {
                                     evt_info: EventInfo::Transfer {
                                         trb_pointer: GuestAddr(event_data),
-                                        completion_code:
-                                            TrbCompletionCode::Success,
+                                        completion_code,
                                         trb_transfer_length: 0,
                                         slot_id,
                                         endpoint_id,

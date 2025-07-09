@@ -101,7 +101,7 @@ pub mod demo_state_tracker {
             }
         }
 
-        pub fn set_request(
+        pub fn setup_stage(
             &mut self,
             req: SetupData,
             log: &slog::Logger,
@@ -121,9 +121,15 @@ pub mod demo_state_tracker {
         pub fn data_stage(
             &mut self,
             data_buffer: PointerOrImmediate,
+            data_direction: RequestDirection,
             memctx: &MemCtx,
         ) -> Result<usize, &'static str> {
             if let Some(setup_data) = self.current_setup.as_ref() {
+                if data_direction != setup_data.direction() {
+                    return Err(
+                        "mismatched setup and data stage transfer direction",
+                    );
+                }
                 let count = match setup_data.direction() {
                     RequestDirection::DeviceToHost => {
                         let PointerOrImmediate::Pointer(region) = data_buffer
@@ -164,7 +170,49 @@ pub mod demo_state_tracker {
                 self.bytes_transferred += count;
                 Ok(count)
             } else {
-                Err("no setup data")
+                Err("no setup data ahead of data stage")
+            }
+        }
+
+        pub fn status_stage(
+            &mut self,
+            status_direction: RequestDirection,
+            log: &slog::Logger,
+        ) -> Result<(), &'static str> {
+            if let Some(setup) = self.current_setup.take() {
+                if status_direction == setup.direction() {
+                    slog::warn!(log, "usb: Status and Setup directions must be opposite, but both are {status_direction:?}");
+                }
+
+                let result = match setup.direction() {
+                    RequestDirection::HostToDevice => match setup.request() {
+                        Request::Standard(
+                            StandardRequest::SetConfiguration,
+                        ) => self.set_configuration(),
+                        x => {
+                            slog::error!(
+                                log,
+                                "usb: unimplemented request: {x:?}"
+                            );
+                            Err("unimplemented request")
+                        }
+                    },
+                    RequestDirection::DeviceToHost => Ok(()),
+                };
+
+                self.payload.clear();
+                self.bytes_transferred = 0;
+                result
+            } else {
+                Err("no setup stage before status stage")
+            }
+        }
+
+        fn set_configuration(&mut self) -> Result<(), &'static str> {
+            if self.payload.is_empty() {
+                Ok(())
+            } else {
+                Err("non-empty payload for SET_CONFIGURATION request")
             }
         }
 
@@ -231,28 +279,6 @@ pub mod demo_state_tracker {
                     );
                     return Vec::new();
                 }
-            }
-        }
-
-        pub fn status_stage(
-            &mut self,
-            status_direction: RequestDirection,
-            log: &slog::Logger,
-        ) {
-            if let Some(setup) = self.current_setup.take() {
-                if status_direction == setup.direction() {
-                    slog::warn!(log, "usb: Status and Setup directions must be opposite, but both are {status_direction:?}");
-                }
-                if setup.direction() == RequestDirection::HostToDevice {
-                    slog::error!(
-                        log,
-                        "TODO: parse {:#x?} for {:?}",
-                        &self.payload,
-                        setup.request()
-                    );
-                }
-                self.payload.clear();
-                self.bytes_transferred = 0;
             }
         }
 
