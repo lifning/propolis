@@ -433,8 +433,13 @@ impl TransferInfo {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
                 } else {
-                    dummy_usbdev_stub.setup_stage(data, log);
-                    TrbCompletionCode::Success
+                    match dummy_usbdev_stub.setup_stage(data) {
+                        Ok(()) => TrbCompletionCode::Success,
+                        Err(e) => {
+                            slog::error!(log, "USB Setup Stage: {e}");
+                            TrbCompletionCode::UsbTransactionError
+                        }
+                    }
                 };
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
@@ -541,7 +546,7 @@ impl TransferInfo {
                 };
 
                 let completion_code =
-                    match dummy_usbdev_stub.status_stage(req_dir, log) {
+                    match dummy_usbdev_stub.status_stage(req_dir) {
                         Ok(()) => TrbCompletionCode::Success,
                         Err(e) => {
                             slog::error!(log, "USB Status Stage: {e}");
