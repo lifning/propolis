@@ -3,24 +3,21 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::{
-    common::{GuestData, GuestRegion},
-    hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate,
-    vmm::MemCtx,
+    hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate, vmm::MemCtx,
 };
 
 use super::{
     descriptor::*,
+    endpoint::{control::ControlRequestInfo, Endpoint},
     probes,
     requests::{Request, RequestDirection, SetupData, StandardRequest},
-    {Error, Result},
+    Error, Result,
 };
 
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 #[derive(Default)]
 pub struct NullUsbDevice {
-    current_setup: Option<SetupData>,
-    payload: Vec<u8>,
-    bytes_transferred: usize,
+    control_endpoint: Endpoint<ControlRequestInfo>,
 }
 
 impl NullUsbDevice {
@@ -99,18 +96,13 @@ impl NullUsbDevice {
         }
     }
 
-    pub fn setup_stage(&mut self, req: SetupData) -> Result<()> {
-        match req.direction() {
-            RequestDirection::DeviceToHost => {
-                self.payload = self.payload_for(&req)?;
-            }
-            RequestDirection::HostToDevice => {
-                self.payload.clear();
-            }
-        }
-        self.bytes_transferred = 0;
-        self.current_setup = Some(req);
-        Ok(())
+    pub fn setup_stage(&mut self, setup: SetupData) -> Result<()> {
+        // TODO: improve api
+        let payload = match setup.direction() {
+            RequestDirection::DeviceToHost => self.payload_for(&setup)?,
+            RequestDirection::HostToDevice => Vec::new(),
+        };
+        self.control_endpoint.setup_stage(setup, payload)
     }
 
     pub fn data_stage(
@@ -119,90 +111,22 @@ impl NullUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize> {
-        if let Some(setup_data) = self.current_setup.as_ref() {
-            if data_direction != setup_data.direction() {
-                return Err(Error::SetupVsDataDirectionMismatch(
-                    setup_data.direction(),
-                    data_direction,
-                ));
-            }
-            let count = match setup_data.direction() {
-                RequestDirection::DeviceToHost => {
-                    let PointerOrImmediate::Pointer(region) = data_buffer
-                    else {
-                        return Err(Error::ImmediateParameterForOutDataStage);
-                    };
-                    memctx
-                        .write_from(
-                            region.0,
-                            &self.payload[self.bytes_transferred..],
-                            region.1,
-                        )
-                        .ok_or(Error::DataStageWriteFailed)?
-                }
-                RequestDirection::HostToDevice => match data_buffer {
-                    PointerOrImmediate::Pointer(GuestRegion(ptr, len)) => {
-                        self.payload.resize(self.bytes_transferred + len, 0u8);
-                        memctx
-                            .read_into(
-                                ptr,
-                                &mut GuestData::from(
-                                    &mut self.payload[self.bytes_transferred..],
-                                ),
-                                len,
-                            )
-                            .ok_or(Error::DataStageReadFailed)?
-                    }
-                    PointerOrImmediate::Immediate(arr, len) => {
-                        self.payload.extend_from_slice(&arr[..len]);
-                        len
-                    }
-                },
-            };
-            self.bytes_transferred += count;
-            Ok(count)
-        } else {
-            Err(Error::NoSetupStageBefore("Data Stage"))
-        }
+        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
     }
 
     pub fn status_stage(
         &mut self,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if let Some(setup) = self.current_setup.take() {
-            if status_direction == setup.direction() {
-                return Err(Error::SetupVsStatusDirectionMatch(
-                    status_direction,
-                ));
-            }
-
-            let result = match setup.direction() {
-                RequestDirection::HostToDevice => match setup.request() {
-                    Request::Standard(StandardRequest::SetConfiguration) => {
-                        self.set_configuration()
-                    }
-                    x => Err(Error::UnimplementedRequest(x)),
-                },
-                RequestDirection::DeviceToHost => Ok(()),
-            };
-
-            self.payload.clear();
-            self.bytes_transferred = 0;
-            result
-        } else {
-            Err(Error::NoSetupStageBefore("Status Stage"))
-        }
-    }
-
-    fn set_configuration(&mut self) -> Result<()> {
-        if self.payload.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::InvalidPayloadForRequest(
-                Request::Standard(StandardRequest::SetConfiguration),
-                self.payload.clone(),
-            ))
+        match self.control_endpoint.status_stage(status_direction)? {
+            Some(x) => match x {
+                ControlRequestInfo::None => unreachable!(),
+                ControlRequestInfo::SetConfiguration { configuration: _ } => {
+                    // TODO: check config value
+                    Ok(())
+                }
+            },
+            None => Ok(()),
         }
     }
 
@@ -250,20 +174,28 @@ impl NullUsbDevice {
         &mut self,
         value: &super::migrate::UsbDeviceV1,
     ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
-        let super::migrate::UsbDeviceV1 { device_type, current_setup } = value;
+        let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
         if *device_type != super::migrate::UsbDeviceTypeV1::Null {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 format!("USB device type mismatch {device_type:?} != Null"),
             ));
         }
-        self.current_setup = current_setup.map(|x| SetupData(x));
+        if endpoints.len() != 1 {
+            return Err(crate::migrate::MigrateStateError::ImportFailed(
+                format!(
+                    "wrong number of USB endpoints: {} != 1",
+                    endpoints.len()
+                ),
+            ));
+        }
+        self.control_endpoint.import(&endpoints[0])?;
         Ok(())
     }
 
     pub fn export(&self) -> super::migrate::UsbDeviceV1 {
         super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
-            current_setup: self.current_setup.as_ref().map(|x| x.0),
+            endpoints: vec![self.control_endpoint.export()],
         }
     }
 }

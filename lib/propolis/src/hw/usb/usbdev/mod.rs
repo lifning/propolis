@@ -9,6 +9,7 @@ pub mod descriptor;
 pub mod requests;
 
 pub mod demo_state_tracker;
+pub mod endpoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,6 +45,8 @@ mod probes {
 pub mod migrate {
     use serde::{Deserialize, Serialize};
 
+    use super::endpoint::migrate::EndpointV1;
+
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
     pub enum UsbDeviceTypeV1 {
         Null,
@@ -52,6 +55,7 @@ pub mod migrate {
     #[derive(Serialize, Deserialize)]
     pub struct UsbDeviceV1 {
         pub device_type: UsbDeviceTypeV1,
-        pub current_setup: Option<u64>,
+        // TODO: map endpoint ID
+        pub endpoints: Vec<EndpointV1>,
     }
 }
