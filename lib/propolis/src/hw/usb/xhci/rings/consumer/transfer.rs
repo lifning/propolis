@@ -433,7 +433,7 @@ impl TransferInfo {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
                 } else {
-                    match dummy_usbdev_stub.setup_stage(data) {
+                    match dummy_usbdev_stub.setup_stage(endpoint_id, data) {
                         Ok(()) => TrbCompletionCode::Success,
                         Err(e) => {
                             slog::error!(log, "USB Setup Stage: {e}");
@@ -479,6 +479,7 @@ impl TransferInfo {
 
                 let (trb_transfer_length, completion_code) =
                     match dummy_usbdev_stub.data_stage(
+                        endpoint_id,
                         data_buffer,
                         req_dir,
                         &memctx,
@@ -545,14 +546,15 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                let completion_code =
-                    match dummy_usbdev_stub.status_stage(req_dir) {
-                        Ok(()) => TrbCompletionCode::Success,
-                        Err(e) => {
-                            slog::error!(log, "USB Status Stage: {e}");
-                            TrbCompletionCode::UsbTransactionError
-                        }
-                    };
+                let completion_code = match dummy_usbdev_stub
+                    .status_stage(endpoint_id, req_dir)
+                {
+                    Ok(()) => TrbCompletionCode::Success,
+                    Err(e) => {
+                        slog::error!(log, "USB Status Stage: {e}");
+                        TrbCompletionCode::UsbTransactionError
+                    }
+                };
 
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {

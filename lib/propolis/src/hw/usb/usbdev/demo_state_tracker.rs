@@ -96,7 +96,11 @@ impl NullUsbDevice {
         }
     }
 
-    pub fn setup_stage(&mut self, setup: SetupData) -> Result<()> {
+    pub fn setup_stage(
+        &mut self,
+        endpoint_id: u8,
+        setup: SetupData,
+    ) -> Result<()> {
         // TODO: improve api
         let payload = match setup.direction() {
             RequestDirection::DeviceToHost => self.payload_for(&setup)?,
@@ -107,6 +111,7 @@ impl NullUsbDevice {
 
     pub fn data_stage(
         &mut self,
+        endpoint_id: u8,
         data_buffer: PointerOrImmediate,
         data_direction: RequestDirection,
         memctx: &MemCtx,
@@ -116,6 +121,7 @@ impl NullUsbDevice {
 
     pub fn status_stage(
         &mut self,
+        endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()> {
         match self.control_endpoint.status_stage(status_direction)? {
@@ -180,22 +186,22 @@ impl NullUsbDevice {
                 format!("USB device type mismatch {device_type:?} != Null"),
             ));
         }
-        if endpoints.len() != 1 {
+        if let Some(ep) = endpoints.get(&0) {
+            self.control_endpoint.import(ep)?;
+        } else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!(
-                    "wrong number of USB endpoints: {} != 1",
-                    endpoints.len()
-                ),
+                format!("USB endpoint 0 missing"),
             ));
         }
-        self.control_endpoint.import(&endpoints[0])?;
         Ok(())
     }
 
     pub fn export(&self) -> super::migrate::UsbDeviceV1 {
         super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
-            endpoints: vec![self.control_endpoint.export()],
+            endpoints: [(0, self.control_endpoint.export())]
+                .into_iter()
+                .collect(),
         }
     }
 }
