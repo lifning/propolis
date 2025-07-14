@@ -43,9 +43,9 @@ mod probes {
 }
 
 pub mod migrate {
-    use serde::{Deserialize, Serialize};
-
     use super::endpoint::migrate::EndpointV1;
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
     pub enum UsbDeviceTypeV1 {
@@ -55,7 +55,6 @@ pub mod migrate {
     #[derive(Serialize, Deserialize)]
     pub struct UsbDeviceV1 {
         pub device_type: UsbDeviceTypeV1,
-        // TODO: map endpoint ID
-        pub endpoints: Vec<EndpointV1>,
+        pub endpoints: BTreeMap<u8, EndpointV1>,
     }
 }
