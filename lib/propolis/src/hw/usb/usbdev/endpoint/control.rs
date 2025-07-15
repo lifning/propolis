@@ -4,12 +4,9 @@
 
 use crate::hw::usb::usbdev::requests::{Request, SetupData, StandardRequest};
 
-pub type ControlEndpoint = super::Endpoint<ControlRequestInfo>;
+pub type ControlEndpoint = super::Endpoint<ControlRequestInfo, super::InAndOut>;
 
-#[derive(Default)]
 pub enum ControlRequestInfo {
-    #[default]
-    None,
     SetConfiguration {
         /// USB 2.0 sect 9.4.7: The lower byte of the wValue field specifies
         /// the desired configuration. This configuration value must be zero or

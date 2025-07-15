@@ -13,7 +13,9 @@ pub mod endpoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("mismatched Setup and Data Stage transfer direction in transfer: {0:?} != {1:?}")]
+    #[error("mismatched Endpoint and Setup Stage transfer direction in transfer: {0:?} != {1:?}")]
+    EndpointVsSetupDirectionMismatch(RequestDirection, RequestDirection),
+    #[error("mismatched Setup Stage and Data Stage transfer direction in transfer: {0:?} != {1:?}")]
     SetupVsDataDirectionMismatch(RequestDirection, RequestDirection),
     #[error("given an immediate for Out Data Stage")]
     ImmediateParameterForOutDataStage,
@@ -23,7 +25,7 @@ pub enum Error {
     DataStageReadFailed,
     #[error("expected Setup Stage before {0}")]
     NoSetupStageBefore(&'static str),
-    #[error("matched Setup and Status Stage transfer direction {0:?}")]
+    #[error("matched Setup Stage and Status Stage transfer direction {0:?}")]
     SetupVsStatusDirectionMatch(RequestDirection),
     #[error("unimplemented request {0:?}")]
     UnimplementedRequest(Request),
@@ -33,6 +35,8 @@ pub enum Error {
     UnimplementedDescriptor(DescriptorType),
     #[error("unknown descriptor type: {0:#x}")]
     UnknownDescriptorType(u8),
+    #[error("missing payload for IN request: {0:?}")]
+    MissingPayloadForInRequest(Request),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

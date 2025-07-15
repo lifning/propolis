@@ -14,19 +14,54 @@ use super::{Error, Result};
 pub mod control;
 pub mod interrupt;
 
-#[derive(Default)]
-pub struct Endpoint<T>
+pub struct In;
+pub struct Out;
+pub struct InAndOut;
+
+pub trait EndpointRequestDirectionMarker {
+    const DIR: Option<RequestDirection>;
+}
+impl EndpointRequestDirectionMarker for In {
+    const DIR: Option<RequestDirection> = Some(RequestDirection::DeviceToHost);
+}
+impl EndpointRequestDirectionMarker for Out {
+    const DIR: Option<RequestDirection> = Some(RequestDirection::HostToDevice);
+}
+impl EndpointRequestDirectionMarker for InAndOut {
+    const DIR: Option<RequestDirection> = None;
+}
+
+pub struct Endpoint<T, Dir>
 where
     T: TryFrom<(SetupData, Vec<u8>)>,
     super::Error: From<T::Error>,
+    Dir: EndpointRequestDirectionMarker,
 {
     current_setup: Option<SetupData>,
     payload: Vec<u8>,
     bytes_transferred: usize,
     _spooky: PhantomData<T>,
+    _2spooky: PhantomData<Dir>,
 }
 
-impl<T> Endpoint<T>
+impl<T, Dir> Default for Endpoint<T, Dir>
+where
+    T: TryFrom<(SetupData, Vec<u8>)>,
+    super::Error: From<T::Error>,
+    Dir: EndpointRequestDirectionMarker,
+{
+    fn default() -> Self {
+        Self {
+            current_setup: None,
+            payload: Vec::new(),
+            bytes_transferred: 0,
+            _spooky: PhantomData,
+            _2spooky: PhantomData,
+        }
+    }
+}
+
+impl<T> Endpoint<T, In>
 where
     T: TryFrom<(SetupData, Vec<u8>)>,
     super::Error: From<T::Error>,
@@ -36,6 +71,58 @@ where
         setup: SetupData,
         payload: Vec<u8>,
     ) -> Result<()> {
+        self.setup_stage_inner(setup, payload)
+    }
+}
+
+impl<T> Endpoint<T, Out>
+where
+    T: TryFrom<(SetupData, Vec<u8>)>,
+    super::Error: From<T::Error>,
+{
+    pub fn setup_stage(&mut self, setup: SetupData) -> Result<()> {
+        self.setup_stage_inner(setup, Vec::new())
+    }
+}
+
+impl<T> Endpoint<T, InAndOut>
+where
+    T: TryFrom<(SetupData, Vec<u8>)>,
+    super::Error: From<T::Error>,
+{
+    pub fn setup_stage(
+        &mut self,
+        setup: SetupData,
+        payload: Option<Vec<u8>>,
+    ) -> Result<()> {
+        if setup.direction() == RequestDirection::DeviceToHost
+            && payload.is_none()
+        {
+            return Err(Error::MissingPayloadForInRequest(setup.request()));
+        }
+        self.setup_stage_inner(setup, payload.unwrap_or_default())
+    }
+}
+
+impl<T, Dir> Endpoint<T, Dir>
+where
+    T: TryFrom<(SetupData, Vec<u8>)>,
+    super::Error: From<T::Error>,
+    Dir: EndpointRequestDirectionMarker,
+{
+    fn setup_stage_inner(
+        &mut self,
+        setup: SetupData,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        if let Some(dir) = Dir::DIR {
+            if setup.direction() != dir {
+                return Err(Error::EndpointVsSetupDirectionMismatch(
+                    dir,
+                    setup.direction(),
+                ));
+            }
+        }
         self.bytes_transferred = 0;
         self.current_setup = Some(setup);
         self.payload = payload;
@@ -136,7 +223,13 @@ where
     }
 
     pub fn export(&self) -> migrate::EndpointV1 {
-        let Self { current_setup, payload, bytes_transferred, _spooky } = self;
+        let Self {
+            current_setup,
+            payload,
+            bytes_transferred,
+            _spooky,
+            _2spooky,
+        } = self;
         migrate::EndpointV1 {
             current_setup: current_setup.as_ref().map(|x| x.0),
             payload: payload.to_owned(),
