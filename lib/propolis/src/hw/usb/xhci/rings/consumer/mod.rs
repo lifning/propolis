@@ -272,8 +272,8 @@ mod test {
     use super::*;
     use crate::{
         hw::usb::usbdev::requests::{
-            Request, RequestDirection, RequestRecipient, RequestType,
-            SetupData, StandardRequest,
+            RequestDirection, RequestRecipient, RequestType, SetupData,
+            StandardRequest,
         },
         vmm::PhysMap,
     };
@@ -294,9 +294,7 @@ mod test {
                         .with_direction(RequestDirection::DeviceToHost)
                         .with_request_type(RequestType::Standard)
                         .with_recipient(RequestRecipient::Device)
-                        .with_request(Request::Standard(
-                            StandardRequest::GetDescriptor,
-                        ))
+                        .with_request(StandardRequest::GetDescriptor as u8)
                         .with_value(0x100)
                         .with_index(0)
                         .with_length(8)

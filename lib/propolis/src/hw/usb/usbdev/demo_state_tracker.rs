@@ -10,7 +10,7 @@ use super::{
     descriptor::*,
     endpoint::control::{ControlEndpoint, ControlRequestInfo},
     probes,
-    requests::{Request, RequestDirection, SetupData, StandardRequest},
+    requests::{RequestDirection, SetupData},
     Error, Result,
 };
 
@@ -101,8 +101,11 @@ impl NullUsbDevice {
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
-        let payload = self.payload_for(&setup)?;
-        self.control_endpoint.setup_stage(setup, payload)
+        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+            let payload = self.payload_for(req)?;
+            self.control_endpoint.set_payload(payload)?;
+        }
+        Ok(())
     }
 
     pub fn data_stage(
@@ -121,47 +124,40 @@ impl NullUsbDevice {
         status_direction: RequestDirection,
     ) -> Result<()> {
         match self.control_endpoint.status_stage(status_direction)? {
-            Some(x) => match x {
+            Some((req, _payload)) => match req {
                 ControlRequestInfo::SetConfiguration { configuration: _ } => {
                     // TODO: check config value
                     Ok(())
                 }
+                x => Err(Error::UnimplementedControlRequest(x)),
             },
             None => Ok(()),
         }
     }
 
-    fn payload_for(&self, setup_data: &SetupData) -> Result<Option<Vec<u8>>> {
-        if setup_data.direction() == RequestDirection::HostToDevice {
-            return Ok(None);
-        }
-        Ok(Some(match setup_data.request() {
-            Request::Standard(StandardRequest::GetDescriptor) => {
-                let [desc, idx] = setup_data.value().to_be_bytes();
-                let descriptor: Box<dyn Descriptor> =
-                    match DescriptorType::from_repr(desc) {
-                        Some(DescriptorType::Device) => {
-                            Box::new(Self::device_descriptor())
-                        }
-                        Some(DescriptorType::Configuration) => {
-                            Box::new(Self::config_descriptor())
-                        }
-                        Some(DescriptorType::String) => {
-                            Box::new(Self::string_descriptor(idx))
-                        }
-                        Some(DescriptorType::DeviceQualifier) => {
-                            Box::new(Self::device_qualifier_descriptor())
-                        }
-                        Some(x) => {
-                            return Err(Error::UnimplementedDescriptor(x))
-                        }
-                        None => return Err(Error::UnknownDescriptorType(desc)),
-                    };
-                probes::usb_get_descriptor!(|| (desc, idx));
+    fn payload_for(&self, req: ControlRequestInfo) -> Result<Vec<u8>> {
+        Ok(match req {
+            ControlRequestInfo::GetDescriptor { descriptor_type, index } => {
+                let descriptor: Box<dyn Descriptor> = match descriptor_type {
+                    DescriptorType::Device => {
+                        Box::new(Self::device_descriptor())
+                    }
+                    DescriptorType::Configuration => {
+                        Box::new(Self::config_descriptor())
+                    }
+                    DescriptorType::String => {
+                        Box::new(Self::string_descriptor(index))
+                    }
+                    DescriptorType::DeviceQualifier => {
+                        Box::new(Self::device_qualifier_descriptor())
+                    }
+                    x => return Err(Error::UnimplementedDescriptor(x)),
+                };
+                probes::usb_get_descriptor!(|| (descriptor_type as u8, index));
                 // slog::debug!(log, "usb: GET_DESCRIPTOR({descriptor:?})");
                 descriptor.serialize().collect()
             }
-            Request::Standard(StandardRequest::GetStatus) => {
+            ControlRequestInfo::GetStatus => {
                 // USB 2.0 sect 9.4.5 - two-byte response where lowest-order
                 // bits are 'self powered' and 'remote wakeup'
                 let attrib = Self::config_descriptor().attributes;
@@ -170,8 +166,8 @@ impl NullUsbDevice {
                     .to_le_bytes()
                     .to_vec()
             }
-            x => return Err(Error::UnimplementedRequest(x)),
-        }))
+            x => return Err(Error::UnimplementedControlRequest(x)),
+        })
     }
 
     pub fn import(

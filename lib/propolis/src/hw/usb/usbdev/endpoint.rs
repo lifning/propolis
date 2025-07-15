@@ -33,27 +33,28 @@ impl EndpointRequestDirectionMarker for InAndOut {
 
 pub struct Endpoint<T, Dir>
 where
-    T: TryFrom<(SetupData, Vec<u8>)>,
+    T: TryFrom<SetupData>,
     super::Error: From<T::Error>,
     Dir: EndpointRequestDirectionMarker,
 {
     current_setup: Option<SetupData>,
-    payload: Vec<u8>,
+    payload: Option<Vec<u8>>,
     bytes_transferred: usize,
     _spooky: PhantomData<T>,
     _2spooky: PhantomData<Dir>,
 }
 
+// #[derive(Default)] wants T: Default and Dir: Default, even as Phantoms
 impl<T, Dir> Default for Endpoint<T, Dir>
 where
-    T: TryFrom<(SetupData, Vec<u8>)>,
+    T: TryFrom<SetupData>,
     super::Error: From<T::Error>,
     Dir: EndpointRequestDirectionMarker,
 {
     fn default() -> Self {
         Self {
             current_setup: None,
-            payload: Vec::new(),
+            payload: None,
             bytes_transferred: 0,
             _spooky: PhantomData,
             _2spooky: PhantomData,
@@ -63,58 +64,42 @@ where
 
 impl<T> Endpoint<T, In>
 where
-    T: TryFrom<(SetupData, Vec<u8>)>,
+    T: TryFrom<SetupData>,
     super::Error: From<T::Error>,
 {
-    pub fn setup_stage(
-        &mut self,
-        setup: SetupData,
-        payload: Vec<u8>,
-    ) -> Result<()> {
-        self.setup_stage_inner(setup, payload)
-    }
-}
-
-impl<T> Endpoint<T, Out>
-where
-    T: TryFrom<(SetupData, Vec<u8>)>,
-    super::Error: From<T::Error>,
-{
-    pub fn setup_stage(&mut self, setup: SetupData) -> Result<()> {
-        self.setup_stage_inner(setup, Vec::new())
+    pub fn set_payload(&mut self, payload: Vec<u8>) {
+        self.payload = Some(payload);
     }
 }
 
 impl<T> Endpoint<T, InAndOut>
 where
-    T: TryFrom<(SetupData, Vec<u8>)>,
+    T: TryFrom<SetupData>,
     super::Error: From<T::Error>,
 {
-    pub fn setup_stage(
-        &mut self,
-        setup: SetupData,
-        payload: Option<Vec<u8>>,
-    ) -> Result<()> {
-        if setup.direction() == RequestDirection::DeviceToHost
-            && payload.is_none()
-        {
-            return Err(Error::MissingPayloadForInRequest(setup.request()));
+    pub fn set_payload(&mut self, payload: Vec<u8>) -> Result<()> {
+        if let Some(setup) = &self.current_setup {
+            if setup.direction() == RequestDirection::HostToDevice {
+                Err(Error::GavePayloadForOutRequest(setup.request(), payload))
+            } else if let Some(existing) = &self.payload {
+                Err(Error::GavePayloadTwice(existing.to_owned(), payload))
+            } else {
+                self.payload = Some(payload);
+                Ok(())
+            }
+        } else {
+            Err(Error::GavePayloadBeforeRequest(payload))
         }
-        self.setup_stage_inner(setup, payload.unwrap_or_default())
     }
 }
 
 impl<T, Dir> Endpoint<T, Dir>
 where
-    T: TryFrom<(SetupData, Vec<u8>)>,
+    T: TryFrom<SetupData>,
     super::Error: From<T::Error>,
     Dir: EndpointRequestDirectionMarker,
 {
-    fn setup_stage_inner(
-        &mut self,
-        setup: SetupData,
-        payload: Vec<u8>,
-    ) -> Result<()> {
+    pub fn setup_stage(&mut self, setup: SetupData) -> Result<Option<T>> {
         if let Some(dir) = Dir::DIR {
             if setup.direction() != dir {
                 return Err(Error::EndpointVsSetupDirectionMismatch(
@@ -125,8 +110,11 @@ where
         }
         self.bytes_transferred = 0;
         self.current_setup = Some(setup);
-        self.payload = payload;
-        Ok(())
+        self.payload = None;
+        Ok(match setup.direction() {
+            RequestDirection::DeviceToHost => Some(T::try_from(setup)?),
+            RequestDirection::HostToDevice => None,
+        })
     }
 
     pub fn data_stage(
@@ -144,36 +132,47 @@ where
             }
             let count = match setup_data.direction() {
                 RequestDirection::DeviceToHost => {
-                    let PointerOrImmediate::Pointer(region) = data_buffer
-                    else {
-                        return Err(Error::ImmediateParameterForOutDataStage);
-                    };
-                    memctx
-                        .write_from(
-                            region.0,
-                            &self.payload[self.bytes_transferred..],
-                            region.1,
-                        )
-                        .ok_or(Error::DataStageWriteFailed)?
-                }
-                RequestDirection::HostToDevice => match data_buffer {
-                    PointerOrImmediate::Pointer(GuestRegion(ptr, len)) => {
-                        self.payload.resize(self.bytes_transferred + len, 0u8);
+                    if let Some(payload) = &self.payload {
+                        let PointerOrImmediate::Pointer(region) = data_buffer
+                        else {
+                            return Err(
+                                Error::ImmediateParameterForOutDataStage,
+                            );
+                        };
                         memctx
-                            .read_into(
-                                ptr,
-                                &mut GuestData::from(
-                                    &mut self.payload[self.bytes_transferred..],
-                                ),
-                                len,
+                            .write_from(
+                                region.0,
+                                &payload[self.bytes_transferred..],
+                                region.1,
                             )
-                            .ok_or(Error::DataStageReadFailed)?
+                            .ok_or(Error::DataStageWriteFailed)?
+                    } else {
+                        return Err(Error::MissingPayloadForInRequest(
+                            setup_data.request(),
+                        ));
                     }
-                    PointerOrImmediate::Immediate(arr, len) => {
-                        self.payload.extend_from_slice(&arr[..len]);
-                        len
+                }
+                RequestDirection::HostToDevice => {
+                    let payload = self.payload.get_or_insert_default();
+                    match data_buffer {
+                        PointerOrImmediate::Pointer(GuestRegion(ptr, len)) => {
+                            payload.resize(self.bytes_transferred + len, 0u8);
+                            memctx
+                                .read_into(
+                                    ptr,
+                                    &mut GuestData::from(
+                                        &mut payload[self.bytes_transferred..],
+                                    ),
+                                    len,
+                                )
+                                .ok_or(Error::DataStageReadFailed)?
+                        }
+                        PointerOrImmediate::Immediate(arr, len) => {
+                            payload.extend_from_slice(&arr[..len]);
+                            len
+                        }
                     }
-                },
+                }
             };
             self.bytes_transferred += count;
             Ok(count)
@@ -185,7 +184,7 @@ where
     pub fn status_stage(
         &mut self,
         status_direction: RequestDirection,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<(T, Option<&[u8]>)>> {
         if let Some(setup) = self.current_setup.take() {
             if status_direction == setup.direction() {
                 return Err(Error::SetupVsStatusDirectionMatch(
@@ -194,15 +193,14 @@ where
             }
 
             let result = match setup.direction() {
-                RequestDirection::HostToDevice => {
-                    let mut new = Vec::new();
-                    core::mem::swap(&mut self.payload, &mut new);
-                    Some(T::try_from((setup, new))).transpose()
-                }
+                RequestDirection::HostToDevice => Some(
+                    T::try_from(setup)
+                        .map(|x| (x, self.payload.as_ref().map(Vec::as_slice))),
+                )
+                .transpose(),
                 RequestDirection::DeviceToHost => Ok(None),
             };
 
-            self.payload.clear();
             self.bytes_transferred = 0;
             result.map_err(From::from)
         } else {
@@ -244,7 +242,7 @@ pub mod migrate {
     #[derive(Serialize, Deserialize)]
     pub struct EndpointV1 {
         pub current_setup: Option<u64>,
-        pub payload: Vec<u8>,
+        pub payload: Option<Vec<u8>>,
         pub bytes_transferred: usize,
     }
 }
