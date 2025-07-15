@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     descriptor::*,
-    endpoint::{control::ControlRequestInfo, Endpoint},
+    endpoint::control::{ControlEndpoint, ControlRequestInfo},
     probes,
     requests::{Request, RequestDirection, SetupData, StandardRequest},
     Error, Result,
@@ -17,7 +17,7 @@ use super::{
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 #[derive(Default)]
 pub struct NullUsbDevice {
-    control_endpoint: Endpoint<ControlRequestInfo>,
+    control_endpoint: ControlEndpoint,
 }
 
 impl NullUsbDevice {

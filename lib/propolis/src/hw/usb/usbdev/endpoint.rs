@@ -11,52 +11,8 @@ use crate::vmm::MemCtx;
 use super::requests::{RequestDirection, SetupData};
 use super::{Error, Result};
 
-pub mod control {
-    use crate::hw::usb::usbdev::requests::{
-        Request, SetupData, StandardRequest,
-    };
-
-    #[derive(Default)]
-    pub enum ControlRequestInfo {
-        #[default]
-        None,
-        SetConfiguration {
-            /// USB 2.0 sect 9.4.7: The lower byte of the wValue field specifies
-            /// the desired configuration. This configuration value must be zero or
-            /// match a configuration value from a configuration descriptor. If the
-            /// configuration value is zero, the device is placed in its Address
-            /// state. The upper byte of the wValue field is reserved.
-            configuration: u8,
-        },
-    }
-
-    impl<'a> TryFrom<(SetupData, Vec<u8>)> for ControlRequestInfo {
-        type Error = super::Error;
-
-        fn try_from(
-            value: (SetupData, Vec<u8>),
-        ) -> std::result::Result<Self, Self::Error> {
-            let (setup, payload) = value;
-            match setup.request() {
-                Request::Standard(StandardRequest::SetConfiguration) => {
-                    if !payload.is_empty() {
-                        Err(Self::Error::InvalidPayloadForRequest(
-                            setup.request(),
-                            payload.to_vec(),
-                        ))
-                    } else {
-                        Ok(Self::SetConfiguration {
-                            configuration: setup.value() as u8,
-                        })
-                    }
-                }
-                Request::Standard(_) | Request::Other(_) => {
-                    Err(Self::Error::UnimplementedRequest(setup.request()))
-                }
-            }
-        }
-    }
-}
+pub mod control;
+pub mod interrupt;
 
 #[derive(Default)]
 pub struct Endpoint<T>
