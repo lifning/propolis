@@ -76,7 +76,7 @@ bitstruct! {
 
 /// USB 2.0 table 9-5
 #[repr(u8)]
-#[derive(FromRepr, Debug)]
+#[derive(Copy, Clone, FromRepr, Debug)]
 pub enum DescriptorType {
     Device = 1,
     Configuration = 2,

@@ -3,13 +3,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use descriptor::DescriptorType;
-use requests::{Request, RequestDirection};
+use endpoint::control::ControlRequestInfo;
+use requests::{RequestDirection, RequestType};
 
 pub mod descriptor;
+pub mod endpoint;
 pub mod requests;
 
+pub mod hid;
+
 pub mod demo_state_tracker;
-pub mod endpoint;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -27,16 +30,26 @@ pub enum Error {
     NoSetupStageBefore(&'static str),
     #[error("matched Setup Stage and Status Stage transfer direction {0:?}")]
     SetupVsStatusDirectionMatch(RequestDirection),
-    #[error("unimplemented request {0:?}")]
-    UnimplementedRequest(Request),
-    #[error("invalid payload for {0:?} request: {1:#x?}")]
-    InvalidPayloadForRequest(Request, Vec<u8>),
+    #[error("unimplemented {1:?} request {0}")]
+    UnimplementedRequest(u8, RequestType),
+    #[error("invalid payload for {1:?} request {0}: {2:#x?}")]
+    InvalidPayloadForRequest(u8, RequestType, Vec<u8>),
     #[error("unimplemented descriptor type: {0:?}")]
     UnimplementedDescriptor(DescriptorType),
     #[error("unknown descriptor type: {0:#x}")]
     UnknownDescriptorType(u8),
     #[error("missing payload for IN request: {0:?}")]
-    MissingPayloadForInRequest(Request),
+    MissingPayloadForInRequest(u8),
+    #[error("tried to provide payload for OUT request: {0:?}, {1:#x?}")]
+    GavePayloadForOutRequest(u8, Vec<u8>),
+    #[error("tried to provide payload before request: {0:#x?}")]
+    GavePayloadBeforeRequest(Vec<u8>),
+    #[error("tried to provide two payloads for one request: {0:#x?}, {1:#x?}")]
+    GavePayloadTwice(Vec<u8>, Vec<u8>),
+    #[error("USB device does not implement {0:?}")]
+    UnimplementedControlRequest(ControlRequestInfo),
+    #[error("invalid Setup Stage parameters for {1:?} request {0}: value {2}, index {3}")]
+    InvalidSetupParamsForRequest(u8, RequestType, u16, u16),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

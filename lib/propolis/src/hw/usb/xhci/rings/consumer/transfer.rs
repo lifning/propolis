@@ -5,7 +5,7 @@
 use crate::common::{GuestAddr, GuestRegion};
 use crate::hw::usb::usbdev::demo_state_tracker::NullUsbDevice;
 use crate::hw::usb::usbdev::requests::{
-    Request, RequestDirection, SetupData, StandardRequest,
+    RequestDirection, RequestType, SetupData, StandardRequest,
 };
 use crate::hw::usb::xhci::bits::ring_data::{
     Trb, TrbDirection, TrbTransferType, TrbType,
@@ -427,8 +427,11 @@ impl TransferInfo {
                 }
                 // xHCI 1.2 sect 4.6.5
                 let completion_code = if matches!(
-                    data.request(),
-                    Request::Standard(StandardRequest::SetAddress)
+                    (
+                        data.request_type(),
+                        StandardRequest::from_repr(data.request())
+                    ),
+                    (RequestType::Standard, Some(StandardRequest::SetAddress))
                 ) {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
