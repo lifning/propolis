@@ -30,3 +30,11 @@ pub enum HidReportType {
     Feature = 3,
     // all other values reserved
 }
+
+/// USB HID 1.11 sect 7.2.5, 7.2.6
+#[derive(FromRepr, Debug)]
+#[repr(u8)]
+pub enum HidProtocol {
+    Boot = 0,
+    Report = 1,
+}

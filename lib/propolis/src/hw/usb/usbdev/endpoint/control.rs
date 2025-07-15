@@ -4,7 +4,7 @@
 
 use crate::hw::usb::usbdev::{
     descriptor::DescriptorType,
-    hid::{HidReportType, HidRequest},
+    hid::{HidProtocol, HidReportType, HidRequest},
     requests::{RequestType, SetupData, StandardRequest},
     Error,
 };
@@ -26,9 +26,49 @@ pub enum ControlRequestInfo {
         /// state. The upper byte of the wValue field is reserved.
         configuration: u8,
     },
+
+    // -- class-specific requests --
+    /// Get_Report lets the host read a report through the control endpoint.
+    /// USB HID 1.11 sect 7.2.1
     HidGetReport {
         report_type: HidReportType,
         report_id: u8,
+        interface: u16,
+    },
+    /// Set_Report sends a report to the device, possibly setting the state of
+    /// input, output, or feature controls.
+    /// USB HID 1.11 sect 7.2.2
+    HidSetReport {
+        report_type: HidReportType,
+        report_id: u8,
+        interface: u16,
+    },
+    /// Get_Idle reads the current idle rate for a particular Input report.
+    /// (see Set_Idle)
+    /// USB HID 1.11 sect 7.2.3
+    HidGetIdle {
+        report_id: u8,
+        interface: u16,
+    },
+    /// Set_Idle silences a particular report on this endpoint until a new
+    /// event occurs or the provided duration passes.
+    /// USB HID 1.11 sect 7.2.4
+    HidSetIdle {
+        /// 0 = indefinite. Other values are in units of 4 milliseconds, e.g.
+        /// 1u8 = 4ms, 255u8 = 1.020 seconds.
+        duration_4ms: u8,
+        report_id: u8,
+        interface: u16,
+    },
+    /// Get_Protocol reads which of the boot or report protocol are active.
+    /// USB HID 1.11 sect 7.2.5
+    HidGetProtocol {
+        interface: u16,
+    },
+    /// Set_Protocol switches between the boot and report protocols.
+    /// USB HID 1.11 sect 7.2.6
+    HidSetProtocol {
+        protocol: HidProtocol,
         interface: u16,
     },
 }
@@ -63,17 +103,17 @@ impl TryFrom<SetupData> for ControlRequestInfo {
                 }
             }
             RequestType::Class => {
+                // FIXME: this assumes all class requests are HID, need to model class in type system too
                 match HidRequest::from_repr(setup.request()) {
                     Some(HidRequest::GetReport) => {
                         let [rtype, report_id] = setup.value().to_be_bytes();
                         if let Some(report_type) =
                             HidReportType::from_repr(rtype)
                         {
-                            let interface = setup.index();
                             Ok(Self::HidGetReport {
                                 report_type,
                                 report_id,
-                                interface,
+                                interface: setup.index(),
                             })
                         } else {
                             Err(Error::InvalidSetupParamsForRequest(
@@ -84,16 +124,67 @@ impl TryFrom<SetupData> for ControlRequestInfo {
                             ))
                         }
                     }
-                    Some(HidRequest::GetIdle)
-                    | Some(HidRequest::GetProtocol)
-                    | Some(HidRequest::SetReport)
-                    | Some(HidRequest::SetIdle)
-                    | Some(HidRequest::SetProtocol) => {
-                        // TODO
-                        Err(Error::UnimplementedRequest(
-                            setup.request(),
-                            setup.request_type(),
-                        ))
+                    Some(HidRequest::SetReport) => {
+                        let [rtype, report_id] = setup.value().to_be_bytes();
+                        if let Some(report_type) =
+                            HidReportType::from_repr(rtype)
+                        {
+                            Ok(Self::HidSetReport {
+                                report_type,
+                                report_id,
+                                interface: setup.index(),
+                            })
+                        } else {
+                            Err(Error::InvalidSetupParamsForRequest(
+                                setup.request(),
+                                setup.request_type(),
+                                setup.value(),
+                                setup.index(),
+                            ))
+                        }
+                    }
+                    Some(HidRequest::GetIdle) => {
+                        let [0, report_id] = setup.value().to_be_bytes() else {
+                            return Err(Error::InvalidSetupParamsForRequest(
+                                setup.request(),
+                                setup.request_type(),
+                                setup.value(),
+                                setup.index(),
+                            ));
+                        };
+                        Ok(Self::HidGetIdle {
+                            report_id,
+                            interface: setup.index(),
+                        })
+                    }
+                    Some(HidRequest::SetIdle) => {
+                        let [duration_4ms, report_id] =
+                            setup.value().to_be_bytes();
+                        Ok(Self::HidSetIdle {
+                            duration_4ms,
+                            report_id,
+                            interface: setup.index(),
+                        })
+                    }
+                    Some(HidRequest::GetProtocol) => {
+                        Ok(Self::HidGetProtocol { interface: setup.index() })
+                    }
+                    Some(HidRequest::SetProtocol) => {
+                        if let Some(protocol) =
+                            HidProtocol::from_repr(setup.value() as u8)
+                        {
+                            Ok(Self::HidSetProtocol {
+                                protocol,
+                                interface: setup.index(),
+                            })
+                        } else {
+                            return Err(Error::InvalidSetupParamsForRequest(
+                                setup.request(),
+                                setup.request_type(),
+                                setup.value(),
+                                setup.index(),
+                            ));
+                        }
                     }
                     Some(HidRequest::Reserved4)
                     | Some(HidRequest::Reserved5)
