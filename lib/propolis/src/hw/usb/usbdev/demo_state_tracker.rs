@@ -101,11 +101,7 @@ impl NullUsbDevice {
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
-        // TODO: improve api
-        let payload = match setup.direction() {
-            RequestDirection::DeviceToHost => self.payload_for(&setup)?,
-            RequestDirection::HostToDevice => Vec::new(),
-        };
+        let payload = self.payload_for(&setup)?;
         self.control_endpoint.setup_stage(setup, payload)
     }
 
@@ -126,7 +122,6 @@ impl NullUsbDevice {
     ) -> Result<()> {
         match self.control_endpoint.status_stage(status_direction)? {
             Some(x) => match x {
-                ControlRequestInfo::None => unreachable!(),
                 ControlRequestInfo::SetConfiguration { configuration: _ } => {
                     // TODO: check config value
                     Ok(())
@@ -136,8 +131,11 @@ impl NullUsbDevice {
         }
     }
 
-    fn payload_for(&self, setup_data: &SetupData) -> Result<Vec<u8>> {
-        match setup_data.request() {
+    fn payload_for(&self, setup_data: &SetupData) -> Result<Option<Vec<u8>>> {
+        if setup_data.direction() == RequestDirection::HostToDevice {
+            return Ok(None);
+        }
+        Ok(Some(match setup_data.request() {
             Request::Standard(StandardRequest::GetDescriptor) => {
                 let [desc, idx] = setup_data.value().to_be_bytes();
                 let descriptor: Box<dyn Descriptor> =
@@ -161,19 +159,19 @@ impl NullUsbDevice {
                     };
                 probes::usb_get_descriptor!(|| (desc, idx));
                 // slog::debug!(log, "usb: GET_DESCRIPTOR({descriptor:?})");
-                Ok(descriptor.serialize().collect())
+                descriptor.serialize().collect()
             }
             Request::Standard(StandardRequest::GetStatus) => {
                 // USB 2.0 sect 9.4.5 - two-byte response where lowest-order
                 // bits are 'self powered' and 'remote wakeup'
                 let attrib = Self::config_descriptor().attributes;
-                Ok((attrib.self_powered() as u16
+                (attrib.self_powered() as u16
                     | (attrib.remote_wakeup() as u16 * 2))
                     .to_le_bytes()
-                    .to_vec())
+                    .to_vec()
             }
-            x => Err(Error::UnimplementedRequest(x)),
-        }
+            x => return Err(Error::UnimplementedRequest(x)),
+        }))
     }
 
     pub fn import(
