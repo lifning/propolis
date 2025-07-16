@@ -5,6 +5,8 @@
 use bitstruct::bitstruct;
 use strum::FromRepr;
 
+use super::hid::HIDDescriptor;
+
 #[repr(transparent)]
 pub struct Bcd16(pub u16);
 impl core::fmt::Debug for Bcd16 {
@@ -94,7 +96,7 @@ pub enum DescriptorType {
 }
 
 #[repr(u8)]
-#[derive(FromRepr, Debug)]
+#[derive(Copy, Clone, FromRepr, Debug)]
 pub enum CountryCode {
     // TODO
     International = 13,
@@ -136,6 +138,9 @@ pub enum KnownLanguageId {
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct InterfaceClass(pub u8);
+impl InterfaceClass {
+    pub const HID: Self = Self(3);
+}
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct InterfaceSubclass(pub u8);
@@ -450,19 +455,25 @@ impl NestedDescriptor for EndpointDescriptor {
 
 #[derive(Debug)]
 pub enum AugmentedDescriptor {
-    // HID(HidDescriptor)
+    HID(HIDDescriptor),
 }
 impl Descriptor for AugmentedDescriptor {
     fn length(&self) -> u8 {
-        todo!()
+        match self {
+            Self::HID(desc) => desc.length(),
+        }
     }
 
     fn descriptor_type(&self) -> DescriptorType {
-        todo!()
+        match self {
+            Self::HID(desc) => desc.descriptor_type(),
+        }
     }
 
     fn serialize(&self) -> Box<dyn Iterator<Item = u8> + '_> {
-        todo!()
+        match self {
+            Self::HID(desc) => desc.serialize(),
+        }
     }
 }
 impl NestedDescriptor for AugmentedDescriptor {
@@ -472,35 +483,6 @@ impl NestedDescriptor for AugmentedDescriptor {
 
     fn serialize_all(&self) -> Box<dyn Iterator<Item = u8> + '_> {
         self.serialize()
-    }
-}
-
-#[derive(Debug)]
-pub struct HidDescriptor {
-    /// bcdHID. HID standard version.
-    pub hid_version: Bcd16,
-
-    /// bCountryCode.
-    pub country_code: CountryCode,
-
-    /// bNumDescriptors is the length of this Vec,
-    /// which is followed by [bDescriptorType (u8), wDescriptorLength (u16)]
-    /// for each descriptor at serialization time.
-    pub class_descriptor: Vec<AugmentedDescriptor>,
-}
-impl Descriptor for HidDescriptor {
-    /// bLength. Dependent on bNumDescriptors.
-    fn length(&self) -> u8 {
-        todo!()
-    }
-
-    /// bDescriptorType. 33 for HID Descriptor.
-    fn descriptor_type(&self) -> DescriptorType {
-        DescriptorType::HID
-    }
-
-    fn serialize(&self) -> Box<dyn Iterator<Item = u8> + '_> {
-        todo!()
     }
 }
 

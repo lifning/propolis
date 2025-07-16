@@ -13,6 +13,7 @@ pub mod requests;
 pub mod hid;
 
 pub mod demo_state_tracker;
+pub mod vnc_tablet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
