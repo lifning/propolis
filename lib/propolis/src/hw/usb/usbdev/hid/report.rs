@@ -4,6 +4,8 @@
 
 use bitstruct::bitstruct;
 
+use crate::hw::usb::usbdev::descriptor::{Descriptor, DescriptorType};
+
 use super::HIDReportType;
 
 bitstruct! {
@@ -72,17 +74,11 @@ enum ItemTag {
 }
 
 impl ItemTag {
-    fn zero_byte(&self) -> Part {
-        ItemPrefix(0).with_size(ItemSize::_0).with_tag(*self).value(0)
-    }
     fn one_byte(&self, value: u32) -> Part {
         ItemPrefix(0).with_size(ItemSize::_1).with_tag(*self).value(value)
     }
     fn two_byte(&self, value: u32) -> Part {
         ItemPrefix(0).with_size(ItemSize::_2).with_tag(*self).value(value)
-    }
-    fn four_byte(&self, value: u32) -> Part {
-        ItemPrefix(0).with_size(ItemSize::_4).with_tag(*self).value(value)
     }
 }
 
@@ -180,12 +176,6 @@ bitstruct! {
 impl InputOutputFeatureItem {
     fn input(&self) -> Part {
         ItemTag::Input.one_byte(self.0)
-    }
-    fn output(&self) -> Part {
-        ItemTag::Output.one_byte(self.0)
-    }
-    fn feature(&self) -> Part {
-        ItemTag::Feature.one_byte(self.0)
     }
 }
 
@@ -402,16 +392,23 @@ pub struct ReportDescriptor {
     pub parts: Vec<Part>,
 }
 
-impl ReportDescriptor {
-    pub fn length(&self) -> u16 {
-        self.serialize().count() as u16
+impl Descriptor for ReportDescriptor {
+    fn length(&self) -> u8 {
+        u8::try_from(self.serialize().count()).unwrap()
     }
-    pub fn serialize(&self) -> impl Iterator<Item = u8> + '_ {
-        self.parts.iter().flat_map(|part| part.serialize())
+    fn serialize(&self) -> Box<dyn Iterator<Item = u8> + '_> {
+        Box::new(
+            self.header()
+                .into_iter()
+                .chain(self.parts.iter().flat_map(|part| part.serialize())),
+        )
+    }
+    fn descriptor_type(&self) -> DescriptorType {
+        DescriptorType::Report
     }
 }
 
-// might be nice to generate this from some nicer builder-pattern thing
+// might be nice to generate this from some nicer builder-pattern thing someday
 // i.e. Self::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
 pub fn tablet_report_descriptor() -> ReportDescriptor {
     ReportDescriptor {
@@ -482,7 +479,7 @@ pub fn tablet_report_descriptor() -> ReportDescriptor {
 
 #[cfg(test)]
 mod test {
-    use super::tablet_report_descriptor;
+    use crate::hw::usb::usbdev::descriptor::Descriptor;
 
     #[rustfmt::skip]
     #[test]
@@ -491,7 +488,7 @@ mod test {
     // in which we care about live migration!
     fn tablet_descriptor_serialization() {
         let serialized: Vec<u8> =
-            tablet_report_descriptor().serialize().collect();
+            super::tablet_report_descriptor().serialize().collect();
         // similar to HID 1.11 sect E.10
         assert_eq!(serialized.as_slice(), &[
             5, 1, // usage page (generic desktop)

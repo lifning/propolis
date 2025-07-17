@@ -9,7 +9,7 @@ pub enum InInterruptRequestInfo {}
 impl TryFrom<SetupData> for InInterruptRequestInfo {
     type Error = super::Error;
 
-    fn try_from(setup: SetupData) -> std::result::Result<Self, Self::Error> {
+    fn try_from(_setup: SetupData) -> std::result::Result<Self, Self::Error> {
         todo!()
     }
 }

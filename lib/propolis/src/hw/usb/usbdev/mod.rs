@@ -52,6 +52,8 @@ pub enum Error {
     InvalidSetupParamsForRequest(u8, RequestType, u16, u16),
     #[error("got a class-specific USB request on endpoint with unspecified class: {0:?}")]
     ClassRequestOnNonClassEndpoint(SetupData),
+    #[error("received packet on endpoint not present on this USB device: {0}")]
+    InvalidEndpoint(u8),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

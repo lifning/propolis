@@ -202,9 +202,9 @@ impl Descriptor for HIDDescriptor {
                     self.class_descriptor.len() as u8, // 5
                 ])
                 .chain(self.class_descriptor.iter().flat_map(|x| {
-                    [x.report_type as u8]
+                    [x.descriptor_type() as u8] // 6 + 3*n
                         .into_iter()
-                        .chain(x.length().to_le_bytes())
+                        .chain((x.length() as u16).to_le_bytes()) // {7, 8} + 3*n
                 })),
         )
     }

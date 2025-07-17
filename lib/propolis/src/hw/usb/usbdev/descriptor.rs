@@ -92,7 +92,10 @@ pub enum DescriptorType {
     OnTheGo = 9,
     Debug = 10,
     InterfaceAssociation = 11,
+    // HID 1.11 sect 7.1
     HID = 33,
+    Report = 34,
+    Physical = 35,
 }
 
 #[repr(u8)]
