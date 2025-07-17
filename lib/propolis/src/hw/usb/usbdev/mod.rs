@@ -3,8 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use descriptor::DescriptorType;
-use endpoint::control::ControlRequestInfo;
-use requests::{RequestDirection, RequestType};
+use requests::{RequestDirection, RequestType, SetupData};
 
 pub mod descriptor;
 pub mod endpoint;
@@ -32,7 +31,9 @@ pub enum Error {
     #[error("matched Setup Stage and Status Stage transfer direction {0:?}")]
     SetupVsStatusDirectionMatch(RequestDirection),
     #[error("unimplemented {1:?} request {0}")]
-    UnimplementedRequest(u8, RequestType),
+    UnimplementedRequestType(u8, RequestType),
+    #[error("USB device does not implement {0:?}")]
+    UnimplementedRequestBehavior(String),
     #[error("invalid payload for {1:?} request {0}: {2:#x?}")]
     InvalidPayloadForRequest(u8, RequestType, Vec<u8>),
     #[error("unimplemented descriptor type: {0:?}")]
@@ -47,10 +48,10 @@ pub enum Error {
     GavePayloadBeforeRequest(Vec<u8>),
     #[error("tried to provide two payloads for one request: {0:#x?}, {1:#x?}")]
     GavePayloadTwice(Vec<u8>, Vec<u8>),
-    #[error("USB device does not implement {0:?}")]
-    UnimplementedControlRequest(ControlRequestInfo),
     #[error("invalid Setup Stage parameters for {1:?} request {0}: value {2}, index {3}")]
     InvalidSetupParamsForRequest(u8, RequestType, u16, u16),
+    #[error("got a class-specific USB request on endpoint with unspecified class: {0:?}")]
+    ClassRequestOnNonClassEndpoint(SetupData),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

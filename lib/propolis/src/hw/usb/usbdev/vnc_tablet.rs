@@ -8,23 +8,22 @@ use crate::{
 
 use super::{
     descriptor::*,
-    endpoint::{
-        control::{ControlRequestInfo, NoClassRequestInfo},
-        Endpoint, InAndOut,
+    endpoint::{control::ControlRequestInfo, Endpoint, InAndOut},
+    hid::{
+        report::ReportDescriptor, HIDDescriptor, HIDReportType, HIDRequestInfo,
+        HID_VER_1_11,
     },
     probes,
     requests::{RequestDirection, SetupData},
     Error, Result,
 };
 
-/// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 #[derive(Default)]
-pub struct NullUsbDevice {
-    control_endpoint:
-        Endpoint<ControlRequestInfo<NoClassRequestInfo>, InAndOut>,
+pub struct HidTabletUsbDevice {
+    control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
 }
 
-impl NullUsbDevice {
+impl HidTabletUsbDevice {
     const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(0);
     const PRODUCT_NAME_INDEX: StringIndex = StringIndex(1);
     const SERIAL_INDEX: StringIndex = StringIndex(2);
@@ -34,12 +33,13 @@ impl NullUsbDevice {
     fn device_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
             usb_version: USB_VER_2_0,
+            // NOTE: HID class is specified in the *interface* descriptor
             device_class: ClassCode(0),
             device_subclass: SubclassCode(0),
             device_protocol: ProtocolCode(0),
             max_packet_size_0: MaxSizeZeroEP::_64,
             vendor_id: VendorId(0x1de),
-            product_id: ProductId(0xdead),
+            product_id: ProductId(0x7ab1),
             device_version: Bcd16(0),
             manufacturer_name: Self::MANUFACTURER_NAME_INDEX,
             product_name: Self::PRODUCT_NAME_INDEX,
@@ -62,11 +62,20 @@ impl NullUsbDevice {
             interface_num: 0,
             alternate_setting: 0,
             endpoints: vec![Self::endpoint_descriptor()],
-            class: InterfaceClass(0),
-            subclass: InterfaceSubclass(0),
-            protocol: InterfaceProtocol(0),
+            class: InterfaceClass::HID,
+            subclass: InterfaceSubclass(0), // no boot interface support
+            protocol: InterfaceProtocol(0), // no boot interface support
             interface_name: Self::INTERFACE_NAME_INDEX,
-            specific_augmentations: vec![],
+            specific_augmentations: vec![AugmentedDescriptor::HID(
+                HIDDescriptor {
+                    hid_version: HID_VER_1_11,
+                    country_code: CountryCode::International,
+                    class_descriptor: vec![ReportDescriptor {
+                        report_type: HIDReportType::Input,
+                        parts: vec![],
+                    }],
+                },
+            )],
         }
     }
     fn endpoint_descriptor() -> EndpointDescriptor {
@@ -81,7 +90,7 @@ impl NullUsbDevice {
     fn string_descriptor(idx: u8) -> StringDescriptor {
         let s: &str = match StringIndex(idx) {
             Self::MANUFACTURER_NAME_INDEX => "Oxide Computer Company",
-            Self::PRODUCT_NAME_INDEX => "Generic USB 2.0 Encabulator",
+            Self::PRODUCT_NAME_INDEX => "HID Tablet",
             Self::SERIAL_INDEX => "9001",
             Self::CONFIG_NAME_INDEX => "MyCoolConfiguration",
             Self::INTERFACE_NAME_INDEX => "MyNotQuiteAsCoolInterface",
@@ -105,9 +114,13 @@ impl NullUsbDevice {
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
-        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
-            let payload = self.payload_for(req)?;
-            self.control_endpoint.set_payload(payload)?;
+        if endpoint_id == 0 {
+            if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+                let payload = self.payload_for(req)?;
+                self.control_endpoint.set_payload(payload)?;
+            }
+        } else {
+            todo!()
         }
         Ok(())
     }
@@ -119,7 +132,15 @@ impl NullUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize> {
-        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
+        if endpoint_id == 0 {
+            self.control_endpoint.data_stage(
+                data_buffer,
+                data_direction,
+                memctx,
+            )
+        } else {
+            todo!()
+        }
     }
 
     pub fn status_stage(
@@ -127,21 +148,29 @@ impl NullUsbDevice {
         endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        match self.control_endpoint.status_stage(status_direction)? {
-            Some((req, _payload)) => match req {
-                ControlRequestInfo::SetConfiguration { configuration: _ } => {
-                    // TODO: check config value
-                    Ok(())
-                }
-                x => Err(Error::UnimplementedRequestBehavior(format!("{x:?}"))),
-            },
-            None => Ok(()),
+        if endpoint_id == 0 {
+            match self.control_endpoint.status_stage(status_direction)? {
+                Some((req, _payload)) => match req {
+                    ControlRequestInfo::SetConfiguration {
+                        configuration: _,
+                    } => {
+                        // TODO: check config value
+                        Ok(())
+                    }
+                    x => Err(Error::UnimplementedRequestBehavior(format!(
+                        "{x:?}"
+                    ))),
+                },
+                None => Ok(()),
+            }
+        } else {
+            todo!()
         }
     }
 
     fn payload_for(
         &self,
-        req: ControlRequestInfo<NoClassRequestInfo>,
+        req: ControlRequestInfo<HIDRequestInfo>,
     ) -> Result<Vec<u8>> {
         Ok(match req {
             ControlRequestInfo::GetDescriptor { descriptor_type, index } => {
