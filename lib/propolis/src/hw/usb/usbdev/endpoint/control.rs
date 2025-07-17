@@ -2,17 +2,22 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use core::fmt::Debug;
+
 use crate::hw::usb::usbdev::{
     descriptor::DescriptorType,
-    hid::{HIDProtocol, HIDReportType, HIDRequest},
     requests::{RequestType, SetupData, StandardRequest},
     Error,
 };
 
-pub type ControlEndpoint = super::Endpoint<ControlRequestInfo, super::InAndOut>;
+pub type ControlEndpoint =
+    super::Endpoint<ControlRequestInfo<NoClassRequestInfo>, super::InAndOut>;
 
 #[derive(Debug)]
-pub enum ControlRequestInfo {
+pub enum ControlRequestInfo<C>
+where
+    C: TryFrom<SetupData, Error = Error> + Debug,
+{
     GetDescriptor {
         descriptor_type: DescriptorType,
         index: u8,
@@ -27,53 +32,13 @@ pub enum ControlRequestInfo {
         configuration: u8,
     },
 
-    // -- class-specific requests --
-    /// Get_Report lets the host read a report through the control endpoint.
-    /// USB HID 1.11 sect 7.2.1
-    HIDGetReport {
-        report_type: HIDReportType,
-        report_id: u8,
-        interface: u16,
-    },
-    /// Set_Report sends a report to the device, possibly setting the state of
-    /// input, output, or feature controls.
-    /// USB HID 1.11 sect 7.2.2
-    HIDSetReport {
-        report_type: HIDReportType,
-        report_id: u8,
-        interface: u16,
-    },
-    /// Get_Idle reads the current idle rate for a particular Input report.
-    /// (see Set_Idle)
-    /// USB HID 1.11 sect 7.2.3
-    HIDGetIdle {
-        report_id: u8,
-        interface: u16,
-    },
-    /// Set_Idle silences a particular report on this endpoint until a new
-    /// event occurs or the provided duration passes.
-    /// USB HID 1.11 sect 7.2.4
-    HIDSetIdle {
-        /// 0 = indefinite. Other values are in units of 4 milliseconds, e.g.
-        /// 1u8 = 4ms, 255u8 = 1.020 seconds.
-        duration_4ms: u8,
-        report_id: u8,
-        interface: u16,
-    },
-    /// Get_Protocol reads which of the boot or report protocol are active.
-    /// USB HID 1.11 sect 7.2.5
-    HIDGetProtocol {
-        interface: u16,
-    },
-    /// Set_Protocol switches between the boot and report protocols.
-    /// USB HID 1.11 sect 7.2.6
-    HIDSetProtocol {
-        protocol: HIDProtocol,
-        interface: u16,
-    },
+    Class(C),
 }
 
-impl TryFrom<SetupData> for ControlRequestInfo {
+impl<C> TryFrom<SetupData> for ControlRequestInfo<C>
+where
+    C: TryFrom<SetupData, Error = Error> + Debug,
+{
     type Error = super::Error;
 
     fn try_from(setup: SetupData) -> std::result::Result<Self, Self::Error> {
@@ -96,111 +61,29 @@ impl TryFrom<SetupData> for ControlRequestInfo {
                             configuration: setup.value() as u8,
                         })
                     }
-                    _ => Err(Error::UnimplementedRequest(
+                    _ => Err(Error::UnimplementedRequestType(
                         setup.request(),
                         setup.request_type(),
                     )),
                 }
             }
             RequestType::Class => {
-                // FIXME: this assumes all class requests are HID, need to model class in type system too
-                match HIDRequest::from_repr(setup.request()) {
-                    Some(HIDRequest::GetReport) => {
-                        let [rtype, report_id] = setup.value().to_be_bytes();
-                        if let Some(report_type) =
-                            HIDReportType::from_repr(rtype)
-                        {
-                            Ok(Self::HIDGetReport {
-                                report_type,
-                                report_id,
-                                interface: setup.index(),
-                            })
-                        } else {
-                            Err(Error::InvalidSetupParamsForRequest(
-                                setup.request(),
-                                setup.request_type(),
-                                setup.value(),
-                                setup.index(),
-                            ))
-                        }
-                    }
-                    Some(HIDRequest::SetReport) => {
-                        let [rtype, report_id] = setup.value().to_be_bytes();
-                        if let Some(report_type) =
-                            HIDReportType::from_repr(rtype)
-                        {
-                            Ok(Self::HIDSetReport {
-                                report_type,
-                                report_id,
-                                interface: setup.index(),
-                            })
-                        } else {
-                            Err(Error::InvalidSetupParamsForRequest(
-                                setup.request(),
-                                setup.request_type(),
-                                setup.value(),
-                                setup.index(),
-                            ))
-                        }
-                    }
-                    Some(HIDRequest::GetIdle) => {
-                        let [0, report_id] = setup.value().to_be_bytes() else {
-                            return Err(Error::InvalidSetupParamsForRequest(
-                                setup.request(),
-                                setup.request_type(),
-                                setup.value(),
-                                setup.index(),
-                            ));
-                        };
-                        Ok(Self::HIDGetIdle {
-                            report_id,
-                            interface: setup.index(),
-                        })
-                    }
-                    Some(HIDRequest::SetIdle) => {
-                        let [duration_4ms, report_id] =
-                            setup.value().to_be_bytes();
-                        Ok(Self::HIDSetIdle {
-                            duration_4ms,
-                            report_id,
-                            interface: setup.index(),
-                        })
-                    }
-                    Some(HIDRequest::GetProtocol) => {
-                        Ok(Self::HIDGetProtocol { interface: setup.index() })
-                    }
-                    Some(HIDRequest::SetProtocol) => {
-                        if let Some(protocol) =
-                            HIDProtocol::from_repr(setup.value() as u8)
-                        {
-                            Ok(Self::HIDSetProtocol {
-                                protocol,
-                                interface: setup.index(),
-                            })
-                        } else {
-                            return Err(Error::InvalidSetupParamsForRequest(
-                                setup.request(),
-                                setup.request_type(),
-                                setup.value(),
-                                setup.index(),
-                            ));
-                        }
-                    }
-                    Some(HIDRequest::Reserved4)
-                    | Some(HIDRequest::Reserved5)
-                    | Some(HIDRequest::Reserved6)
-                    | Some(HIDRequest::Reserved7)
-                    | Some(HIDRequest::Reserved8)
-                    | None => Err(Error::UnimplementedRequest(
-                        setup.request(),
-                        setup.request_type(),
-                    )),
-                }
+                Ok(ControlRequestInfo::Class(C::try_from(setup)?))
             }
-            _ => Err(Error::UnimplementedRequest(
+            _ => Err(Error::UnimplementedRequestType(
                 setup.request(),
                 setup.request_type(),
             )),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct NoClassRequestInfo;
+impl TryFrom<SetupData> for NoClassRequestInfo {
+    type Error = super::Error;
+
+    fn try_from(setup: SetupData) -> Result<Self, Self::Error> {
+        Err(Error::ClassRequestOnNonClassEndpoint(setup))
     }
 }

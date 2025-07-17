@@ -4,16 +4,12 @@
 
 use crate::hw::usb::usbdev::requests::{RequestType, SetupData};
 
-type InInterruptEndpoint = super::Endpoint<InInterruptRequestInfo, super::In>;
-
 pub enum InInterruptRequestInfo {}
 
-impl TryFrom<(SetupData, Vec<u8>)> for InInterruptRequestInfo {
+impl TryFrom<SetupData> for InInterruptRequestInfo {
     type Error = super::Error;
 
-    fn try_from(
-        _value: (SetupData, Vec<u8>),
-    ) -> std::result::Result<Self, Self::Error> {
+    fn try_from(setup: SetupData) -> std::result::Result<Self, Self::Error> {
         todo!()
     }
 }
