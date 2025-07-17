@@ -105,6 +105,9 @@ impl NullUsbDevice {
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
+        if endpoint_id != 0 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
         if let Some(req) = self.control_endpoint.setup_stage(setup)? {
             let payload = self.payload_for(req)?;
             self.control_endpoint.set_payload(payload)?;
@@ -119,6 +122,9 @@ impl NullUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize> {
+        if endpoint_id != 0 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
         self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
     }
 
@@ -127,6 +133,9 @@ impl NullUsbDevice {
         endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()> {
+        if endpoint_id != 0 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
         match self.control_endpoint.status_stage(status_direction)? {
             Some((req, _payload)) => match req {
                 ControlRequestInfo::SetConfiguration { configuration: _ } => {

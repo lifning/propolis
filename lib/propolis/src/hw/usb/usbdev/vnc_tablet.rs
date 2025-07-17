@@ -10,7 +10,7 @@ use super::{
     descriptor::*,
     endpoint::{control::ControlRequestInfo, Endpoint, InAndOut},
     hid::{
-        report::ReportDescriptor, HIDDescriptor, HIDReportType, HIDRequestInfo,
+        report::tablet_report_descriptor, HIDDescriptor, HIDRequestInfo,
         HID_VER_1_11,
     },
     probes,
@@ -70,10 +70,7 @@ impl HidTabletUsbDevice {
                 HIDDescriptor {
                     hid_version: HID_VER_1_11,
                     country_code: CountryCode::International,
-                    class_descriptor: vec![ReportDescriptor {
-                        report_type: HIDReportType::Input,
-                        parts: vec![],
-                    }],
+                    class_descriptor: vec![tablet_report_descriptor()],
                 },
             )],
         }
@@ -90,10 +87,10 @@ impl HidTabletUsbDevice {
     fn string_descriptor(idx: u8) -> StringDescriptor {
         let s: &str = match StringIndex(idx) {
             Self::MANUFACTURER_NAME_INDEX => "Oxide Computer Company",
-            Self::PRODUCT_NAME_INDEX => "HID Tablet",
-            Self::SERIAL_INDEX => "9001",
-            Self::CONFIG_NAME_INDEX => "MyCoolConfiguration",
-            Self::INTERFACE_NAME_INDEX => "MyNotQuiteAsCoolInterface",
+            Self::PRODUCT_NAME_INDEX => "Absolute Mouse",
+            Self::SERIAL_INDEX => "9002",
+            Self::CONFIG_NAME_INDEX => "Absolute Mouse Configuration",
+            Self::INTERFACE_NAME_INDEX => "Absolute Mouse Interface",
             _ => "weird index but ok",
         };
         StringDescriptor { string: s.to_string() }
@@ -186,6 +183,9 @@ impl HidTabletUsbDevice {
                     }
                     DescriptorType::DeviceQualifier => {
                         Box::new(Self::device_qualifier_descriptor())
+                    }
+                    DescriptorType::Report => {
+                        Box::new(tablet_report_descriptor())
                     }
                     x => return Err(Error::UnimplementedDescriptor(x)),
                 };
