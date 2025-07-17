@@ -8,9 +8,15 @@ use super::HIDReportType;
 
 bitstruct! {
     #[derive(Clone, Copy, Debug, Default)]
-    struct ItemPrefix(pub u8) {
+    pub struct ItemPrefix(pub u8) {
         size: ItemSize = 0..2;
         tag: ItemTag = 2..8;
+    }
+}
+
+impl ItemPrefix {
+    const fn value(&self, value: u32) -> Part {
+        Part::Item(*self, value)
     }
 }
 
@@ -66,17 +72,17 @@ enum ItemTag {
 }
 
 impl ItemTag {
-    pub fn zero_byte(&self) -> ItemPrefix {
-        ItemPrefix(0).with_size(ItemSize::_0).with_tag(*self)
+    fn zero_byte(&self) -> Part {
+        ItemPrefix(0).with_size(ItemSize::_0).with_tag(*self).value(0)
     }
-    pub fn one_byte(&self) -> ItemPrefix {
-        ItemPrefix(0).with_size(ItemSize::_1).with_tag(*self)
+    fn one_byte(&self, value: u32) -> Part {
+        ItemPrefix(0).with_size(ItemSize::_1).with_tag(*self).value(value)
     }
-    pub fn two_byte(&self) -> ItemPrefix {
-        ItemPrefix(0).with_size(ItemSize::_2).with_tag(*self)
+    fn two_byte(&self, value: u32) -> Part {
+        ItemPrefix(0).with_size(ItemSize::_2).with_tag(*self).value(value)
     }
-    pub fn four_byte(&self) -> ItemPrefix {
-        ItemPrefix(0).with_size(ItemSize::_4).with_tag(*self)
+    fn four_byte(&self, value: u32) -> Part {
+        ItemPrefix(0).with_size(ItemSize::_4).with_tag(*self).value(value)
     }
 }
 
@@ -171,8 +177,21 @@ bitstruct! {
     }
 }
 
+impl InputOutputFeatureItem {
+    fn input(&self) -> Part {
+        ItemTag::Input.one_byte(self.0)
+    }
+    fn output(&self) -> Part {
+        ItemTag::Output.one_byte(self.0)
+    }
+    fn feature(&self) -> Part {
+        ItemTag::Feature.one_byte(self.0)
+    }
+}
+
 /// HID Usage Tables 1.6
 #[repr(u32)]
+#[derive(Copy, Clone, Debug)]
 pub enum UsagePage {
     GenericDesktopControls = 0x01,
     SimulationControls = 0x02,
@@ -211,8 +230,19 @@ pub enum UsagePage {
     FIDOAlliance = 0xF1D0,
 }
 
+impl UsagePage {
+    fn item(&self) -> Part {
+        if let Self::FIDOAlliance = self {
+            ItemTag::UsagePage.two_byte(*self as u32)
+        } else {
+            ItemTag::UsagePage.one_byte(*self as u32)
+        }
+    }
+}
+
 /// HID Usage Tables 1.6 sect 4
 #[repr(u32)]
+#[derive(Copy, Clone, Debug)]
 pub enum GenericDesktopUsage {
     Undefined = 0x00,
     Pointer = 0x01,
@@ -253,6 +283,11 @@ pub enum GenericDesktopUsage {
     Start = 0x3D,
     Select = 0x3E,
     // [TODO more ...]
+}
+impl GenericDesktopUsage {
+    fn item(&self) -> Part {
+        ItemTag::Usage.one_byte(*self as u32)
+    }
 }
 
 /// HID Usage Tables 1.6 sect 16
@@ -312,6 +347,12 @@ pub enum Collection {
     UsageModifier = 6,
 }
 
+impl Collection {
+    fn items(&self, items: impl IntoIterator<Item = Part>) -> Part {
+        Part::Collection(*self, items.into_iter().collect())
+    }
+}
+
 #[derive(Debug)]
 pub enum Part {
     // TODO: fancier than u32 for item value
@@ -335,12 +376,22 @@ impl Part {
                     )
                 }
             }
-            Part::Collection(collection, parts) => Box::new(
-                [ItemTag::Collection.one_byte().0, *collection as u8]
-                    .into_iter()
-                    .chain(parts.iter().flat_map(|part| part.serialize()))
-                    .chain([ItemTag::EndCollection.zero_byte().0]),
-            ),
+            Part::Collection(collection, parts) => {
+                let start = ItemPrefix(0)
+                    .with_size(ItemSize::_1)
+                    .with_tag(ItemTag::Collection)
+                    .0;
+                let end = ItemPrefix(0)
+                    .with_size(ItemSize::_0)
+                    .with_tag(ItemTag::EndCollection)
+                    .0;
+                Box::new(
+                    [start, *collection as u8]
+                        .into_iter()
+                        .chain(parts.iter().flat_map(|part| part.serialize()))
+                        .chain([end]),
+                )
+            }
         }
     }
 }
@@ -360,57 +411,56 @@ impl ReportDescriptor {
     }
 }
 
-// TODO: generate this
+// might be nice to generate this from some nicer builder-pattern thing
+// i.e. Self::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
 pub fn tablet_report_descriptor() -> ReportDescriptor {
     ReportDescriptor {
         report_type: HIDReportType::Input,
         parts: vec![
-            Part::Item(
-                ItemTag::UsagePage.one_byte(),
-                UsagePage::GenericDesktopControls as u32,
-            ),
-            Part::Item(
-                ItemTag::Usage.one_byte(),
-                GenericDesktopUsage::Mouse as u32,
-            ),
-            Part::Collection(
-                Collection::Application,
-                vec![
-                    Part::Item(ItemTag::ReportID.one_byte(), 1),
-                    Part::Item(
-                        ItemTag::Usage.one_byte(),
-                        GenericDesktopUsage::Pointer as u32,
-                    ),
-                    Part::Collection(
-                        Collection::Physical,
-                        vec![
-                            Part::Item(
-                                ItemTag::UsagePage.one_byte(),
-                                UsagePage::Button as u32,
-                            ),
-                            // VNC mouse button reports are in the form of a one-byte
-                            // bitfield, with bit 0 representing 'disabled', so 1..=7
-                            Part::Item(ItemTag::UsageMinimum.one_byte(), 1),
-                            Part::Item(ItemTag::UsageMaximum.one_byte(), 7),
-                            Part::Item(ItemTag::LogicalMinimum.one_byte(), 0),
-                            Part::Item(ItemTag::LogicalMaximum.one_byte(), 1),
-                            // 7 buttons to report...
-                            Part::Item(ItemTag::ReportCount.one_byte(), 7),
-                            // 1 bit each
-                            Part::Item(ItemTag::ReportSize.one_byte(), 1),
-                            Part::Item(
-                                ItemTag::Input.one_byte(),
-                                InputOutputFeatureItem(0)
-                                    .with_constant(false) // data
-                                    .with_variable(false) // array
-                                    .with_relative(false) // absolute
-                                    .with_buffered_bytes(false) // bitfield
-                                    .0,
-                            ),
-                        ],
-                    ),
-                ],
-            ),
+            UsagePage::GenericDesktopControls.item(),
+            GenericDesktopUsage::Mouse.item(),
+            Collection::Application.items([
+                // ItemTag::ReportID.one_byte(1),
+                GenericDesktopUsage::Pointer.item(),
+                Collection::Physical.items([
+                    UsagePage::Button.item(),
+                    // VNC mouse button reports are in the form of a one-byte
+                    // bitfield, with bit 0 representing 'disabled', so 1..=7
+                    // (HID Button values start at 1 for "primary")
+                    ItemTag::UsageMinimum.one_byte(1),
+                    ItemTag::UsageMaximum.one_byte(7),
+                    ItemTag::LogicalMinimum.one_byte(0),
+                    ItemTag::LogicalMaximum.one_byte(1),
+                    // 7 buttons to report...
+                    ItemTag::ReportCount.one_byte(7),
+                    ItemTag::ReportSize.one_byte(1),
+                    // 1 bit each
+                    InputOutputFeatureItem(0)
+                        .with_constant(false) // data
+                        .with_variable(true) // variable
+                        .with_relative(false) // absolute
+                        .input(),
+                    // 1 bit padding to round out the byte in the report
+                    // (similar to Mouse example in HID 1.11 sect E.10)
+                    ItemTag::ReportCount.one_byte(1),
+                    ItemTag::ReportSize.one_byte(1),
+                    InputOutputFeatureItem(0).with_constant(true).input(),
+                    UsagePage::GenericDesktopControls.item(),
+                    GenericDesktopUsage::X.item(),
+                    GenericDesktopUsage::Y.item(),
+                    ItemTag::LogicalMinimum.one_byte(0),
+                    ItemTag::LogicalMaximum.two_byte(0x8000u32),
+                    // two axes, 16-bits each
+                    ItemTag::ReportSize.one_byte(16),
+                    ItemTag::ReportCount.one_byte(2),
+                    InputOutputFeatureItem(0)
+                        .with_constant(false) // data
+                        .with_variable(true) // variable
+                        .with_relative(false) // absolute
+                        .input(),
+                ]),
+            ]),
+            /* if absolute-mouse doesn't work, maybe we use Digitizer page
             Part::Item(
                 ItemTag::UsagePage.one_byte(),
                 UsagePage::Digitizers as u32,
@@ -425,6 +475,51 @@ pub fn tablet_report_descriptor() -> ReportDescriptor {
                     // TODO report id 2, 3
                 ],
             ),
+            */
         ],
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::tablet_report_descriptor;
+
+    #[rustfmt::skip]
+    #[test]
+    // dual purpose: verify that .serialize() does what we want, and trips on
+    // attempts to change the report format - which we must not do in a world
+    // in which we care about live migration!
+    fn tablet_descriptor_serialization() {
+        let serialized: Vec<u8> =
+            tablet_report_descriptor().serialize().collect();
+        // similar to HID 1.11 sect E.10
+        assert_eq!(serialized.as_slice(), &[
+            5, 1, // usage page (generic desktop)
+            9, 2, // usage (mouse)
+            0xA1, 1, // collection (application)
+                9, 1, // usage (pointer)
+                0xA1, 0, // collection (physical)
+                    5, 9, // usage page (buttons)
+                    0x19, 1, // usage minimum (1)
+                    0x29, 7, // usage maximum (7)
+                    0x15, 0, // logical minimum (0)
+                    0x25, 1, // logical maximum (1)
+                    0x95, 7, // report count (7)
+                    0x75, 1, // report size (1)
+                    0x81, 2, // input (data, variable, absolute), 7 button bits
+                    0x95, 1, // report count (1)
+                    0x75, 1, // report size (1)
+                    0x81, 1, // input (constant), 1 bit padding
+                    5, 1, // usage page (generic desktop)
+                    9, 0x30, // usage (x)
+                    9, 0x31, // usage (y)
+                    0x15, 0, // logical minimum (0)
+                    0x26, 0, 0x80, // logical maximum (0x8000)
+                    0x75, 0x10, // report size (16)
+                    0x95, 2, // report count (2)
+                    0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
+                0xC0, // end collection
+            0xC0, // end collection
+        ])
     }
 }

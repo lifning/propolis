@@ -150,7 +150,7 @@ impl TryFrom<SetupData> for HIDRequestInfo {
 }
 
 /// USB HID 1.11 sect 7.2.1
-#[derive(FromRepr, Debug)]
+#[derive(Copy, Clone, FromRepr, Debug)]
 #[repr(u8)]
 pub enum HIDReportType {
     Input = 1,
@@ -202,7 +202,7 @@ impl Descriptor for HIDDescriptor {
                     self.class_descriptor.len() as u8, // 5
                 ])
                 .chain(self.class_descriptor.iter().flat_map(|x| {
-                    [x.report_type()]
+                    [x.report_type as u8]
                         .into_iter()
                         .chain(x.length().to_le_bytes())
                 })),
