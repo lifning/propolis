@@ -14,7 +14,7 @@ use device_slots::SlotId;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
-use crate::hw::usb::usbdev::demo_state_tracker::NullUsbDevice;
+use crate::hw::usb::usbdev::UsbDevice;
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::port::PortId;
 use crate::hw::usb::xhci::rings::consumer::doorbell;
@@ -79,7 +79,7 @@ pub struct XhciState {
 
     /// USB devices to attach (currently only supports a proof-of-concept
     /// "device" used for testing basic xHC functionality)
-    queued_device_connections: Vec<(PortId, NullUsbDevice)>,
+    queued_device_connections: Vec<(PortId, UsbDevice)>,
     vmm_hdl: Arc<VmmHdl>,
 }
 
@@ -193,7 +193,7 @@ impl PciXhci {
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
-        let dev = NullUsbDevice::default();
+        let dev = UsbDevice::default();
         state.queued_device_connections.push((port_id, dev));
         Ok(())
     }
@@ -1060,7 +1060,7 @@ impl MigrateMulti for PciXhci {
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {
-                let mut dev = NullUsbDevice::default();
+                let mut dev = UsbDevice::default();
                 dev.import(&dev_data)?;
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;

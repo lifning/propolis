@@ -21,14 +21,15 @@ use super::{
 #[derive(Default)]
 pub struct HidTabletUsbDevice {
     control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
+    idle_duration_4ms: u8,
 }
 
 impl HidTabletUsbDevice {
-    const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(0);
-    const PRODUCT_NAME_INDEX: StringIndex = StringIndex(1);
-    const SERIAL_INDEX: StringIndex = StringIndex(2);
-    const CONFIG_NAME_INDEX: StringIndex = StringIndex(3);
-    const INTERFACE_NAME_INDEX: StringIndex = StringIndex(4);
+    const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(1);
+    const PRODUCT_NAME_INDEX: StringIndex = StringIndex(2);
+    const SERIAL_INDEX: StringIndex = StringIndex(3);
+    const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
+    const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
     fn device_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
@@ -51,7 +52,7 @@ impl HidTabletUsbDevice {
     fn config_descriptor() -> ConfigurationDescriptor {
         ConfigurationDescriptor {
             interfaces: vec![Self::interface_descriptor()],
-            config_value: ConfigurationValue(0),
+            config_value: ConfigurationValue(1),
             configuration_name: Self::CONFIG_NAME_INDEX,
             attributes: ConfigurationAttributes::default(),
             specific_augmentations: vec![],
@@ -59,7 +60,7 @@ impl HidTabletUsbDevice {
     }
     fn interface_descriptor() -> InterfaceDescriptor {
         InterfaceDescriptor {
-            interface_num: 0,
+            interface_num: 1,
             alternate_setting: 0,
             endpoints: vec![Self::endpoint_descriptor()],
             class: InterfaceClass::HID,
@@ -77,7 +78,7 @@ impl HidTabletUsbDevice {
     }
     fn endpoint_descriptor() -> EndpointDescriptor {
         EndpointDescriptor {
-            endpoint_addr: 0,
+            endpoint_addr: 2,
             attributes: EndpointAttributes::default(),
             max_packet_size: 64,
             interval: 1,
@@ -111,8 +112,9 @@ impl HidTabletUsbDevice {
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
-        if endpoint_id == 0 {
+        if endpoint_id == 1 {
             if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+                eprintln!("in {endpoint_id}: {req:?}");
                 let payload = self.payload_for(req)?;
                 self.control_endpoint.set_payload(payload)?;
             }
@@ -129,7 +131,7 @@ impl HidTabletUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize> {
-        if endpoint_id == 0 {
+        if endpoint_id == 1 {
             self.control_endpoint.data_stage(
                 data_buffer,
                 data_direction,
@@ -145,19 +147,32 @@ impl HidTabletUsbDevice {
         endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if endpoint_id == 0 {
+        if endpoint_id == 1 {
             match self.control_endpoint.status_stage(status_direction)? {
-                Some((req, _payload)) => match req {
-                    ControlRequestInfo::SetConfiguration {
-                        configuration: _,
-                    } => {
-                        // TODO: check config value
-                        Ok(())
+                Some((req, _payload)) => {
+                    eprintln!("out {endpoint_id}: {req:?}");
+                    match req {
+                        ControlRequestInfo::SetConfiguration {
+                            configuration: _,
+                        } => {
+                            // TODO: check config value
+                            Ok(())
+                        }
+                        ControlRequestInfo::Class(
+                            HIDRequestInfo::SetIdle {
+                                duration_4ms,
+                                report_id: _,
+                                interface: _,
+                            },
+                        ) => {
+                            self.idle_duration_4ms = duration_4ms;
+                            Ok(())
+                        }
+                        x => Err(Error::UnimplementedRequestBehavior(format!(
+                            "{x:?}"
+                        ))),
                     }
-                    x => Err(Error::UnimplementedRequestBehavior(format!(
-                        "{x:?}"
-                    ))),
-                },
+                }
                 None => Ok(()),
             }
         } else {
@@ -201,6 +216,12 @@ impl HidTabletUsbDevice {
                     | (attrib.remote_wakeup() as u16 * 2))
                     .to_le_bytes()
                     .to_vec()
+            }
+            ControlRequestInfo::Class(HIDRequestInfo::GetIdle {
+                report_id: _,
+                interface: _,
+            }) => {
+                vec![self.idle_duration_4ms]
             }
             x => {
                 return Err(Error::UnimplementedRequestBehavior(format!(

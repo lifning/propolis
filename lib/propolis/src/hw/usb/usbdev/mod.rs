@@ -14,6 +14,9 @@ pub mod hid;
 pub mod demo_state_tracker;
 pub mod vnc_tablet;
 
+// pub type UsbDevice = demo_state_tracker::NullUsbDevice;
+pub type UsbDevice = vnc_tablet::HidTabletUsbDevice;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("mismatched Endpoint and Setup Stage transfer direction in transfer: {0:?} != {1:?}")]

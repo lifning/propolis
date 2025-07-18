@@ -7,7 +7,7 @@ use std::ops::Deref;
 use zerocopy::{FromBytes, FromZeros};
 
 use crate::common::GuestAddr;
-use crate::hw::usb::usbdev::demo_state_tracker::NullUsbDevice;
+use crate::hw::usb::usbdev::UsbDevice;
 use crate::vmm::MemCtx;
 
 use super::bits::device_context::{
@@ -163,7 +163,7 @@ pub struct DeviceSlotTable {
     /// See xHCI 1.2 Section 5.4.6
     dcbaap: Option<GuestAddr>,
     slots: Vec<Option<DeviceSlot>>,
-    port_devs: [Option<NullUsbDevice>; MAX_PORTS as usize],
+    port_devs: [Option<UsbDevice>; MAX_PORTS as usize],
     log: slog::Logger,
 }
 
@@ -191,8 +191,8 @@ impl DeviceSlotTable {
     pub fn attach_to_root_hub_port_address(
         &mut self,
         port_id: PortId,
-        usb_dev: NullUsbDevice,
-    ) -> Result<(), NullUsbDevice> {
+        usb_dev: UsbDevice,
+    ) -> Result<(), UsbDevice> {
         if let Some(dev) = self.port_devs[port_id.as_index()].replace(usb_dev) {
             Err(dev)
         } else {
@@ -202,7 +202,7 @@ impl DeviceSlotTable {
 
     pub fn detach_all_for_reset(
         &mut self,
-    ) -> impl Iterator<Item = (PortId, NullUsbDevice)> + '_ {
+    ) -> impl Iterator<Item = (PortId, UsbDevice)> + '_ {
         self.port_devs.iter_mut().enumerate().flat_map(|(i, opt_dev)| {
             opt_dev
                 .take()
@@ -213,7 +213,7 @@ impl DeviceSlotTable {
     pub fn usbdev_for_slot(
         &mut self,
         slot_id: SlotId,
-    ) -> Result<&mut NullUsbDevice, Error> {
+    ) -> Result<&mut UsbDevice, Error> {
         let slot = self.slot_mut(slot_id)?;
         let idx = slot
             .port_address
@@ -533,6 +533,7 @@ impl DeviceSlotTable {
 
                 // unwrap: only None when index > 31
                 if input_ctx.add_context_bit(i).unwrap() {
+                    eprintln!("configure endpoint: add context {i}");
                     // copy all fields of input ep context to output ep context;
                     // set output EP state field to running.
                     let in_ep_ctx =
@@ -946,7 +947,7 @@ impl DeviceSlotTable {
                 if let Some(dst_dev) = dst {
                     dst_dev.import(src_dev)?;
                 } else {
-                    let mut dst_dev = NullUsbDevice::default();
+                    let mut dst_dev = UsbDevice::default();
                     dst_dev.import(src_dev)?;
                     *dst = Some(dst_dev);
                 }

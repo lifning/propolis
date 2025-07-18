@@ -65,8 +65,7 @@ pub fn process_transfer_ring(
             Ok(xfer) => {
                 let XhciState { evt_data_xfer_len_accum, dev_slots, .. } =
                     &mut *state;
-                let dummy_usbdev_stub = match dev_slots.usbdev_for_slot(slot_id)
-                {
+                let usbdev = match dev_slots.usbdev_for_slot(slot_id) {
                     Ok(dev) => dev,
                     Err(e) => {
                         slog::error!(log, "No USB device in slot: {e}");
@@ -82,7 +81,7 @@ pub fn process_transfer_ring(
                     slot_id,
                     endpoint_id,
                     evt_data_xfer_len_accum,
-                    dummy_usbdev_stub,
+                    usbdev,
                     &memctx,
                     log,
                 ) {
