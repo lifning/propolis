@@ -23,8 +23,8 @@ pub enum Error {
     EndpointVsSetupDirectionMismatch(RequestDirection, RequestDirection),
     #[error("mismatched Setup Stage and Data Stage transfer direction in transfer: {0:?} != {1:?}")]
     SetupVsDataDirectionMismatch(RequestDirection, RequestDirection),
-    #[error("given an immediate for Out Data Stage")]
-    ImmediateParameterForOutDataStage,
+    #[error("given an immediate for IN transfer")]
+    ImmediateParameterForInTransfer,
     #[error("In Data Stage memory write failed")]
     DataStageWriteFailed,
     #[error("Out Data Stage memory read failed")]

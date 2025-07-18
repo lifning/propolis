@@ -25,11 +25,11 @@ pub struct NullUsbDevice {
 }
 
 impl NullUsbDevice {
-    const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(0);
-    const PRODUCT_NAME_INDEX: StringIndex = StringIndex(1);
-    const SERIAL_INDEX: StringIndex = StringIndex(2);
-    const CONFIG_NAME_INDEX: StringIndex = StringIndex(3);
-    const INTERFACE_NAME_INDEX: StringIndex = StringIndex(4);
+    const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(1);
+    const PRODUCT_NAME_INDEX: StringIndex = StringIndex(2);
+    const SERIAL_INDEX: StringIndex = StringIndex(3);
+    const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
+    const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
     fn device_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
@@ -71,7 +71,8 @@ impl NullUsbDevice {
     }
     fn endpoint_descriptor() -> EndpointDescriptor {
         EndpointDescriptor {
-            endpoint_addr: 0,
+            endpoint_addr: 1,
+            direction: None,
             attributes: EndpointAttributes::default(),
             max_packet_size: 64,
             interval: 1,

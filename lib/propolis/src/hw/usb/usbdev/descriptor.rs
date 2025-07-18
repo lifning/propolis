@@ -5,7 +5,7 @@
 use bitstruct::bitstruct;
 use strum::FromRepr;
 
-use super::hid::HIDDescriptor;
+use super::{hid::HIDDescriptor, requests::RequestDirection};
 
 #[repr(transparent)]
 pub struct Bcd16(pub u16);
@@ -65,11 +65,30 @@ impl Default for ConfigurationAttributes {
     }
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone, FromRepr, Debug)]
+pub enum EndpointTransferType {
+    Control = 0,
+    Isochronous = 1,
+    Bulk = 2,
+    Interrupt = 3,
+}
+impl From<u8> for EndpointTransferType {
+    fn from(value: u8) -> Self {
+        Self::from_repr(value)
+            .expect("EndpointTransferType must be converted from a two-bit field in EndpointAttributes")
+    }
+}
+impl Into<u8> for EndpointTransferType {
+    fn into(self) -> u8 {
+        self as u8
+    }
+}
+
 bitstruct! {
     #[derive(Default, Debug)]
     pub struct EndpointAttributes(pub u8) {
-        /// control, isoch, bulk, interrupt. TODO: enum
-        pub transfer_type: u8 = 0..2;
+        pub transfer_type: EndpointTransferType = 0..2;
         pub isoch_synch_type: u8 = 2..4;
         pub isoch_usage_type: u8 = 4..6;
         reserved: u8 = 6..8;
@@ -398,6 +417,9 @@ pub struct EndpointDescriptor {
     /// bEndpointAddress.
     pub endpoint_addr: u8,
 
+    /// High bit of bEndpointAddress. Ignored for Control endpoints
+    pub direction: Option<RequestDirection>,
+
     /// bmAttributes.
     pub attributes: EndpointAttributes,
 
@@ -425,10 +447,16 @@ impl Descriptor for EndpointDescriptor {
 
     /// USB 2.0 table 9-13
     fn serialize(&self) -> Box<dyn Iterator<Item = u8> + '_> {
+        let addr = self.endpoint_addr
+            | if let Some(RequestDirection::DeviceToHost) = self.direction {
+                0x80
+            } else {
+                0
+            };
         Box::new(
             self.header()
                 .into_iter() // 0, 1
-                .chain([self.endpoint_addr, self.attributes.0]) // 2, 3
+                .chain([addr, self.attributes.0]) // 2, 3
                 .chain(self.max_packet_size.to_le_bytes()) // 4-5
                 .chain([self.interval]), // 6
         )
