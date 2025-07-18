@@ -3,10 +3,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::common::{GuestAddr, GuestRegion};
-use crate::hw::usb::usbdev::demo_state_tracker::NullUsbDevice;
 use crate::hw::usb::usbdev::requests::{
     RequestDirection, RequestType, SetupData, StandardRequest,
 };
+use crate::hw::usb::usbdev::UsbDevice;
 use crate::hw::usb::xhci::bits::ring_data::{
     Trb, TrbDirection, TrbTransferType, TrbType,
 };
@@ -335,7 +335,7 @@ impl TransferInfo {
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
-        dummy_usbdev_stub: &mut NullUsbDevice,
+        usbdev: &mut UsbDevice,
         memctx: &MemCtx,
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {
@@ -344,7 +344,7 @@ impl TransferInfo {
             slot_id,
             endpoint_id,
             evt_data_xfer_len_accum,
-            dummy_usbdev_stub,
+            usbdev,
             memctx,
             log,
         );
@@ -375,7 +375,7 @@ impl TransferInfo {
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
-        dummy_usbdev_stub: &mut NullUsbDevice,
+        usbdev: &mut UsbDevice,
         memctx: &MemCtx,
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {
@@ -436,7 +436,7 @@ impl TransferInfo {
                     slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
                     TrbCompletionCode::UsbTransactionError
                 } else {
-                    match dummy_usbdev_stub.setup_stage(endpoint_id, data) {
+                    match usbdev.setup_stage(endpoint_id, data) {
                         Ok(()) => TrbCompletionCode::Success,
                         Err(e) => {
                             slog::error!(log, "USB Setup Stage: {e}");
@@ -480,19 +480,15 @@ impl TransferInfo {
                     )
                 }
 
-                let (trb_transfer_length, completion_code) =
-                    match dummy_usbdev_stub.data_stage(
-                        endpoint_id,
-                        data_buffer,
-                        req_dir,
-                        &memctx,
-                    ) {
-                        Ok(x) => (x as u32, TrbCompletionCode::Success),
-                        Err(e) => {
-                            slog::error!(log, "USB Data Stage: {e}");
-                            (0, TrbCompletionCode::UsbTransactionError)
-                        }
-                    };
+                let (trb_transfer_length, completion_code) = match usbdev
+                    .data_stage(endpoint_id, data_buffer, req_dir, &memctx)
+                {
+                    Ok(x) => (x as u32, TrbCompletionCode::Success),
+                    Err(e) => {
+                        slog::error!(log, "USB Data Stage: {e}");
+                        (0, TrbCompletionCode::UsbTransactionError)
+                    }
+                };
                 // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
                 // the number of bytes transferred are added to the EDTLA
                 // (we wrap to 24-bits before using the value elsewhere)
@@ -549,15 +545,14 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                let completion_code = match dummy_usbdev_stub
-                    .status_stage(endpoint_id, req_dir)
-                {
-                    Ok(()) => TrbCompletionCode::Success,
-                    Err(e) => {
-                        slog::error!(log, "USB Status Stage: {e}");
-                        TrbCompletionCode::UsbTransactionError
-                    }
-                };
+                let completion_code =
+                    match usbdev.status_stage(endpoint_id, req_dir) {
+                        Ok(()) => TrbCompletionCode::Success,
+                        Err(e) => {
+                            slog::error!(log, "USB Status Stage: {e}");
+                            TrbCompletionCode::UsbTransactionError
+                        }
+                    };
 
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {

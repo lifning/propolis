@@ -76,7 +76,7 @@ fn check_aligned_addr(addr: GuestAddr) -> Result<()> {
 impl<T: WorkItem> ConsumerRing<T> {
     pub fn new(addr: GuestAddr, cycle_state: bool) -> Result<Self> {
         check_aligned_addr(addr)?;
-
+        eprintln!("new transfer ring at {addr:#x?}");
         Ok(Self {
             start_addr: addr,
             dequeue_ptr: addr,

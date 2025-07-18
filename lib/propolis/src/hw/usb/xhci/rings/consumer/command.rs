@@ -332,7 +332,7 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-            // xHCI 1.2 sect 3.3.5, 4.6.6
+            // xHCI 1.2 sect 3.3.5, 4.3.5, 4.6.6
             CommandInfo::ConfigureEndpoint {
                 input_context_ptr,
                 slot_id,

@@ -390,18 +390,25 @@ impl Part {
 pub struct ReportDescriptor {
     pub report_type: HIDReportType,
     pub parts: Vec<Part>,
+    serialized: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl ReportDescriptor {
+    fn serialize_inner(&self) -> Vec<u8> {
+        let mut lock = self.serialized.lock().unwrap();
+        if lock.is_none() {
+            *lock = Some(self.parts.iter().flat_map(Part::serialize).collect())
+        }
+        lock.to_owned().unwrap() // blah
+    }
 }
 
 impl Descriptor for ReportDescriptor {
     fn length(&self) -> u8 {
-        u8::try_from(self.serialize().count()).unwrap()
+        u8::try_from(self.serialize_inner().len()).unwrap()
     }
     fn serialize(&self) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(
-            self.header()
-                .into_iter()
-                .chain(self.parts.iter().flat_map(|part| part.serialize())),
-        )
+        Box::new((self.serialize_inner()).into_iter())
     }
     fn descriptor_type(&self) -> DescriptorType {
         DescriptorType::Report
@@ -412,6 +419,7 @@ impl Descriptor for ReportDescriptor {
 // i.e. Self::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
 pub fn tablet_report_descriptor() -> ReportDescriptor {
     ReportDescriptor {
+        serialized: std::sync::Mutex::new(None),
         report_type: HIDReportType::Input,
         parts: vec![
             UsagePage::GenericDesktopControls.item(),
@@ -479,8 +487,6 @@ pub fn tablet_report_descriptor() -> ReportDescriptor {
 
 #[cfg(test)]
 mod test {
-    use crate::hw::usb::usbdev::descriptor::Descriptor;
-
     #[rustfmt::skip]
     #[test]
     // dual purpose: verify that .serialize() does what we want, and trips on
@@ -488,7 +494,7 @@ mod test {
     // in which we care about live migration!
     fn tablet_descriptor_serialization() {
         let serialized: Vec<u8> =
-            super::tablet_report_descriptor().serialize().collect();
+            super::tablet_report_descriptor().serialize_inner();
         // similar to HID 1.11 sect E.10
         assert_eq!(serialized.as_slice(), &[
             5, 1, // usage page (generic desktop)
