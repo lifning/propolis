@@ -193,7 +193,8 @@ impl PciXhci {
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
-        let dev = UsbDevice::default();
+        // TODO: factor this out, used in import too
+        let dev = UsbDevice::new(&self.pci_state.acc_mem);
         state.queued_device_connections.push((port_id, dev));
         Ok(())
     }
@@ -1056,14 +1057,14 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
-        state.dev_slots.import(&dev_slots)?;
+        state.dev_slots.import(&self.pci_state.acc_mem, &dev_slots)?;
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {
-                let mut dev = UsbDevice::default();
-                dev.import(&dev_data)?;
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
+                let mut dev = UsbDevice::new(&self.pci_state.acc_mem);
+                dev.import(&dev_data)?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })
             .collect::<Result<Vec<_>, _>>()?;

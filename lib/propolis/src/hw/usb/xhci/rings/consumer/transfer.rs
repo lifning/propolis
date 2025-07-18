@@ -411,8 +411,27 @@ impl TransferInfo {
                 data_buffer,
                 interrupt_target_on_completion,
             }) => {
-                slog::error!(log, "Normal TD unimplemented (parameter {data_buffer:?}, interrupt target {interrupt_target_on_completion:?})");
-                Vec::new()
+                let completion_code =
+                    match usbdev.normal(endpoint_id, data_buffer) {
+                        Ok(()) => TrbCompletionCode::Success,
+                        Err(_) => TrbCompletionCode::UsbTransactionError,
+                    };
+                // XXX are these params correct
+                interrupt_target_on_completion
+                    .map(|interrupter| TransferEventParams {
+                        evt_info: EventInfo::Transfer {
+                            trb_pointer,
+                            completion_code,
+                            trb_transfer_length: 0,
+                            slot_id,
+                            endpoint_id,
+                            event_data: false,
+                        },
+                        interrupter,
+                        block_event_interrupt: false,
+                    })
+                    .into_iter()
+                    .collect()
             }
             TransferInfo::SetupStage {
                 data,

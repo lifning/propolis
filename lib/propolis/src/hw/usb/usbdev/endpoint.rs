@@ -135,9 +135,7 @@ where
                     if let Some(payload) = &self.payload {
                         let PointerOrImmediate::Pointer(region) = data_buffer
                         else {
-                            return Err(
-                                Error::ImmediateParameterForOutDataStage,
-                            );
+                            return Err(Error::ImmediateParameterForInTransfer);
                         };
                         memctx
                             .write_from(

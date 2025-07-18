@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use zerocopy::{FromBytes, FromZeros};
 
+use crate::accessors::MemAccessor;
 use crate::common::GuestAddr;
 use crate::hw::usb::usbdev::UsbDevice;
 use crate::vmm::MemCtx;
@@ -714,9 +715,9 @@ impl DeviceSlotTable {
         _suspend: bool,
         memctx: &MemCtx,
     ) -> Option<TrbCompletionCode> {
-        // TODO: spec says to also insert a Transfer Event to the Event Ring
+        // NOTE: spec says to also insert a Transfer Event to the Event Ring
         // if we interrupt the execution of a Transfer Descriptor, but we at
-        // present cannot interrupt TD execution.
+        // present cannot interrupt an in-flight TD execution.
 
         // if enabled by previous enable slot command
         Some(if self.slot(slot_id).is_ok() {
@@ -926,6 +927,7 @@ impl DeviceSlotTable {
 
     pub fn import(
         &mut self,
+        acc_mem: &MemAccessor,
         value: &migrate::DeviceSlotTableV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
@@ -945,9 +947,10 @@ impl DeviceSlotTable {
             } else {
                 let src_dev = src.as_ref().unwrap();
                 if let Some(dst_dev) = dst {
+                    // device exists in this port already, update its state
                     dst_dev.import(src_dev)?;
                 } else {
-                    let mut dst_dev = UsbDevice::default();
+                    let mut dst_dev = UsbDevice::new(acc_mem);
                     dst_dev.import(src_dev)?;
                     *dst = Some(dst_dev);
                 }

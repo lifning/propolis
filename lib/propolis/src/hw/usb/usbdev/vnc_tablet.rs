@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::{
+    accessors::MemAccessor,
     hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate, vmm::MemCtx,
 };
 
@@ -18,10 +19,10 @@ use super::{
     Error, Result,
 };
 
-#[derive(Default)]
 pub struct HidTabletUsbDevice {
     control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
     idle_duration_4ms: u8,
+    acc_mem: MemAccessor,
 }
 
 impl HidTabletUsbDevice {
@@ -30,6 +31,15 @@ impl HidTabletUsbDevice {
     const SERIAL_INDEX: StringIndex = StringIndex(3);
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
+
+    pub fn new(acc_mem: &MemAccessor) -> Self {
+        let acc_mem = acc_mem.child(Some(format!("USB Tablet")));
+        Self {
+            control_endpoint: Default::default(),
+            idle_duration_4ms: 0,
+            acc_mem,
+        }
+    }
 
     fn device_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
@@ -62,7 +72,7 @@ impl HidTabletUsbDevice {
         InterfaceDescriptor {
             interface_num: 1,
             alternate_setting: 0,
-            endpoints: vec![Self::endpoint_descriptor()],
+            endpoints: vec![Self::interrupt_in_endpoint_descriptor()],
             class: InterfaceClass::HID,
             subclass: InterfaceSubclass(0), // no boot interface support
             protocol: InterfaceProtocol(0), // no boot interface support
@@ -76,10 +86,12 @@ impl HidTabletUsbDevice {
             )],
         }
     }
-    fn endpoint_descriptor() -> EndpointDescriptor {
+    fn interrupt_in_endpoint_descriptor() -> EndpointDescriptor {
         EndpointDescriptor {
-            endpoint_addr: 2,
-            attributes: EndpointAttributes::default(),
+            endpoint_addr: 1,
+            direction: Some(RequestDirection::DeviceToHost),
+            attributes: EndpointAttributes::default()
+                .with_transfer_type(EndpointTransferType::Interrupt),
             max_packet_size: 64,
             interval: 1,
             specific_augmentations: vec![],
@@ -229,6 +241,24 @@ impl HidTabletUsbDevice {
                 )))
             }
         })
+    }
+
+    pub fn normal(
+        &self,
+        endpoint_id: u8,
+        data_buffer: PointerOrImmediate,
+    ) -> Result<()> {
+        eprintln!("normal {endpoint_id}: {data_buffer:#x?}");
+        if let PointerOrImmediate::Pointer(range) = data_buffer {
+            // TODO: store range and write to it later
+            self.acc_mem
+                .access()
+                .unwrap()
+                .write_many(range.0, &vec![0u8; range.1]);
+            Ok(())
+        } else {
+            Err(Error::ImmediateParameterForInTransfer)
+        }
     }
 
     pub fn import(
