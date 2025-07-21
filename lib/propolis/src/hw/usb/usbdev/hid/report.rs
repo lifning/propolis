@@ -24,7 +24,7 @@ impl ItemPrefix {
 
 #[repr(u8)]
 #[derive(strum::FromRepr, Copy, Clone, Debug)]
-enum ItemTag {
+pub enum ItemTag {
     // -- main --
     /// Data provided by one or more physical controls
     Input = 0b1000_00,
@@ -74,10 +74,10 @@ enum ItemTag {
 }
 
 impl ItemTag {
-    fn one_byte(&self, value: u32) -> Part {
+    pub fn one_byte(&self, value: u32) -> Part {
         ItemPrefix(0).with_size(ItemSize::_1).with_tag(*self).value(value)
     }
-    fn two_byte(&self, value: u32) -> Part {
+    pub fn two_byte(&self, value: u32) -> Part {
         ItemPrefix(0).with_size(ItemSize::_2).with_tag(*self).value(value)
     }
 }
@@ -139,42 +139,42 @@ bitstruct! {
     /// HID 1.11 sect 6.2.2.5
     // TODO: better names for these fields, or enums
     #[derive(Clone, Copy, Debug, Default)]
-    struct InputOutputFeatureItem(pub u32) {
+ pub   struct InputOutputFeatureItem(pub u32) {
         /// 0 if Data
         /// 1 if Constant (read-only to host)
-        constant: bool = 0;
+        pub constant: bool = 0;
         /// 0 if Array,
         /// 1 if Variable
-        variable: bool = 1;
+        pub variable: bool = 1;
         /// 0 if Absolute (e.g. tablet),
         /// 1 if Relative to previous reports (e.g. mouse).
-        relative: bool = 2;
+        pub relative: bool = 2;
         /// True iff data 'rolls over' when reaching the extremes of its range
         /// (e.g. a dial resetting to 0 at 360 degrees)
-        wrap: bool = 3;
+        pub wrap: bool = 3;
         /// True iff data is processed in some way and no longer represents a
         /// linear relationship to what was measured.
-        non_linear: bool = 4;
+        pub non_linear: bool = 4;
         /// True iff the control has a resting state (e.g. non-toggle buttons,
         /// self-centering joysticks) to which it returns when the user is not
         /// interacting with it.
-        no_preferred: bool = 5;
+        pub no_preferred: bool = 5;
         /// True iff the control has a state in which it won't send meaningful
         /// data, such as controls that require the user to physically interact
         /// with the control. (A null state is reported by sending a value
         /// outside of the control's logical min..max range)
-        null_state: bool = 6;
+        pub null_state: bool = 6;
         /// For Input items, this bit is RESERVED.
-        volatile: bool = 7;
+        pub volatile: bool = 7;
         /// 0 if Bitfield,
         /// 1 if Buffered Bytes (the control emits a fixed-size stream of bytes).
-        buffered_bytes: bool = 8;
+        pub buffered_bytes: bool = 8;
         reserved: u32 = 9..32;
     }
 }
 
 impl InputOutputFeatureItem {
-    fn input(&self) -> Part {
+    pub fn input(&self) -> Part {
         ItemTag::Input.one_byte(self.0)
     }
 }
@@ -221,7 +221,7 @@ pub enum UsagePage {
 }
 
 impl UsagePage {
-    fn item(&self) -> Part {
+    pub fn item(&self) -> Part {
         if let Self::FIDOAlliance = self {
             ItemTag::UsagePage.two_byte(*self as u32)
         } else {
@@ -275,7 +275,7 @@ pub enum GenericDesktopUsage {
     // [TODO more ...]
 }
 impl GenericDesktopUsage {
-    fn item(&self) -> Part {
+    pub fn item(&self) -> Part {
         ItemTag::Usage.one_byte(*self as u32)
     }
 }
@@ -338,7 +338,7 @@ pub enum Collection {
 }
 
 impl Collection {
-    fn items(&self, items: impl IntoIterator<Item = Part>) -> Part {
+    pub fn items(&self, items: impl IntoIterator<Item = Part>) -> Part {
         Part::Collection(*self, items.into_iter().collect())
     }
 }
@@ -394,6 +394,9 @@ pub struct ReportDescriptor {
 }
 
 impl ReportDescriptor {
+    pub fn new(report_type: HIDReportType, parts: Vec<Part>) -> Self {
+        Self { report_type, parts, serialized: std::sync::Mutex::new(None) }
+    }
     fn serialize_inner(&self) -> Vec<u8> {
         let mut lock = self.serialized.lock().unwrap();
         if lock.is_none() {
@@ -412,117 +415,5 @@ impl Descriptor for ReportDescriptor {
     }
     fn descriptor_type(&self) -> DescriptorType {
         DescriptorType::Report
-    }
-}
-
-// might be nice to generate this from some nicer builder-pattern thing someday
-// i.e. Self::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
-pub fn tablet_report_descriptor() -> ReportDescriptor {
-    ReportDescriptor {
-        serialized: std::sync::Mutex::new(None),
-        report_type: HIDReportType::Input,
-        parts: vec![
-            UsagePage::GenericDesktopControls.item(),
-            GenericDesktopUsage::Mouse.item(),
-            Collection::Application.items([
-                // ItemTag::ReportID.one_byte(1),
-                GenericDesktopUsage::Pointer.item(),
-                Collection::Physical.items([
-                    UsagePage::Button.item(),
-                    // VNC mouse button reports are in the form of a one-byte
-                    // bitfield, with bit 0 representing 'disabled', so 1..=7
-                    // (HID Button values start at 1 for "primary")
-                    ItemTag::UsageMinimum.one_byte(1),
-                    ItemTag::UsageMaximum.one_byte(7),
-                    ItemTag::LogicalMinimum.one_byte(0),
-                    ItemTag::LogicalMaximum.one_byte(1),
-                    // 7 buttons to report...
-                    ItemTag::ReportCount.one_byte(7),
-                    ItemTag::ReportSize.one_byte(1),
-                    // 1 bit each
-                    InputOutputFeatureItem(0)
-                        .with_constant(false) // data
-                        .with_variable(true) // variable
-                        .with_relative(false) // absolute
-                        .input(),
-                    // 1 bit padding to round out the byte in the report
-                    // (similar to Mouse example in HID 1.11 sect E.10)
-                    ItemTag::ReportCount.one_byte(1),
-                    ItemTag::ReportSize.one_byte(1),
-                    InputOutputFeatureItem(0).with_constant(true).input(),
-                    UsagePage::GenericDesktopControls.item(),
-                    GenericDesktopUsage::X.item(),
-                    GenericDesktopUsage::Y.item(),
-                    ItemTag::LogicalMinimum.one_byte(0),
-                    ItemTag::LogicalMaximum.two_byte(0x8000u32),
-                    // two axes, 16-bits each
-                    ItemTag::ReportSize.one_byte(16),
-                    ItemTag::ReportCount.one_byte(2),
-                    InputOutputFeatureItem(0)
-                        .with_constant(false) // data
-                        .with_variable(true) // variable
-                        .with_relative(false) // absolute
-                        .input(),
-                ]),
-            ]),
-            /* if absolute-mouse doesn't work, maybe we use Digitizer page
-            Part::Item(
-                ItemTag::UsagePage.one_byte(),
-                UsagePage::Digitizers as u32,
-            ),
-            Part::Item(
-                ItemTag::Usage.one_byte(),
-                DigitizerUsage::Digitizer as u32,
-            ),
-            Part::Collection(
-                Collection::Application,
-                vec![
-                    // TODO report id 2, 3
-                ],
-            ),
-            */
-        ],
-    }
-}
-
-#[cfg(test)]
-mod test {
-    #[rustfmt::skip]
-    #[test]
-    // dual purpose: verify that .serialize() does what we want, and trips on
-    // attempts to change the report format - which we must not do in a world
-    // in which we care about live migration!
-    fn tablet_descriptor_serialization() {
-        let serialized: Vec<u8> =
-            super::tablet_report_descriptor().serialize_inner();
-        // similar to HID 1.11 sect E.10
-        assert_eq!(serialized.as_slice(), &[
-            5, 1, // usage page (generic desktop)
-            9, 2, // usage (mouse)
-            0xA1, 1, // collection (application)
-                9, 1, // usage (pointer)
-                0xA1, 0, // collection (physical)
-                    5, 9, // usage page (buttons)
-                    0x19, 1, // usage minimum (1)
-                    0x29, 7, // usage maximum (7)
-                    0x15, 0, // logical minimum (0)
-                    0x25, 1, // logical maximum (1)
-                    0x95, 7, // report count (7)
-                    0x75, 1, // report size (1)
-                    0x81, 2, // input (data, variable, absolute), 7 button bits
-                    0x95, 1, // report count (1)
-                    0x75, 1, // report size (1)
-                    0x81, 1, // input (constant), 1 bit padding
-                    5, 1, // usage page (generic desktop)
-                    9, 0x30, // usage (x)
-                    9, 0x31, // usage (y)
-                    0x15, 0, // logical minimum (0)
-                    0x26, 0, 0x80, // logical maximum (0x8000)
-                    0x75, 0x10, // report size (16)
-                    0x95, 2, // report count (2)
-                    0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
-                0xC0, // end collection
-            0xC0, // end collection
-        ])
     }
 }

@@ -10,10 +10,7 @@ use crate::{
 use super::{
     descriptor::*,
     endpoint::{control::ControlRequestInfo, Endpoint, InAndOut},
-    hid::{
-        report::tablet_report_descriptor, HIDDescriptor, HIDRequestInfo,
-        HID_VER_1_11,
-    },
+    hid::{report::*, *},
     probes,
     requests::{RequestDirection, SetupData},
     Error, Result,
@@ -81,7 +78,7 @@ impl HidTabletUsbDevice {
                 HIDDescriptor {
                     hid_version: HID_VER_1_11,
                     country_code: CountryCode::International,
-                    class_descriptor: vec![tablet_report_descriptor()],
+                    class_descriptor: vec![Self::report_descriptor()],
                 },
             )],
         }
@@ -119,19 +116,87 @@ impl HidTabletUsbDevice {
         }
     }
 
+    // might be nice to generate this from some nicer builder-pattern thing someday
+    // i.e. ReptDesc::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
+    pub fn report_descriptor() -> ReportDescriptor {
+        ReportDescriptor::new(
+            HIDReportType::Input,
+            vec![
+                UsagePage::GenericDesktopControls.item(),
+                GenericDesktopUsage::Mouse.item(),
+                Collection::Application.items([
+                    // ItemTag::ReportID.one_byte(1),
+                    GenericDesktopUsage::Pointer.item(),
+                    Collection::Physical.items([
+                        UsagePage::Button.item(),
+                        // VNC mouse button reports are in the form of a one-byte
+                        // bitfield, with bit 0 representing 'disabled', so 1..=7
+                        // (HID Button values start at 1 for "primary")
+                        ItemTag::UsageMinimum.one_byte(1),
+                        ItemTag::UsageMaximum.one_byte(7),
+                        ItemTag::LogicalMinimum.one_byte(0),
+                        ItemTag::LogicalMaximum.one_byte(1),
+                        // 7 buttons to report...
+                        ItemTag::ReportCount.one_byte(7),
+                        ItemTag::ReportSize.one_byte(1),
+                        // 1 bit each
+                        InputOutputFeatureItem(0)
+                            .with_constant(false) // data
+                            .with_variable(true) // variable
+                            .with_relative(false) // absolute
+                            .input(),
+                        // 1 bit padding to round out the byte in the report
+                        // (similar to Mouse example in HID 1.11 sect E.10)
+                        ItemTag::ReportCount.one_byte(1),
+                        ItemTag::ReportSize.one_byte(1),
+                        InputOutputFeatureItem(0).with_constant(true).input(),
+                        UsagePage::GenericDesktopControls.item(),
+                        GenericDesktopUsage::X.item(),
+                        GenericDesktopUsage::Y.item(),
+                        ItemTag::LogicalMinimum.one_byte(0),
+                        ItemTag::LogicalMaximum.two_byte(0x8000u32),
+                        // two axes, 16-bits each
+                        ItemTag::ReportSize.one_byte(16),
+                        ItemTag::ReportCount.one_byte(2),
+                        InputOutputFeatureItem(0)
+                            .with_constant(false) // data
+                            .with_variable(true) // variable
+                            .with_relative(false) // absolute
+                            .input(),
+                    ]),
+                ]),
+                /* if absolute-mouse doesn't work, maybe we use Digitizer page
+                Part::Item(
+                    ItemTag::UsagePage.one_byte(),
+                    UsagePage::Digitizers as u32,
+                ),
+                Part::Item(
+                    ItemTag::Usage.one_byte(),
+                    DigitizerUsage::Digitizer as u32,
+                ),
+                Part::Collection(
+                    Collection::Application,
+                    vec![
+                        // TODO report id 2, 3
+                    ],
+                ),
+                */
+            ],
+        )
+    }
+
     pub fn setup_stage(
         &mut self,
         endpoint_id: u8,
         setup: SetupData,
     ) -> Result<()> {
-        if endpoint_id == 1 {
-            if let Some(req) = self.control_endpoint.setup_stage(setup)? {
-                eprintln!("in {endpoint_id}: {req:?}");
-                let payload = self.payload_for(req)?;
-                self.control_endpoint.set_payload(payload)?;
-            }
-        } else {
-            todo!()
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+            eprintln!("in {endpoint_id}: {req:?}");
+            let payload = self.payload_for(req)?;
+            self.control_endpoint.set_payload(payload)?;
         }
         Ok(())
     }
@@ -143,15 +208,10 @@ impl HidTabletUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize> {
-        if endpoint_id == 1 {
-            self.control_endpoint.data_stage(
-                data_buffer,
-                data_direction,
-                memctx,
-            )
-        } else {
-            todo!()
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
         }
+        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
     }
 
     pub fn status_stage(
@@ -159,36 +219,33 @@ impl HidTabletUsbDevice {
         endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if endpoint_id == 1 {
-            match self.control_endpoint.status_stage(status_direction)? {
-                Some((req, _payload)) => {
-                    eprintln!("out {endpoint_id}: {req:?}");
-                    match req {
-                        ControlRequestInfo::SetConfiguration {
-                            configuration: _,
-                        } => {
-                            // TODO: check config value
-                            Ok(())
-                        }
-                        ControlRequestInfo::Class(
-                            HIDRequestInfo::SetIdle {
-                                duration_4ms,
-                                report_id: _,
-                                interface: _,
-                            },
-                        ) => {
-                            self.idle_duration_4ms = duration_4ms;
-                            Ok(())
-                        }
-                        x => Err(Error::UnimplementedRequestBehavior(format!(
-                            "{x:?}"
-                        ))),
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        match self.control_endpoint.status_stage(status_direction)? {
+            Some((req, _payload)) => {
+                eprintln!("out {endpoint_id}: {req:?}");
+                match req {
+                    ControlRequestInfo::SetConfiguration {
+                        configuration: _,
+                    } => {
+                        // TODO: check config value
+                        Ok(())
                     }
+                    ControlRequestInfo::Class(HIDRequestInfo::SetIdle {
+                        duration_4ms,
+                        report_id: _,
+                        interface: _,
+                    }) => {
+                        self.idle_duration_4ms = duration_4ms;
+                        Ok(())
+                    }
+                    x => Err(Error::UnimplementedRequestBehavior(format!(
+                        "{x:?}"
+                    ))),
                 }
-                None => Ok(()),
             }
-        } else {
-            todo!()
+            None => Ok(()),
         }
     }
 
@@ -212,7 +269,7 @@ impl HidTabletUsbDevice {
                         Box::new(Self::device_qualifier_descriptor())
                     }
                     DescriptorType::Report => {
-                        Box::new(tablet_report_descriptor())
+                        Box::new(Self::report_descriptor())
                     }
                     x => return Err(Error::UnimplementedDescriptor(x)),
                 };
@@ -288,5 +345,49 @@ impl HidTabletUsbDevice {
                 .into_iter()
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::hw::usb::usbdev::descriptor::Descriptor;
+
+    #[rustfmt::skip]
+    #[test]
+    // dual purpose: verify that ReportDescriptor::serialize() does what we want
+    // and trips on attempts to change the report format - which we must not do
+    // in a world in which we care about live migration!
+    fn tablet_descriptor_serialization() {
+        let serialized: Vec<u8> =
+            super::HidTabletUsbDevice::report_descriptor().serialize().collect();
+        // similar to HID 1.11 sect E.10
+        assert_eq!(serialized.as_slice(), &[
+            5, 1, // usage page (generic desktop)
+            9, 2, // usage (mouse)
+            0xA1, 1, // collection (application)
+                9, 1, // usage (pointer)
+                0xA1, 0, // collection (physical)
+                    5, 9, // usage page (buttons)
+                    0x19, 1, // usage minimum (1)
+                    0x29, 7, // usage maximum (7)
+                    0x15, 0, // logical minimum (0)
+                    0x25, 1, // logical maximum (1)
+                    0x95, 7, // report count (7)
+                    0x75, 1, // report size (1)
+                    0x81, 2, // input (data, variable, absolute), 7 button bits
+                    0x95, 1, // report count (1)
+                    0x75, 1, // report size (1)
+                    0x81, 1, // input (constant), 1 bit padding
+                    5, 1, // usage page (generic desktop)
+                    9, 0x30, // usage (x)
+                    9, 0x31, // usage (y)
+                    0x15, 0, // logical minimum (0)
+                    0x26, 0, 0x80, // logical maximum (0x8000)
+                    0x75, 0x10, // report size (16)
+                    0x95, 2, // report count (2)
+                    0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
+                0xC0, // end collection
+            0xC0, // end collection
+        ])
     }
 }
