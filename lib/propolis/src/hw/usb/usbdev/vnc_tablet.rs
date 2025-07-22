@@ -2,8 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::sync::{Arc, Mutex};
+
+use rfb::proto::PointerEvent;
+use rgb_frame::Spec;
+
 use crate::{
-    accessors::MemAccessor,
     hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate, vmm::MemCtx,
 };
 
@@ -16,25 +20,52 @@ use super::{
     Error, Result,
 };
 
-pub struct HidTabletUsbDevice {
-    control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
-    idle_duration_4ms: u8,
-    acc_mem: MemAccessor,
+const REPORT_SIZE: usize = 5;
+
+#[derive(Default)]
+pub struct HIDTabletReport {
+    data: [u8; REPORT_SIZE],
 }
 
-impl HidTabletUsbDevice {
+impl HIDTabletReport {
+    pub fn pointer_event(&mut self, pe: PointerEvent, spec: Spec) {
+        // div: spec.width and spec.height are NonZeroUsize
+        let x = (pe.position.x as usize * 0x8000 / spec.width) as u16;
+        let y = (pe.position.y as usize * 0x8000 / spec.height) as u16;
+        let button_bits = pe.pressed.bits() << 1;
+
+        for (dst, src) in self.data.iter_mut().zip(
+            // TODO: from the same construct that generates the ReportDescriptor
+            [button_bits]
+                .into_iter()
+                .chain(u16::to_le_bytes(x))
+                .chain(u16::to_le_bytes(y)),
+        ) {
+            *dst = src;
+        }
+    }
+}
+
+pub struct HIDTabletDevice {
+    control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
+    idle_duration_4ms: u8,
+    report: Arc<Mutex<HIDTabletReport>>,
+    last_report: [u8; REPORT_SIZE],
+}
+
+impl HIDTabletDevice {
     const MANUFACTURER_NAME_INDEX: StringIndex = StringIndex(1);
     const PRODUCT_NAME_INDEX: StringIndex = StringIndex(2);
     const SERIAL_INDEX: StringIndex = StringIndex(3);
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
-    pub fn new(acc_mem: &MemAccessor) -> Self {
-        let acc_mem = acc_mem.child(Some(format!("USB Tablet")));
+    pub fn new(report: Arc<Mutex<HIDTabletReport>>) -> Self {
         Self {
             control_endpoint: Default::default(),
             idle_duration_4ms: 0,
-            acc_mem,
+            report,
+            last_report: [1; REPORT_SIZE],
         }
     }
 
@@ -112,7 +143,7 @@ impl HidTabletUsbDevice {
             device_subclass: SubclassCode(0),
             device_protocol: ProtocolCode(0),
             max_packet_size_0: MaxSizeZeroEP::_64,
-            num_configurations: 0,
+            num_configurations: 1,
         }
     }
 
@@ -214,6 +245,26 @@ impl HidTabletUsbDevice {
         self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
     }
 
+    pub fn normal(
+        &mut self,
+        endpoint_id: u8,
+        data_buffer: PointerOrImmediate,
+        memctx: &MemCtx,
+    ) -> Result<()> {
+        eprintln!("normal {endpoint_id}: {data_buffer:#x?}");
+        if let PointerOrImmediate::Pointer(region) = data_buffer {
+            let report = self.report.lock().unwrap();
+            if report.data != self.last_report {
+                eprintln!("send it");
+                memctx.write_many(region.0, &report.data);
+                self.last_report = report.data;
+            }
+            Ok(())
+        } else {
+            Err(Error::ImmediateParameterForInTransfer)
+        }
+    }
+
     pub fn status_stage(
         &mut self,
         endpoint_id: u8,
@@ -249,6 +300,7 @@ impl HidTabletUsbDevice {
         }
     }
 
+    // TODO: not alloc unnecessarily
     fn payload_for(
         &self,
         req: ControlRequestInfo<HIDRequestInfo>,
@@ -292,30 +344,21 @@ impl HidTabletUsbDevice {
             }) => {
                 vec![self.idle_duration_4ms]
             }
+            ControlRequestInfo::Class(HIDRequestInfo::GetReport {
+                report_type: HIDReportType::Input,
+                report_id: _,
+                interface: _,
+            }) => {
+                let report = self.report.lock().unwrap();
+                // TODO self.last_report = report.data;
+                report.data.to_vec()
+            }
             x => {
                 return Err(Error::UnimplementedRequestBehavior(format!(
                     "{x:?}"
                 )))
             }
         })
-    }
-
-    pub fn normal(
-        &self,
-        endpoint_id: u8,
-        data_buffer: PointerOrImmediate,
-    ) -> Result<()> {
-        eprintln!("normal {endpoint_id}: {data_buffer:#x?}");
-        if let PointerOrImmediate::Pointer(range) = data_buffer {
-            // TODO: store range and write to it later
-            self.acc_mem
-                .access()
-                .unwrap()
-                .write_many(range.0, &vec![0u8; range.1]);
-            Ok(())
-        } else {
-            Err(Error::ImmediateParameterForInTransfer)
-        }
     }
 
     pub fn import(
@@ -359,7 +402,7 @@ mod test {
     // in a world in which we care about live migration!
     fn tablet_descriptor_serialization() {
         let serialized: Vec<u8> =
-            super::HidTabletUsbDevice::report_descriptor().serialize().collect();
+            super::HIDTabletDevice::report_descriptor().serialize().collect();
         // similar to HID 1.11 sect E.10
         assert_eq!(serialized.as_slice(), &[
             5, 1, // usage page (generic desktop)

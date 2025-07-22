@@ -14,6 +14,7 @@ use device_slots::SlotId;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
+use crate::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
 use crate::hw::usb::usbdev::UsbDevice;
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::port::PortId;
@@ -189,12 +190,15 @@ impl PciXhci {
     pub fn add_usb_device(
         &self,
         raw_port: u8,
-        // TODO: pass the device when real ones exist
+        // TODO: pass the device-specifics better than this
+        hid_report: &Arc<Mutex<HIDTabletReport>>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
+
         // TODO: factor this out, used in import too
-        let dev = UsbDevice::new(&self.pci_state.acc_mem);
+        let dev = UsbDevice::new(hid_report.clone());
+
         state.queued_device_connections.push((port_id, dev));
         Ok(())
     }
@@ -1057,13 +1061,14 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
-        state.dev_slots.import(&self.pci_state.acc_mem, &dev_slots)?;
+        state.dev_slots.import(&dev_slots)?;
+        // FIXME
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
-                let mut dev = UsbDevice::new(&self.pci_state.acc_mem);
+                let mut dev = UsbDevice::new(todo!(/* XXX */));
                 dev.import(&dev_data)?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })
