@@ -89,14 +89,17 @@
 //!
 //! [`state_driver`]: crate::vm::state_driver
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use oximeter::types::ProducerRegistry;
 use oximeter_instruments::kstat::KstatSampler;
-use propolis::enlightenment::{
-    bhyve::BhyveGuestInterface,
-    hyperv::{Features as HyperVFeatures, HyperV},
-    Enlightenment,
+use propolis::{
+    enlightenment::{
+        bhyve::BhyveGuestInterface,
+        hyperv::{Features as HyperVFeatures, HyperV},
+        Enlightenment,
+    },
+    hw::usb::usbdev::vnc_tablet::HIDTabletReport,
 };
 use propolis_api_types::{
     instance_spec::components::board::{
@@ -563,7 +566,10 @@ async fn initialize_vm_objects(
         &properties,
     ))?;
     init.initialize_network_devices(&chipset).await?;
-    init.initialize_xhc_usb(&chipset)?;
+
+    // XXX
+    let hid_report = Arc::new(Mutex::new(HIDTabletReport::default()));
+    init.initialize_xhc_usb(&chipset, &hid_report)?;
 
     #[cfg(feature = "failure-injection")]
     init.initialize_test_devices();
@@ -602,6 +608,7 @@ async fn initialize_vm_objects(
         com1,
         framebuffer: Some(ramfb),
         ps2ctrl,
+        hid_report,
     })
 }
 

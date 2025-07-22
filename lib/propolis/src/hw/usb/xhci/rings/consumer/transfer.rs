@@ -412,7 +412,7 @@ impl TransferInfo {
                 interrupt_target_on_completion,
             }) => {
                 let completion_code =
-                    match usbdev.normal(endpoint_id, data_buffer) {
+                    match usbdev.normal(endpoint_id, data_buffer, memctx) {
                         Ok(()) => TrbCompletionCode::Success,
                         Err(_) => TrbCompletionCode::UsbTransactionError,
                     };

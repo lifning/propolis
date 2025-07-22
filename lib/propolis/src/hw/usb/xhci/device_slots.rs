@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use zerocopy::{FromBytes, FromZeros};
 
-use crate::accessors::MemAccessor;
 use crate::common::GuestAddr;
 use crate::hw::usb::usbdev::UsbDevice;
 use crate::vmm::MemCtx;
@@ -927,7 +926,6 @@ impl DeviceSlotTable {
 
     pub fn import(
         &mut self,
-        acc_mem: &MemAccessor,
         value: &migrate::DeviceSlotTableV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
@@ -950,7 +948,8 @@ impl DeviceSlotTable {
                     // device exists in this port already, update its state
                     dst_dev.import(src_dev)?;
                 } else {
-                    let mut dst_dev = UsbDevice::new(acc_mem);
+                    // FIXME
+                    let mut dst_dev = UsbDevice::new(todo!(/* XXX */));
                     dst_dev.import(src_dev)?;
                     *dst = Some(dst_dev);
                 }

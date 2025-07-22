@@ -15,7 +15,7 @@ pub mod demo_state_tracker;
 pub mod vnc_tablet;
 
 // pub type UsbDevice = demo_state_tracker::NullUsbDevice;
-pub type UsbDevice = vnc_tablet::HidTabletUsbDevice;
+pub type UsbDevice = vnc_tablet::HIDTabletDevice;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

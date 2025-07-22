@@ -6,7 +6,7 @@ use std::convert::TryInto;
 use std::fs::File;
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::os::unix::fs::FileTypeExt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::serial::Serial;
@@ -42,6 +42,7 @@ use propolis::hw::qemu::{
     ramfb,
 };
 use propolis::hw::uart::LpcUart;
+use propolis::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
 use propolis::hw::usb::xhci;
 use propolis::hw::{nvme, virtio};
 use propolis::intr_pins;
@@ -823,6 +824,7 @@ impl MachineInitializer<'_> {
     pub fn initialize_xhc_usb(
         &mut self,
         chipset: &RegisteredChipset,
+        hid_report: &Arc<Mutex<HIDTabletReport>>,
     ) -> Result<(), MachineInitError> {
         for (xhc_id, xhc_spec) in &self.spec.xhcs {
             info!(
@@ -844,9 +846,10 @@ impl MachineInitializer<'_> {
                         "xhc_pci_path" => %xhc_spec.pci_path,
                         "usb_port" => %usb.root_hub_port_num,
                     );
-                    xhc.add_usb_device(usb.root_hub_port_num).map_err(
-                        MachineInitError::UsbRootHubPortNumberInvalid,
-                    )?;
+                    xhc.add_usb_device(usb.root_hub_port_num, hid_report)
+                        .map_err(
+                            MachineInitError::UsbRootHubPortNumberInvalid,
+                        )?;
                 }
             }
 
