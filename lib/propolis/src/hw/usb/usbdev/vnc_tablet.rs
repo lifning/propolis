@@ -2,7 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use rfb::proto::PointerEvent;
 use rgb_frame::Spec;
@@ -36,7 +39,7 @@ const REPORT_SIZE: usize = 5;
 pub struct HIDTabletReport {
     data: [u8; REPORT_SIZE],
     port_wake_hdl: Option<XhciPortWakeHandle>,
-    write_region: Option<(GuestRegion, EventInfo)>,
+    write_regions: VecDeque<(GuestRegion, EventInfo)>,
 }
 
 impl HIDTabletReport {
@@ -58,7 +61,7 @@ impl HIDTabletReport {
         }
         if self.data != prev_data {
             if let Some(hdl) = self.port_wake_hdl.as_ref() {
-                if let Some((region, evt)) = self.write_region.take() {
+                if let Some((region, evt)) = self.write_regions.pop_front() {
                     hdl.write(&self.data, region, evt);
                 }
                 hdl.wake_up();
@@ -75,7 +78,7 @@ impl HIDTabletReport {
         endpoint_id: u8,
         trb_pointer: GuestAddr,
     ) {
-        self.write_region = Some((
+        self.write_regions.push_back((
             region,
             EventInfo::Transfer {
                 trb_pointer,

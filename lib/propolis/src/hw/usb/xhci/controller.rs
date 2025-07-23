@@ -195,7 +195,11 @@ impl XhciPortWakeHandle {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
             memctx.write_many(region.0, data);
-            state.lock().unwrap().interrupters[self.intr_num]
+            let mut state = state.lock().unwrap();
+            // XXX: if event-data?
+            // state.evt_data_xfer_len_accum += data.len() as u32;
+            // state.evt_data_xfer_len_accum &= 0xffffff;
+            state.interrupters[self.intr_num]
                 .enqueue_event(evt, &memctx, false);
         }
     }
