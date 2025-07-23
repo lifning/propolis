@@ -5,12 +5,13 @@
 //! Emulated USB Host Controller
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use bitvec::field::BitField;
 use device_slots::SlotId;
 
+use crate::accessors::MemAccessor;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
@@ -24,6 +25,7 @@ use crate::vmm::{time, VmmHdl};
 
 use super::device_slots::DeviceSlotTable;
 use super::rings::consumer::command::CommandRing;
+use super::rings::producer::event::EventInfo;
 use super::{bits::values::*, registers::*, *};
 
 #[usdt::provider(provider = "propolis")]
@@ -149,6 +151,56 @@ impl XhciState {
     }
 }
 
+pub struct XhciPortWakeHandle {
+    intr_num: usize,
+    acc_mem: MemAccessor,
+    state: Weak<Mutex<XhciState>>,
+    port_id: PortId,
+}
+impl XhciPortWakeHandle {
+    pub fn wake_up(&self) -> Result<(), String> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(memctx) = self.acc_mem.access() {
+                let mut state = state.lock().unwrap();
+                if let Some(evt) = state.port_regs[self.port_id.as_index()]
+                    .xhc_update_portsc(
+                        &|portsc_mut| {
+                            if portsc_mut.port_link_state()
+                                == bits::PortLinkState::U3Suspended
+                            {
+                                portsc_mut.set_port_link_state(
+                                    bits::PortLinkState::Resume,
+                                );
+                            }
+                        },
+                        self.port_id,
+                    )
+                {
+                    state.interrupters[self.intr_num]
+                        .enqueue_event(evt, &memctx, false)
+                        .map_err(|e| e.to_string())?;
+                }
+                return Ok(());
+            }
+            return Err("No memory access".to_string());
+        }
+        return Err("xHC absent".to_string());
+    }
+    pub fn write(
+        &self,
+        data: &[u8],
+        region: crate::common::GuestRegion,
+        evt: EventInfo,
+    ) {
+        if let Some(state) = self.state.upgrade() {
+            let memctx = self.acc_mem.access().unwrap();
+            memctx.write_many(region.0, data);
+            state.lock().unwrap().interrupters[self.intr_num]
+                .enqueue_event(evt, &memctx, false);
+        }
+    }
+}
+
 /// An emulated USB Host Controller attached over PCI
 pub struct PciXhci {
     /// PCI device state
@@ -187,6 +239,18 @@ impl PciXhci {
         Arc::new(Self { pci_state, state, log })
     }
 
+    fn port_wake_hdl(&self, port_id: PortId) -> XhciPortWakeHandle {
+        XhciPortWakeHandle {
+            intr_num: 0,
+            port_id,
+            acc_mem: self
+                .pci_state
+                .acc_mem
+                .child(Some("xHCI interrupter handle".to_string())),
+            state: Arc::downgrade(&self.state),
+        }
+    }
+
     pub fn add_usb_device(
         &self,
         raw_port: u8,
@@ -195,6 +259,11 @@ impl PciXhci {
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
+
+        hid_report
+            .lock()
+            .unwrap()
+            .set_port_wake_hdl(self.port_wake_hdl(port_id));
 
         // TODO: factor this out, used in import too
         let dev = UsbDevice::new(hid_report.clone());

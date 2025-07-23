@@ -8,7 +8,17 @@ use rfb::proto::PointerEvent;
 use rgb_frame::Spec;
 
 use crate::{
-    hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate, vmm::MemCtx,
+    accessors::MemAccessor,
+    common::{GuestAddr, GuestRegion},
+    hw::usb::xhci::{
+        bits::ring_data::TrbCompletionCode,
+        controller::XhciPortWakeHandle,
+        device_slots::SlotId,
+        rings::{
+            consumer::transfer::PointerOrImmediate, producer::event::EventInfo,
+        },
+    },
+    vmm::MemCtx,
 };
 
 use super::{
@@ -25,6 +35,8 @@ const REPORT_SIZE: usize = 5;
 #[derive(Default)]
 pub struct HIDTabletReport {
     data: [u8; REPORT_SIZE],
+    port_wake_hdl: Option<XhciPortWakeHandle>,
+    write_region: Option<(GuestRegion, EventInfo)>,
 }
 
 impl HIDTabletReport {
@@ -34,6 +46,7 @@ impl HIDTabletReport {
         let y = (pe.position.y as usize * 0x8000 / spec.height) as u16;
         let button_bits = pe.pressed.bits() << 1;
 
+        let prev_data = self.data;
         for (dst, src) in self.data.iter_mut().zip(
             // TODO: from the same construct that generates the ReportDescriptor
             [button_bits]
@@ -43,6 +56,36 @@ impl HIDTabletReport {
         ) {
             *dst = src;
         }
+        if self.data != prev_data {
+            if let Some(hdl) = self.port_wake_hdl.as_ref() {
+                if let Some((region, evt)) = self.write_region.take() {
+                    hdl.write(&self.data, region, evt);
+                }
+                hdl.wake_up();
+            }
+        }
+    }
+    pub fn set_port_wake_hdl(&mut self, wake_hdl: XhciPortWakeHandle) {
+        self.port_wake_hdl = Some(wake_hdl);
+    }
+    fn set_memory_region(
+        &mut self,
+        region: GuestRegion,
+        slot_id: SlotId,
+        endpoint_id: u8,
+        trb_pointer: GuestAddr,
+    ) {
+        self.write_region = Some((
+            region,
+            EventInfo::Transfer {
+                trb_pointer,
+                completion_code: TrbCompletionCode::Success,
+                trb_transfer_length: region.1 as u32,
+                slot_id,
+                endpoint_id,
+                event_data: false,
+            },
+        ));
     }
 }
 
@@ -247,19 +290,28 @@ impl HIDTabletDevice {
 
     pub fn normal(
         &mut self,
+        slot_id: SlotId,
         endpoint_id: u8,
         data_buffer: PointerOrImmediate,
         memctx: &MemCtx,
-    ) -> Result<()> {
-        eprintln!("normal {endpoint_id}: {data_buffer:#x?}");
+        trb_pointer: GuestAddr,
+    ) -> Result<usize> {
+        eprintln!("normal {endpoint_id}: {data_buffer:x?}");
         if let PointerOrImmediate::Pointer(region) = data_buffer {
-            let report = self.report.lock().unwrap();
+            let mut report = self.report.lock().unwrap();
             if report.data != self.last_report {
-                eprintln!("send it");
                 memctx.write_many(region.0, &report.data);
                 self.last_report = report.data;
+                Ok(REPORT_SIZE)
+            } else {
+                report.set_memory_region(
+                    region,
+                    slot_id,
+                    endpoint_id,
+                    trb_pointer,
+                );
+                Ok(0)
             }
-            Ok(())
         } else {
             Err(Error::ImmediateParameterForInTransfer)
         }

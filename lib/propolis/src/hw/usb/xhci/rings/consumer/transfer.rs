@@ -411,18 +411,27 @@ impl TransferInfo {
                 data_buffer,
                 interrupt_target_on_completion,
             }) => {
-                let completion_code =
-                    match usbdev.normal(endpoint_id, data_buffer, memctx) {
-                        Ok(()) => TrbCompletionCode::Success,
-                        Err(_) => TrbCompletionCode::UsbTransactionError,
-                    };
+                let (trb_transfer_length, completion_code) = match usbdev
+                    .normal(
+                        slot_id,
+                        endpoint_id,
+                        data_buffer,
+                        memctx,
+                        trb_pointer,
+                    ) {
+                    Ok(x) => (x as u32, TrbCompletionCode::Success),
+                    Err(e) => {
+                        slog::error!(log, "USB Normal TD: {e}");
+                        (0, TrbCompletionCode::UsbTransactionError)
+                    }
+                };
                 // XXX are these params correct
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {
                             trb_pointer,
                             completion_code,
-                            trb_transfer_length: 0,
+                            trb_transfer_length,
                             slot_id,
                             endpoint_id,
                             event_data: false,
