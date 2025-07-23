@@ -264,10 +264,8 @@ impl VncServer {
             ClientMessage::PointerEvent(pe) => {
                 let state = self.state.lock().unwrap();
                 trace!(self.log, "VNC pointer event: {:?}", pe);
-                eprintln!("VNC pointer event {pe:?}");
                 if let Some(devs) = state.devices.as_ref() {
                     if let Ok(spec) = devs.display.read_spec() {
-                        eprintln!("VNC pointer event lock");
                         devs.tablet.lock().unwrap().pointer_event(pe, spec);
                     }
                 }
