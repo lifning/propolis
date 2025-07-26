@@ -37,9 +37,9 @@ const REPORT_SIZE: usize = 5;
 
 #[derive(Default)]
 pub struct HIDTabletReport {
-    data: [u8; REPORT_SIZE],
+    data: VecDeque<[u8; REPORT_SIZE]>,
     port_wake_hdl: Option<XhciPortWakeHandle>,
-    write_regions: VecDeque<(GuestRegion, EventInfo)>,
+    completion_event: Option<EventInfo>,
 }
 
 impl HIDTabletReport {
@@ -47,10 +47,11 @@ impl HIDTabletReport {
         // div: spec.width and spec.height are NonZeroUsize
         let x = (pe.position.x as usize * 0x8000 / spec.width) as u16;
         let y = (pe.position.y as usize * 0x8000 / spec.height) as u16;
-        let button_bits = pe.pressed.bits() << 1;
+        // FIXME: remap VNC button IDs to HID
+        let button_bits = pe.pressed.bits();
 
-        let prev_data = self.data;
-        for (dst, src) in self.data.iter_mut().zip(
+        let mut data = [0; REPORT_SIZE];
+        for (dst, src) in data.iter_mut().zip(
             // TODO: from the same construct that generates the ReportDescriptor
             [button_bits]
                 .into_iter()
@@ -59,36 +60,48 @@ impl HIDTabletReport {
         ) {
             *dst = src;
         }
-        if self.data != prev_data {
-            if let Some(hdl) = self.port_wake_hdl.as_ref() {
-                if let Some((region, evt)) = self.write_regions.pop_front() {
-                    hdl.write(&self.data, region, evt);
-                }
-                hdl.wake_up();
+
+        self.data.push_back(data);
+        // XXX
+        if self.data.len() > 100 {
+            eprintln!("i spilt my mice");
+            self.data.pop_front();
+        }
+
+        // self.spin();
+        if let Some(hdl) = self.port_wake_hdl.as_ref() {
+            hdl.wake_up();
+            if let Some(evt) = self.completion_event.take() {
+                eprintln!("wake up! {:?}", data);
+                hdl.interrupt(evt);
             }
         }
     }
     pub fn set_port_wake_hdl(&mut self, wake_hdl: XhciPortWakeHandle) {
         self.port_wake_hdl = Some(wake_hdl);
     }
-    fn set_memory_region(
+    fn process_new_normal(
         &mut self,
-        region: GuestRegion,
         slot_id: SlotId,
         endpoint_id: u8,
         trb_pointer: GuestAddr,
-    ) {
-        self.write_regions.push_back((
-            region,
-            EventInfo::Transfer {
+    ) -> Option<[u8; REPORT_SIZE]> {
+        if let Some(data) = self.data.pop_front() {
+            self.completion_event = None;
+            Some(data)
+        } else {
+            let evt = EventInfo::Transfer {
                 trb_pointer,
                 completion_code: TrbCompletionCode::Success,
-                trb_transfer_length: region.1 as u32,
+                // trb_transfer_length: region.1 as u32,
+                trb_transfer_length: 0,
                 slot_id,
                 endpoint_id,
                 event_data: false,
-            },
-        ));
+            };
+            self.completion_event = Some(evt);
+            None
+        }
     }
 }
 
@@ -96,7 +109,6 @@ pub struct HIDTabletDevice {
     control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
-    last_report: [u8; REPORT_SIZE],
 }
 
 impl HIDTabletDevice {
@@ -111,7 +123,6 @@ impl HIDTabletDevice {
             control_endpoint: Default::default(),
             idle_duration_4ms: 0,
             report,
-            last_report: [1; REPORT_SIZE],
         }
     }
 
@@ -302,17 +313,12 @@ impl HIDTabletDevice {
         eprintln!("normal {endpoint_id}: {data_buffer:x?}");
         if let PointerOrImmediate::Pointer(region) = data_buffer {
             let mut report = self.report.lock().unwrap();
-            if report.data != self.last_report {
-                memctx.write_many(region.0, &report.data);
-                self.last_report = report.data;
-                Ok(REPORT_SIZE)
+            if let Some(data) =
+                report.process_new_normal(slot_id, endpoint_id, trb_pointer)
+            {
+                memctx.write_many(region.0, &data);
+                Ok(region.1)
             } else {
-                report.set_memory_region(
-                    region,
-                    slot_id,
-                    endpoint_id,
-                    trb_pointer,
-                );
                 Ok(0)
             }
         } else {
@@ -343,6 +349,7 @@ impl HIDTabletDevice {
                         report_id: _,
                         interface: _,
                     }) => {
+                        // TODO: error if not 0
                         self.idle_duration_4ms = duration_4ms;
                         Ok(())
                     }
@@ -404,9 +411,8 @@ impl HIDTabletDevice {
                 report_id: _,
                 interface: _,
             }) => {
-                let report = self.report.lock().unwrap();
-                // TODO self.last_report = report.data;
-                report.data.to_vec()
+                let mut report = self.report.lock().unwrap();
+                report.data.pop_front().into_iter().flatten().collect()
             }
             x => {
                 return Err(Error::UnimplementedRequestBehavior(format!(

@@ -186,19 +186,14 @@ impl XhciPortWakeHandle {
         }
         return Err("xHC absent".to_string());
     }
-    pub fn write(
-        &self,
-        data: &[u8],
-        region: crate::common::GuestRegion,
-        evt: EventInfo,
-    ) {
+    pub fn interrupt(&self, evt: EventInfo) {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
-            memctx.write_many(region.0, data);
             let mut state = state.lock().unwrap();
-            // XXX: if event-data?
+            // TODO: if event-data? {
             // state.evt_data_xfer_len_accum += data.len() as u32;
             // state.evt_data_xfer_len_accum &= 0xffffff;
+            // }
             state.interrupters[self.intr_num]
                 .enqueue_event(evt, &memctx, false);
         }
