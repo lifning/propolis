@@ -171,6 +171,7 @@ impl TryFrom<&Trb> for TDEventData {
 pub struct TDNormal {
     pub data_buffer: PointerOrImmediate,
     pub interrupt_target_on_completion: Option<u16>,
+    pub interrupt_target_on_short_packet: Option<u16>,
 }
 
 impl TryFrom<&Trb> for TDNormal {
@@ -188,9 +189,17 @@ impl TryFrom<&Trb> for TDNormal {
                     None
                 }
             };
+            let interrupt_target_on_short_packet = unsafe {
+                if trb.control.normal.interrupt_on_short_packet() {
+                    Some(trb.status.transfer.interrupter_target())
+                } else {
+                    None
+                }
+            };
             Ok(Self {
                 data_buffer: PointerOrImmediate::from(trb),
                 interrupt_target_on_completion,
+                interrupt_target_on_short_packet,
             })
         }
     }
@@ -410,6 +419,7 @@ impl TransferInfo {
             TransferInfo::Normal(TDNormal {
                 data_buffer,
                 interrupt_target_on_completion,
+                interrupt_target_on_short_packet: _,
             }) => {
                 let (trb_transfer_length, completion_code) = match usbdev
                     .normal(
@@ -425,8 +435,12 @@ impl TransferInfo {
                         (0, TrbCompletionCode::UsbTransactionError)
                     }
                 };
-                // XXX are these params correct
-                interrupt_target_on_completion
+                let intr_opt = if trb_transfer_length == 0 {
+                    None // XXX
+                } else {
+                    interrupt_target_on_completion
+                };
+                intr_opt
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {
                             trb_pointer,
