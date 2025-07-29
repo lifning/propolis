@@ -171,7 +171,6 @@ impl TryFrom<&Trb> for TDEventData {
 pub struct TDNormal {
     pub data_buffer: PointerOrImmediate,
     pub interrupt_target_on_completion: Option<u16>,
-    pub interrupt_target_on_short_packet: Option<u16>,
 }
 
 impl TryFrom<&Trb> for TDNormal {
@@ -189,17 +188,9 @@ impl TryFrom<&Trb> for TDNormal {
                     None
                 }
             };
-            let interrupt_target_on_short_packet = unsafe {
-                if trb.control.normal.interrupt_on_short_packet() {
-                    Some(trb.status.transfer.interrupter_target())
-                } else {
-                    None
-                }
-            };
             Ok(Self {
                 data_buffer: PointerOrImmediate::from(trb),
                 interrupt_target_on_completion,
-                interrupt_target_on_short_packet,
             })
         }
     }
@@ -419,42 +410,41 @@ impl TransferInfo {
             TransferInfo::Normal(TDNormal {
                 data_buffer,
                 interrupt_target_on_completion,
-                interrupt_target_on_short_packet: _,
             }) => {
-                let (trb_transfer_length, completion_code) = match usbdev
-                    .normal(
-                        slot_id,
-                        endpoint_id,
-                        data_buffer,
-                        memctx,
-                        trb_pointer,
-                    ) {
-                    Ok(x) => (x as u32, TrbCompletionCode::Success),
+                let evt_opt = match usbdev.normal(
+                    slot_id,
+                    endpoint_id,
+                    data_buffer,
+                    memctx,
+                    trb_pointer,
+                ) {
+                    Ok(evt_opt) => evt_opt,
                     Err(e) => {
                         slog::error!(log, "USB Normal TD: {e}");
-                        (0, TrbCompletionCode::UsbTransactionError)
-                    }
-                };
-                let intr_opt = if trb_transfer_length == 0 {
-                    None // XXX
-                } else {
-                    interrupt_target_on_completion
-                };
-                intr_opt
-                    .map(|interrupter| TransferEventParams {
-                        evt_info: EventInfo::Transfer {
+                        Some(EventInfo::Transfer {
                             trb_pointer,
-                            completion_code,
-                            trb_transfer_length,
+                            completion_code:
+                                TrbCompletionCode::UsbTransactionError,
+                            trb_transfer_length: 0,
                             slot_id,
                             endpoint_id,
                             event_data: false,
-                        },
-                        interrupter,
-                        block_event_interrupt: false,
-                    })
-                    .into_iter()
-                    .collect()
+                        })
+                    }
+                };
+                if let Some(evt_info) = evt_opt {
+                    eprintln!("eventing??");
+                    interrupt_target_on_completion
+                        .map(|interrupter| TransferEventParams {
+                            evt_info,
+                            interrupter,
+                            block_event_interrupt: false,
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    vec![] // XXX
+                }
             }
             TransferInfo::SetupStage {
                 data,

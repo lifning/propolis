@@ -186,16 +186,23 @@ impl XhciPortWakeHandle {
         }
         return Err("xHC absent".to_string());
     }
-    pub fn interrupt(&self, evt: EventInfo) {
+    pub fn finish_xfer(&self, data: &[u8], slot_id: SlotId, endpoint_id: u8) {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
+            // eprintln!("take state lock");
             let mut state = state.lock().unwrap();
-            // TODO: if event-data? {
-            // state.evt_data_xfer_len_accum += data.len() as u32;
-            // state.evt_data_xfer_len_accum &= 0xffffff;
-            // }
-            state.interrupters[self.intr_num]
-                .enqueue_event(evt, &memctx, false);
+            if let Some((region, evt)) =
+                state.dev_slots.usbdev_for_slot(slot_id).ok().and_then(
+                    |usbdev| usbdev.take_current_transfer(endpoint_id),
+                )
+            {
+                // TODO: data.len() == region.1
+                memctx.write_many(region.0, data);
+                let foo = state.interrupters[self.intr_num]
+                    .enqueue_event(evt, &memctx, false);
+                eprintln!("evented {foo:?}");
+            }
+            // eprintln!("release state lock");
         }
     }
 }
