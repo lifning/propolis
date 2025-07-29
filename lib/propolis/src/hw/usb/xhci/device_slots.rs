@@ -369,6 +369,9 @@ impl DeviceSlotTable {
                 self.slot(slot_id).ok().and_then(|slot| slot.port_address)
             {
                 // TODO: issue 'set address' to USB device itself
+                self.usbdev_for_slot(slot_id)
+                    .ok()?
+                    .set_address(slot_id, port_id);
 
                 // set output slot context state to addressed
                 slot_ctx.set_slot_state(SlotState::Addressed);

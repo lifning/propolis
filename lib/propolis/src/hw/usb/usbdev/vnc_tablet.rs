@@ -13,10 +13,12 @@ use rgb_frame::Spec;
 use crate::{
     accessors::MemAccessor,
     common::{GuestAddr, GuestRegion},
+    // XXX: abstraction leak while figuring things out
     hw::usb::xhci::{
         bits::ring_data::TrbCompletionCode,
         controller::XhciPortWakeHandle,
         device_slots::SlotId,
+        port::PortId,
         rings::{
             consumer::transfer::PointerOrImmediate, producer::event::EventInfo,
         },
@@ -39,7 +41,10 @@ const REPORT_SIZE: usize = 5;
 pub struct HIDTabletReport {
     data: VecDeque<[u8; REPORT_SIZE]>,
     port_wake_hdl: Option<XhciPortWakeHandle>,
-    completion_event: Option<EventInfo>,
+    slot_id: Option<SlotId>,
+    endpoint: u8, // XXX constructor
+    // where the unanswered transfer lives
+    xfer_slot_ep: Option<(SlotId, u8)>,
 }
 
 impl HIDTabletReport {
@@ -61,19 +66,20 @@ impl HIDTabletReport {
             *dst = src;
         }
 
-        self.data.push_back(data);
-        // XXX
-        if self.data.len() > 100 {
-            eprintln!("i spilt my mice");
-            self.data.pop_front();
-        }
-
-        // self.spin();
         if let Some(hdl) = self.port_wake_hdl.as_ref() {
             hdl.wake_up();
-            if let Some(evt) = self.completion_event.take() {
-                eprintln!("wake up! {:?}", data);
-                hdl.interrupt(evt);
+            if let Some(slot) = self.slot_id {
+                eprintln!("send it {data:?}");
+                hdl.finish_xfer(&data, slot, self.endpoint);
+            } else {
+                // TODO: in-order for the above too instead of letting it skip the queue
+                self.data.push_back(data);
+                // XXX
+                if self.data.len() > 100 {
+                    eprintln!("i spilt my mice");
+                    self.data.pop_front();
+                }
+                eprintln!("no event to send");
             }
         }
     }
@@ -84,22 +90,12 @@ impl HIDTabletReport {
         &mut self,
         slot_id: SlotId,
         endpoint_id: u8,
-        trb_pointer: GuestAddr,
     ) -> Option<[u8; REPORT_SIZE]> {
+        self.xfer_slot_ep = Some((slot_id, endpoint_id));
         if let Some(data) = self.data.pop_front() {
-            self.completion_event = None;
+            eprintln!("ready {data:?}");
             Some(data)
         } else {
-            let evt = EventInfo::Transfer {
-                trb_pointer,
-                completion_code: TrbCompletionCode::Success,
-                // trb_transfer_length: region.1 as u32,
-                trb_transfer_length: 0,
-                slot_id,
-                endpoint_id,
-                event_data: false,
-            };
-            self.completion_event = Some(evt);
             None
         }
     }
@@ -109,6 +105,7 @@ pub struct HIDTabletDevice {
     control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
+    current_transfer: Option<(GuestRegion, EventInfo)>,
 }
 
 impl HIDTabletDevice {
@@ -119,10 +116,12 @@ impl HIDTabletDevice {
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
     pub fn new(report: Arc<Mutex<HIDTabletReport>>) -> Self {
+        report.lock().unwrap().endpoint = 3; // XXX
         Self {
             control_endpoint: Default::default(),
             idle_duration_4ms: 0,
             report,
+            current_transfer: None,
         }
     }
 
@@ -309,20 +308,46 @@ impl HIDTabletDevice {
         data_buffer: PointerOrImmediate,
         memctx: &MemCtx,
         trb_pointer: GuestAddr,
-    ) -> Result<usize> {
+    ) -> Result<Option<EventInfo>> {
         eprintln!("normal {endpoint_id}: {data_buffer:x?}");
         if let PointerOrImmediate::Pointer(region) = data_buffer {
-            let mut report = self.report.lock().unwrap();
-            if let Some(data) =
-                report.process_new_normal(slot_id, endpoint_id, trb_pointer)
+            self.current_transfer = Some((
+                region,
+                EventInfo::Transfer {
+                    trb_pointer,
+                    completion_code: TrbCompletionCode::Success,
+                    trb_transfer_length: region.1 as u32,
+                    slot_id,
+                    endpoint_id,
+                    event_data: false,
+                },
+            ));
+            // eprintln!("take report lock");
+            // let mut report = self.report.lock().unwrap();
+            // if let Some(data) = report.process_new_normal(slot_id, endpoint_id)
+            // {
+            //     memctx.write_many(region.0, &data);
+            //     eprintln!("release report lock.");
+            //     Ok(self.current_transfer.take().map(|(_, evt)| evt))
+            // } else
+            // eprintln!("release report lock");
             {
-                memctx.write_many(region.0, &data);
-                Ok(region.1)
-            } else {
-                Ok(0)
+                Ok(None)
             }
         } else {
             Err(Error::ImmediateParameterForInTransfer)
+        }
+    }
+
+    pub fn take_current_transfer(
+        &mut self,
+        endpoint_id: u8,
+    ) -> Option<(GuestRegion, EventInfo)> {
+        if endpoint_id == 3 {
+            self.current_transfer.take()
+        } else {
+            eprintln!("current_transfer_event(endpoint_id: {endpoint_id})");
+            None
         }
     }
 
@@ -449,6 +474,10 @@ impl HIDTabletDevice {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    pub fn set_address(&self, slot_id: SlotId, _port_id: PortId) {
+        self.report.lock().unwrap().slot_id = Some(slot_id);
     }
 }
 
