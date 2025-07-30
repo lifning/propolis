@@ -446,7 +446,6 @@ impl TransferInfo {
                     }
                 };
                 if let Some(evt_info) = evt_opt {
-                    eprintln!("eventing??");
                     intr_target_on_compl
                         .map(|interrupter| TransferEventParams {
                             evt_info,
