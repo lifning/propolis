@@ -314,9 +314,10 @@ impl HIDTabletDevice {
             interrupt_target_on_completion,
             trb_pointer,
         } = normal_td;
-        eprintln!("normal {endpoint_id}: {data_buffer:x?}");
-        let intr_target = interrupt_target_on_completion
-            .ok_or(Error::NoInterruptOnCompletionOnInterruptTransfer)?;
+        // eprintln!("normal {endpoint_id}: {data_buffer:x?}");
+        // XXX: windows doesnt set this...
+        // interrupt_target_on_completion
+        //     .ok_or(Error::NoInterruptOnCompletionOnInterruptTransfer)?;
         if let PointerOrImmediate::Pointer(region) = data_buffer {
             self.current_transfer = Some((
                 region,
@@ -339,7 +340,15 @@ impl HIDTabletDevice {
             // } else
             // eprintln!("release report lock");
             {
-                Ok(None)
+                //None
+                Ok(Some(EventInfo::Transfer {
+                    trb_pointer,
+                    completion_code: TrbCompletionCode::ShortPacket,
+                    trb_transfer_length: 0,
+                    slot_id,
+                    endpoint_id,
+                    event_data: false,
+                }))
             }
         } else {
             Err(Error::ImmediateParameterForInTransfer)

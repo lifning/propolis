@@ -200,7 +200,7 @@ impl XhciPortWakeHandle {
                 memctx.write_many(region.0, data);
                 let foo = state.interrupters[self.intr_num]
                     .enqueue_event(evt, &memctx, false);
-                eprintln!("evented {foo:?}");
+                // eprintln!("evented {foo:?}");
             }
             // eprintln!("release state lock");
         }
