@@ -57,7 +57,6 @@ pub fn process_transfer_ring(
 
         slog::debug!(log, "Transfer Ring at {:#x}", xfer_ring.start_addr.0);
 
-        let trb_pointer = xfer_ring.current_dequeue_pointer();
         match xfer_ring
             .dequeue_work_item(&memctx)
             .and_then(TransferInfo::try_from)
@@ -77,7 +76,6 @@ pub fn process_transfer_ring(
                     interrupter,
                     block_event_interrupt,
                 } in xfer.run(
-                    trb_pointer,
                     slot_id,
                     endpoint_id,
                     evt_data_xfer_len_accum,
@@ -133,9 +131,7 @@ pub fn process_command_ring(
                 "executing Command Ring from {:#x}",
                 cmd_ring.start_addr.0,
             );
-            let cmd_trb_addr = cmd_ring.current_dequeue_pointer();
-            match cmd_ring.dequeue_work_item(&memctx).map(|x| (x, cmd_trb_addr))
-            {
+            match cmd_ring.dequeue_work_item(&memctx) {
                 Ok(work_item) => Some(work_item),
                 Err(consumer::Error::CommandDescriptorSize) => {
                     // HACK - matching cycle bits in uninitialized memory trips this,
@@ -154,7 +150,8 @@ pub fn process_command_ring(
             slog::error!(log, "Command Ring not initialized via CRCR yet");
             None
         };
-        if let Some((cmd_desc, cmd_trb_addr)) = cmd_opt {
+        if let Some(cmd_desc) = cmd_opt {
+            let cmd_trb_addr = cmd_desc.1;
             match CommandInfo::try_from(cmd_desc) {
                 Ok(cmd) => {
                     slog::debug!(log, "Command TRB running: {cmd:?}");

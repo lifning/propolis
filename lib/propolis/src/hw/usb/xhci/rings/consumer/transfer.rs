@@ -26,10 +26,12 @@ pub type TransferRing = ConsumerRing<TransferDescriptor>;
 
 #[derive(Debug)]
 pub struct TransferDescriptor {
-    pub(super) trbs: Vec<Trb>,
+    pub(super) trbs: Vec<(Trb, GuestAddr)>,
 }
 impl WorkItem for TransferDescriptor {
-    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = (Trb, GuestAddr)>,
+    ) -> Result<Self> {
         let td = Self { trbs: trbs.into_iter().collect() };
         probes::xhci_td_consume!(|| (
             td.trb0_type().map(|t| t as u8).unwrap_or_default(),
@@ -40,8 +42,8 @@ impl WorkItem for TransferDescriptor {
     }
 }
 impl IntoIterator for TransferDescriptor {
-    type Item = Trb;
-    type IntoIter = std::vec::IntoIter<Trb>;
+    type Item = (Trb, GuestAddr);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.trbs.into_iter()
@@ -49,9 +51,11 @@ impl IntoIterator for TransferDescriptor {
 }
 
 pub enum Never {}
-impl TryFrom<Vec<Trb>> for TransferDescriptor {
+impl TryFrom<Vec<(Trb, GuestAddr)>> for TransferDescriptor {
     type Error = Never;
-    fn try_from(trbs: Vec<Trb>) -> core::result::Result<Self, Self::Error> {
+    fn try_from(
+        trbs: Vec<(Trb, GuestAddr)>,
+    ) -> core::result::Result<Self, Self::Error> {
         Ok(Self { trbs })
     }
 }
@@ -63,13 +67,15 @@ impl TransferDescriptor {
     pub fn transfer_size(&self) -> usize {
         self.trbs
             .iter()
-            .map(|trb| unsafe { trb.status.transfer.trb_transfer_length() }
-                as usize)
+            .map(
+                |(trb, _)| unsafe { trb.status.transfer.trb_transfer_length() }
+                    as usize,
+            )
             .sum()
     }
 
     pub fn trb0_type(&self) -> Option<TrbType> {
-        self.trbs.first().map(|trb| trb.control.trb_type())
+        self.trbs.first().map(|(trb, _)| trb.control.trb_type())
     }
 
     /// xHCI 1.2 sect 4.9.1: To generate a zero-length USB transaction,
@@ -80,7 +86,7 @@ impl TransferDescriptor {
     /// we're looking at *Normal* Transfer TRBs)
     pub fn is_zero_length(&self) -> bool {
         let mut trb_transfer_length = None;
-        for trb in &self.trbs {
+        for (trb, _) in &self.trbs {
             if trb.control.trb_type() == TrbType::Normal {
                 let x = unsafe { trb.status.transfer.trb_transfer_length() };
                 if x != 0 {
@@ -171,12 +177,13 @@ impl TryFrom<&Trb> for TDEventData {
 pub struct TDNormal {
     pub data_buffer: PointerOrImmediate,
     pub interrupt_target_on_completion: Option<u16>,
+    pub trb_pointer: GuestAddr,
 }
 
-impl TryFrom<&Trb> for TDNormal {
+impl TryFrom<&(Trb, GuestAddr)> for TDNormal {
     type Error = Error;
 
-    fn try_from(trb: &Trb) -> Result<Self> {
+    fn try_from((trb, ptr): &(Trb, GuestAddr)) -> Result<Self> {
         let trb_type = unsafe { trb.control.normal.trb_type() };
         if trb_type != TrbType::Normal {
             Err(Error::WrongTrbType(trb_type, TrbType::Normal))
@@ -191,6 +198,7 @@ impl TryFrom<&Trb> for TDNormal {
             Ok(Self {
                 data_buffer: PointerOrImmediate::from(trb),
                 interrupt_target_on_completion,
+                trb_pointer: *ptr,
             })
         }
     }
@@ -203,6 +211,7 @@ pub enum TransferInfo {
         data: SetupData,
         interrupt_target_on_completion: Option<u16>,
         transfer_type: TrbTransferType,
+        trb_pointer: GuestAddr,
     },
     DataStage {
         data_buffer: PointerOrImmediate,
@@ -210,11 +219,13 @@ pub enum TransferInfo {
         direction: TrbDirection,
         payload: Vec<TDNormal>,
         event_data: Option<TDEventData>,
+        trb_pointer: GuestAddr,
     },
     StatusStage {
         interrupt_target_on_completion: Option<u16>,
         direction: TrbDirection,
         event_data: Option<TDEventData>,
+        trb_pointer: GuestAddr,
     },
     // unimplemented
     Isoch {},
@@ -226,7 +237,8 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
     type Error = Error;
 
     fn try_from(td: TransferDescriptor) -> Result<TransferInfo> {
-        let first = td.trbs.first().ok_or(Error::EmptyTransferDescriptor)?;
+        let (first, ptr) =
+            td.trbs.first().ok_or(Error::EmptyTransferDescriptor)?;
         let interrupt_target_on_completion = unsafe {
             // without loss of generality (IOC at same bit position in all TRB types)
             if first.control.normal.interrupt_on_completion() {
@@ -236,13 +248,16 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
             }
         };
         Ok(match first.control.trb_type() {
-            TrbType::Normal => TransferInfo::Normal(TDNormal::try_from(first)?),
+            TrbType::Normal => {
+                TransferInfo::Normal(TDNormal::try_from(&(*first, *ptr))?)
+            }
             TrbType::SetupStage => TransferInfo::SetupStage {
                 data: SetupData(first.parameter),
                 interrupt_target_on_completion,
                 transfer_type: unsafe {
                     first.control.setup_stage.transfer_type()
                 },
+                trb_pointer: *ptr,
             },
             TrbType::DataStage => {
                 let event_data;
@@ -256,7 +271,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                     event_data = td
                         .trbs
                         .get(1)
-                        .map(|trb| TDEventData::try_from(trb))
+                        .map(|(trb, _)| TDEventData::try_from(trb))
                         .transpose()?
                 } else {
                     // xHCI 1.2 table 6-29 (and sect 3.2.9): "a Data Stage TD is
@@ -278,17 +293,17 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                     // Transfer TRB with its Event Data (ED) flag equal to 1.")
                     payload = td.trbs[1..]
                         .into_iter()
-                        .filter(|trb| {
+                        .filter(|(trb, _)| {
                             trb.control.trb_type() != TrbType::EventData
                         })
-                        .map(|trb| TDNormal::try_from(trb))
+                        .map(|trb_ptr| TDNormal::try_from(trb_ptr))
                         .collect::<Result<Vec<_>>>()?;
                     event_data = td.trbs[1..]
                         .into_iter()
-                        .find(|trb| {
+                        .find(|(trb, _)| {
                             trb.control.trb_type() == TrbType::EventData
                         })
-                        .map(|trb| TDEventData::try_from(trb))
+                        .map(|(trb, _)| TDEventData::try_from(trb))
                         .transpose()?;
                 };
                 TransferInfo::DataStage {
@@ -297,6 +312,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                     direction: unsafe { first.control.data_stage.direction() },
                     payload,
                     event_data,
+                    trb_pointer: *ptr,
                 }
             }
             TrbType::StatusStage => TransferInfo::StatusStage {
@@ -308,8 +324,9 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                 event_data: td
                     .trbs
                     .get(1)
-                    .map(TDEventData::try_from)
+                    .map(|(trb, _)| TDEventData::try_from(trb))
                     .transpose()?,
+                trb_pointer: *ptr,
             },
             TrbType::Isoch => TransferInfo::Isoch {},
             TrbType::EventData => {
@@ -331,7 +348,6 @@ impl TransferInfo {
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         self,
-        trb_pointer: GuestAddr,
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
@@ -340,7 +356,6 @@ impl TransferInfo {
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {
         let mut event_params = self.run_inner(
-            trb_pointer,
             slot_id,
             endpoint_id,
             evt_data_xfer_len_accum,
@@ -371,7 +386,6 @@ impl TransferInfo {
     #[allow(clippy::too_many_arguments)]
     fn run_inner(
         self,
-        trb_pointer: GuestAddr,
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
@@ -407,16 +421,15 @@ impl TransferInfo {
         *evt_data_xfer_len_accum = 0;
 
         match self {
-            TransferInfo::Normal(TDNormal {
-                data_buffer,
-                interrupt_target_on_completion,
-            }) => {
+            TransferInfo::Normal(normal_td) => {
+                let intr_target_on_compl =
+                    normal_td.interrupt_target_on_completion;
+                let trb_pointer = normal_td.trb_pointer;
                 let evt_opt = match usbdev.normal(
                     slot_id,
                     endpoint_id,
-                    data_buffer,
+                    normal_td,
                     memctx,
-                    trb_pointer,
                 ) {
                     Ok(evt_opt) => evt_opt,
                     Err(e) => {
@@ -434,7 +447,7 @@ impl TransferInfo {
                 };
                 if let Some(evt_info) = evt_opt {
                     eprintln!("eventing??");
-                    interrupt_target_on_completion
+                    intr_target_on_compl
                         .map(|interrupter| TransferEventParams {
                             evt_info,
                             interrupter,
@@ -450,6 +463,7 @@ impl TransferInfo {
                 data,
                 interrupt_target_on_completion,
                 transfer_type,
+                trb_pointer,
             } => {
                 if transfer_type == TrbTransferType::Reserved {
                     slog::error!(
@@ -498,6 +512,7 @@ impl TransferInfo {
                 direction,
                 payload,
                 event_data,
+                trb_pointer,
             } => {
                 let req_dir = match direction {
                     TrbDirection::Out => RequestDirection::HostToDevice,
@@ -571,6 +586,7 @@ impl TransferInfo {
                 interrupt_target_on_completion,
                 direction,
                 event_data,
+                trb_pointer,
             } => {
                 let req_dir = match direction {
                     TrbDirection::Out => RequestDirection::HostToDevice,
