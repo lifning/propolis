@@ -30,7 +30,7 @@ impl core::fmt::Debug for Trb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Trb {{ parameter: 0x{:x}, control.trb_type: {:?} }}",
+            "Trb {{ parameter: {:#x}, control.trb_type: {:?} }}",
             self.parameter,
             self.control.trb_type()
         )?;

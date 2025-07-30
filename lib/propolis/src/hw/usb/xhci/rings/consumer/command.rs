@@ -14,11 +14,13 @@ use super::{ConsumerRing, Error, Result, WorkItem};
 pub type CommandRing = ConsumerRing<CommandDescriptor>;
 
 #[derive(Debug)]
-pub struct CommandDescriptor(pub Trb);
+pub struct CommandDescriptor(pub Trb, pub GuestAddr);
 impl WorkItem for CommandDescriptor {
-    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self> {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = (Trb, GuestAddr)>,
+    ) -> Result<Self> {
         let mut trbs = trbs.into_iter();
-        if let Some(trb) = trbs.next() {
+        if let Some((trb, ptr)) = trbs.next() {
             if trbs.next().is_some() {
                 Err(Error::CommandDescriptorSize)
             } else {
@@ -40,7 +42,7 @@ impl WorkItem for CommandDescriptor {
                     | TrbType::GetPortBandwidthCmd
                     | TrbType::ForceHeaderCmd
                     | TrbType::GetExtendedPropertyCmd
-                    | TrbType::SetExtendedPropertyCmd => Ok(Self(trb)),
+                    | TrbType::SetExtendedPropertyCmd => Ok(Self(trb, ptr)),
                     _ => Err(Error::InvalidCommandDescriptor(trb)),
                 }
             }
@@ -50,11 +52,11 @@ impl WorkItem for CommandDescriptor {
     }
 }
 impl IntoIterator for CommandDescriptor {
-    type Item = Trb;
-    type IntoIter = std::iter::Once<Trb>;
+    type Item = (Trb, GuestAddr);
+    type IntoIter = std::iter::Once<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        std::iter::once(self.0)
+        std::iter::once((self.0, self.1))
     }
 }
 

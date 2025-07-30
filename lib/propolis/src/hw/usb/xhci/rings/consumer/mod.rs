@@ -16,6 +16,7 @@ pub mod doorbell;
 #[usdt::provider(provider = "propolis")]
 mod probes {
     fn xhci_consumer_ring_dequeue_trb(offset: usize, data: u64, trb_type: u8) {}
+    fn xhci_consumer_ring_follow_link_trb(offset: usize, data: u64) {}
     fn xhci_consumer_ring_set_dequeue_ptr(ptr: usize, cycle_state: bool) {}
 }
 
@@ -29,13 +30,15 @@ pub enum Error {
     // either my understanding or their xHCD may be slightly wrong
     // #[error("Guest defined a consumer TRB ring larger than 64K bytes")]
     // RingTooLarge,
-    #[error("Failed reading TRB from guest memory at {0:?}")]
+    #[error("Failed reading TRB from guest memory at {0:x?}")]
     FailedReadingTRB(GuestAddr),
-    #[error("Incomplete TD: no more TRBs in cycle to complete chain: {0:?}")]
-    IncompleteWorkItem(Vec<Trb>),
-    #[error("Incomplete TD: TRBs with chain bit set formed a full ring circuit: {0:?}")]
-    IncompleteWorkItemChainCyclic(Vec<Trb>),
-    #[error("TRB Ring Dequeue Pointer was not aligned to size_of<Trb>: {0:?}")]
+    #[error("Incomplete TD: no more TRBs in cycle to complete chain: {0:x?}")]
+    IncompleteWorkItem(Vec<(Trb, GuestAddr)>),
+    #[error("Incomplete TD: TRBs with chain bit set formed a full ring circuit: {0:x?}")]
+    IncompleteWorkItemChainCyclic(Vec<(Trb, GuestAddr)>),
+    #[error(
+        "TRB Ring Dequeue Pointer was not aligned to size_of<Trb>: {0:x?}"
+    )]
     InvalidDequeuePointer(GuestAddr),
     #[error("Invalid TRB type for a Command Descriptor: {0:?}")]
     InvalidCommandDescriptor(Trb),
@@ -47,7 +50,7 @@ pub enum Error {
     WrongTrbType(TrbType, TrbType),
     #[error("Encountered a complete circuit of matching cycle bits in TRB consumer ring")]
     CompleteCircuitOfMatchingCycleBits,
-    #[error("Apparent corrupt Link TRB pointer (lower 4 bits nonzero): *{0:?} = {1:#x}")]
+    #[error("Apparent corrupt Link TRB pointer (lower 4 bits nonzero): *{0:x?} = {1:#x}")]
     LinkTRBAlignment(GuestAddr, u64),
 }
 pub type Result<T> = core::result::Result<T, Error>;
@@ -60,8 +63,10 @@ pub struct ConsumerRing<T: WorkItem> {
     _ghost: PhantomData<T>,
 }
 
-pub trait WorkItem: Sized + IntoIterator<Item = Trb> {
-    fn try_from_trb_iter(trbs: impl IntoIterator<Item = Trb>) -> Result<Self>;
+pub trait WorkItem: Sized + IntoIterator<Item = (Trb, GuestAddr)> {
+    fn try_from_trb_iter(
+        trbs: impl IntoIterator<Item = (Trb, GuestAddr)>,
+    ) -> Result<Self>;
 }
 
 fn check_aligned_addr(addr: GuestAddr) -> Result<()> {
@@ -162,7 +167,10 @@ impl<T: WorkItem> ConsumerRing<T> {
 
     /// Find the first transfer-related TRB, if one exists.
     /// (See xHCI 1.2 sect 4.9.2)
-    fn dequeue_trb(&mut self, memctx: &MemCtx) -> Result<Option<Trb>> {
+    fn dequeue_trb(
+        &mut self,
+        memctx: &MemCtx,
+    ) -> Result<Option<(Trb, GuestAddr)>> {
         let start_deq_ptr = self.dequeue_ptr;
         loop {
             let trb = self.current_trb(memctx)?;
@@ -172,15 +180,21 @@ impl<T: WorkItem> ConsumerRing<T> {
                 return Ok(None);
             }
 
+            let this_deq_ptr = self.dequeue_ptr;
             self.queue_advance(memctx)?;
 
             if trb.control.trb_type() != TrbType::Link {
                 probes::xhci_consumer_ring_dequeue_trb!(|| (
-                    self.dequeue_ptr.0 as usize,
+                    this_deq_ptr.0 as usize,
                     trb.parameter,
                     trb.control.trb_type() as u8
                 ));
-                return Ok(Some(trb));
+                return Ok(Some((trb, this_deq_ptr)));
+            } else {
+                probes::xhci_consumer_ring_follow_link_trb!(|| (
+                    this_deq_ptr.0 as usize,
+                    trb.parameter,
+                ));
             }
             // failsafe - in case of full circuit of matching cycle bits
             // without a toggle_cycle occurring, avoid infinite loop
@@ -192,11 +206,11 @@ impl<T: WorkItem> ConsumerRing<T> {
 
     pub fn dequeue_work_item(&mut self, memctx: &MemCtx) -> Result<T> {
         let start_deq_ptr = self.dequeue_ptr;
-        let mut trbs: Vec<Trb> =
+        let mut trbs: Vec<(Trb, GuestAddr)> =
             self.dequeue_trb(memctx)?.into_iter().collect();
         while trbs
             .last()
-            .and_then(|end_trb| end_trb.control.chain_bit())
+            .and_then(|(end_trb, _)| end_trb.control.chain_bit())
             .unwrap_or(false)
         {
             // failsafe - if full circuit of chain bits causes an incomplete work item
@@ -504,8 +518,8 @@ mod test {
         };
 
         assert_eq!(incomplete_td.len(), 2);
-        assert_eq!(incomplete_td[0].control.trb_type(), TrbType::DataStage);
-        assert_eq!(incomplete_td[1].control.trb_type(), TrbType::Normal);
+        assert_eq!(incomplete_td[0].0.control.trb_type(), TrbType::DataStage);
+        assert_eq!(incomplete_td[1].0.control.trb_type(), TrbType::Normal);
 
         // complete the TD (cycle match, chain unset)
         memctx.write(
@@ -524,8 +538,8 @@ mod test {
 
         let complete_td = ring.dequeue_work_item(&memctx).unwrap().trbs;
         assert_eq!(complete_td.len(), 3);
-        assert_eq!(complete_td[0].control.trb_type(), TrbType::DataStage);
-        assert_eq!(complete_td[1].control.trb_type(), TrbType::Normal);
-        assert_eq!(complete_td[2].control.trb_type(), TrbType::Normal);
+        assert_eq!(complete_td[0].0.control.trb_type(), TrbType::DataStage);
+        assert_eq!(complete_td[1].0.control.trb_type(), TrbType::Normal);
+        assert_eq!(complete_td[2].0.control.trb_type(), TrbType::Normal);
     }
 }

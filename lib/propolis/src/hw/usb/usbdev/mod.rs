@@ -57,6 +57,8 @@ pub enum Error {
     ClassRequestOnNonClassEndpoint(SetupData),
     #[error("received packet on endpoint not present on this USB device: {0}")]
     InvalidEndpoint(u8),
+    #[error("received Normal TD on interrupt endpoint with IOC unset")]
+    NoInterruptOnCompletionOnInterruptTransfer,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

@@ -20,7 +20,8 @@ use crate::{
         device_slots::SlotId,
         port::PortId,
         rings::{
-            consumer::transfer::PointerOrImmediate, producer::event::EventInfo,
+            consumer::transfer::{PointerOrImmediate, TDNormal},
+            producer::event::EventInfo,
         },
     },
     vmm::MemCtx,
@@ -305,11 +306,17 @@ impl HIDTabletDevice {
         &mut self,
         slot_id: SlotId,
         endpoint_id: u8,
-        data_buffer: PointerOrImmediate,
+        normal_td: TDNormal,
         memctx: &MemCtx,
-        trb_pointer: GuestAddr,
     ) -> Result<Option<EventInfo>> {
+        let TDNormal {
+            data_buffer,
+            interrupt_target_on_completion,
+            trb_pointer,
+        } = normal_td;
         eprintln!("normal {endpoint_id}: {data_buffer:x?}");
+        let intr_target = interrupt_target_on_completion
+            .ok_or(Error::NoInterruptOnCompletionOnInterruptTransfer)?;
         if let PointerOrImmediate::Pointer(region) = data_buffer {
             self.current_transfer = Some((
                 region,
