@@ -2,21 +2,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Condvar, Mutex, Weak},
-    time::Duration,
-};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use rfb::proto::PointerEvent;
 use rgb_frame::Spec;
 
 use crate::{
-    accessors::MemAccessor,
-    common::{GuestAddr, GuestRegion},
     // XXX: abstraction leak while figuring things out
     hw::usb::xhci::{
-        bits::{device_context::EndpointContext, ring_data::TrbCompletionCode},
+        bits::device_context::EndpointContext,
         controller::XhciPortWakeHandle,
         device_slots::SlotId,
         port::PortId,
@@ -80,46 +74,14 @@ impl HIDTabletReport {
                 dataref.1.notify_one();
             }
         }
-        /*
-        if let Some(hdl) = self.port_wake_hdl.as_ref() {
-            hdl.wake_up();
-            if let Some(slot) = self.slot_id {
-                eprintln!("send it {data:?}");
-                hdl.finish_xfer(&data, slot, self.endpoint);
-            } else {
-                // TODO: in-order for the above too instead of letting it skip the queue
-                self.data.push_back(data);
-                // XXX
-                if self.data.len() > 100 {
-                    eprintln!("i spilt my mice");
-                    self.data.pop_front();
-                }
-                eprintln!("no event to send");
-            }
-        }
-        */
     }
+
     fn set_ep_data(
         &mut self,
         ep_data: Weak<(Mutex<InterruptInData>, Condvar)>,
     ) {
         self.xfer_dataref = Some(ep_data);
     }
-    /*
-    fn process_new_normal(
-        &mut self,
-        slot_id: SlotId,
-        endpoint_id: u8,
-    ) -> Option<[u8; REPORT_SIZE]> {
-        self.xfer_slot_ep = Some((slot_id, endpoint_id));
-        if let Some(data) = self.data.pop_front() {
-            eprintln!("ready {data:?}");
-            Some(data)
-        } else {
-            None
-        }
-    }
-    */
 }
 
 pub struct HIDTabletDevice {
@@ -127,7 +89,6 @@ pub struct HIDTabletDevice {
     interrupt_endpoint: Option<InterruptInEndpoint>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
-    current_transfer: Option<(GuestRegion, EventInfo)>,
     port_wake_hdl: Arc<XhciPortWakeHandle>,
 }
 
@@ -149,7 +110,6 @@ impl HIDTabletDevice {
             interrupt_endpoint: None,
             idle_duration_4ms: 0,
             report,
-            current_transfer: None,
             port_wake_hdl: Arc::new(port_wake_hdl),
         }
     }
@@ -249,11 +209,11 @@ impl HIDTabletDevice {
                         // bitfield, with bit 0 representing 'disabled', so 1..=7
                         // (HID Button values start at 1 for "primary")
                         ItemTag::UsageMinimum.one_byte(1),
-                        ItemTag::UsageMaximum.one_byte(7),
+                        ItemTag::UsageMaximum.one_byte(3),
                         ItemTag::LogicalMinimum.one_byte(0),
                         ItemTag::LogicalMaximum.one_byte(1),
-                        // 7 buttons to report...
-                        ItemTag::ReportCount.one_byte(7),
+                        // 3 buttons to report...
+                        ItemTag::ReportCount.one_byte(3),
                         ItemTag::ReportSize.one_byte(1),
                         // 1 bit each
                         InputOutputFeatureItem(0)
@@ -261,10 +221,10 @@ impl HIDTabletDevice {
                             .with_variable(true) // variable
                             .with_relative(false) // absolute
                             .input(),
-                        // 1 bit padding to round out the byte in the report
+                        // 5 bit padding to round out the byte in the report
                         // (similar to Mouse example in HID 1.11 sect E.10)
                         ItemTag::ReportCount.one_byte(1),
-                        ItemTag::ReportSize.one_byte(1),
+                        ItemTag::ReportSize.one_byte(5),
                         InputOutputFeatureItem(0).with_constant(true).input(),
                         UsagePage::GenericDesktopControls.item(),
                         GenericDesktopUsage::X.item(),
@@ -363,63 +323,6 @@ impl HIDTabletDevice {
             ep.normal(slot_id, endpoint_id, normal_td);
         }
         Ok(None)
-    }
-    /*
-    pub fn normal2(
-        &mut self,
-        slot_id: SlotId,
-        endpoint_id: u8,
-        normal_td: TDNormal,
-        memctx: &MemCtx,
-    ) -> Result<Option<EventInfo>> {
-        let TDNormal {
-            data_buffer,
-            interrupt_target_on_completion,
-            trb_pointer,
-        } = normal_td;
-        // eprintln!("normal {endpoint_id}: {data_buffer:x?}");
-        if let PointerOrImmediate::Pointer(region) = data_buffer {
-            self.current_transfer = Some((
-                region,
-                EventInfo::Transfer {
-                    trb_pointer,
-                    completion_code: TrbCompletionCode::Success, // short?
-                    trb_transfer_length: region.1 as u32,        // 0?
-                    slot_id,
-                    endpoint_id,
-                    event_data: false,
-                },
-            ));
-            // TODO if interrupt_on_completion || interrupt_on_short_packet
-            Ok(Some(EventInfo::Transfer {
-                trb_pointer,
-                completion_code: TrbCompletionCode::ShortPacket,
-                // xHCI 1.2 sect 4.10.1:
-                // > The Length field of the Transfer Event shall be set to the residual number
-                // > of bytes *not* written to the Transfer TRBs’ data buffer.
-                // xHCI 1.2 sect 4.10.1.1.2:
-                // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
-                // (emphasis mine)
-                trb_transfer_length: region.1 as u32,
-                slot_id,
-                endpoint_id,
-                event_data: false,
-            }))
-        } else {
-            Err(Error::ImmediateParameterForInTransfer)
-        }
-    }*/
-
-    pub fn take_current_transfer(
-        &mut self,
-        endpoint_id: u8,
-    ) -> Option<(GuestRegion, EventInfo)> {
-        if endpoint_id == 3 {
-            self.current_transfer.take()
-        } else {
-            eprintln!("current_transfer_event(endpoint_id: {endpoint_id})");
-            None
-        }
     }
 
     pub fn status_stage(
@@ -574,15 +477,15 @@ mod test {
                 0xA1, 0, // collection (physical)
                     5, 9, // usage page (buttons)
                     0x19, 1, // usage minimum (1)
-                    0x29, 7, // usage maximum (7)
+                    0x29, 3, // usage maximum (3)
                     0x15, 0, // logical minimum (0)
                     0x25, 1, // logical maximum (1)
-                    0x95, 7, // report count (7)
+                    0x95, 3, // report count (3)
                     0x75, 1, // report size (1)
-                    0x81, 2, // input (data, variable, absolute), 7 button bits
+                    0x81, 2, // input (data, variable, absolute), 3 button bits
                     0x95, 1, // report count (1)
-                    0x75, 1, // report size (1)
-                    0x81, 1, // input (constant), 1 bit padding
+                    0x75, 5, // report size (5)
+                    0x81, 1, // input (constant), 5 bit padding
                     5, 1, // usage page (generic desktop)
                     9, 0x30, // usage (x)
                     9, 0x31, // usage (y)

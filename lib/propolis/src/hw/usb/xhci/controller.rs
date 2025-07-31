@@ -156,6 +156,7 @@ pub struct XhciPortWakeHandle {
     acc_mem: MemAccessor,
     state: Weak<Mutex<XhciState>>,
     port_id: PortId,
+    log: slog::Logger,
 }
 impl XhciPortWakeHandle {
     pub fn wake_up(&self) -> Result<(), String> {
@@ -201,27 +202,14 @@ impl XhciPortWakeHandle {
             //     eprintln!("finish_xfer: {data:x?}, {evt:x?}");
             // }
             for evt in evts.into_iter() {
-                state.interrupters[self.intr_num]
-                    .enqueue_event(evt, &memctx, false);
-            }
-            // eprintln!("release state lock");
-        }
-    }
-    pub fn finish_xfer2(&self, data: &[u8], slot_id: SlotId, endpoint_id: u8) {
-        if let Some(state) = self.state.upgrade() {
-            let memctx = self.acc_mem.access().unwrap();
-            // eprintln!("take state lock");
-            let mut state = state.lock().unwrap();
-            if let Some((region, evt)) =
-                state.dev_slots.usbdev_for_slot(slot_id).ok().and_then(
-                    |usbdev| usbdev.take_current_transfer(endpoint_id),
-                )
-            {
-                // TODO: data.len() == region.1
-                memctx.write_many(region.0, data);
-                let foo = state.interrupters[self.intr_num]
-                    .enqueue_event(evt, &memctx, false);
-                // eprintln!("evented {foo:?}");
+                if let Err(e) = state.interrupters[self.intr_num]
+                    .enqueue_event(evt, &memctx, false)
+                {
+                    slog::error!(
+                        self.log,
+                        "xHC: failed to enqueue transfer event: {e}"
+                    );
+                }
             }
             // eprintln!("release state lock");
         }
@@ -275,6 +263,7 @@ impl PciXhci {
                 .acc_mem
                 .child(Some("xHCI interrupter handle".to_string())),
             state: Arc::downgrade(&self.state),
+            log: self.log.clone(),
         }
     }
 
