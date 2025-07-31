@@ -4,7 +4,8 @@
 
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use rfb::proto::PointerEvent;
+use bitstruct::bitstruct;
+use rfb::proto::{MouseButtons, PointerEvent};
 use rgb_frame::Spec;
 
 use crate::{
@@ -47,14 +48,34 @@ pub struct HIDTabletReport {
     xfer_dataref: Option<Weak<(Mutex<InterruptInData>, Condvar)>>,
 }
 
+bitstruct! {
+    struct HIDMouseButtons(pub u8) {
+        pub left: bool = 0;
+        pub right: bool = 1;
+        pub middle: bool = 2;
+    }
+}
+
 impl HIDTabletReport {
     pub fn pointer_event(&mut self, pe: PointerEvent, spec: Spec) {
         // div: spec.width and spec.height are NonZeroUsize
         let x = (pe.position.x as usize * 0x8000 / spec.width) as u16;
         let y = (pe.position.y as usize * 0x8000 / spec.height) as u16;
-        // FIXME: remap VNC button IDs to HID
-        let button_bits = pe.pressed.bits();
+        // remap VNC button IDs to HID
+        let mouse_left = pe.pressed.intersects(MouseButtons::LEFT);
+        let mouse_middle = pe.pressed.intersects(MouseButtons::MIDDLE);
+        let mouse_right = pe.pressed.intersects(MouseButtons::RIGHT);
+        // TODO: scroll axes
+        // let scroll_up = pe.pressed.intersects(MouseButtons::SCROLL_A);
+        // let scroll_down = pe.pressed.intersects(MouseButtons::SCROLL_B);
+        // let scroll_left = pe.pressed.intersects(MouseButtons::SCROLL_C);
+        // let scroll_right = pe.pressed.intersects(MouseButtons::SCROLL_D);
 
+        let button_bits = HIDMouseButtons(0)
+            .with_left(mouse_left)
+            .with_middle(mouse_middle)
+            .with_right(mouse_right)
+            .0;
         let mut data = [0; REPORT_SIZE];
         for (dst, src) in data.iter_mut().zip(
             // TODO: from the same construct that generates the ReportDescriptor
