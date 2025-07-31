@@ -27,6 +27,7 @@ pub struct InterruptInData {
     payload: Option<Vec<u8>>,
     period: Duration,
     ids: Option<(SlotId, u8)>,
+    terminate: bool,
 }
 
 impl InterruptInData {
@@ -37,7 +38,7 @@ impl InterruptInData {
 
 pub struct InterruptInEndpoint {
     data: Arc<(Mutex<InterruptInData>, Condvar)>,
-    jh: JoinHandle<()>,
+    _jh: JoinHandle<()>,
 }
 
 fn periodic_xfer_wait_loop(
@@ -49,7 +50,12 @@ fn periodic_xfer_wait_loop(
         // eprintln!("int-in: acquire main lock");
         let guard = mtx.lock().unwrap();
         // eprintln!("int-in: wait 1");
-        let guard = cvar.wait_while(guard, |x| x.transfers.is_empty()).unwrap();
+        let guard = cvar
+            .wait_while(guard, |x| x.transfers.is_empty() && !x.terminate)
+            .unwrap();
+        if guard.terminate {
+            break;
+        }
 
         // eprintln!("int-in: wait 2");
         let timeout = guard.period;
@@ -161,14 +167,15 @@ impl InterruptInEndpoint {
                 payload: None,
                 period,
                 ids: None,
+                terminate: false,
             }),
             Condvar::new(),
         ));
         let weak_data = Arc::downgrade(&data);
-        let jh = std::thread::spawn(move || {
+        let _jh = std::thread::spawn(move || {
             periodic_xfer_wait_loop(weak_data, port_hdl);
         });
-        Self { data, jh }
+        Self { data, _jh }
     }
     pub fn normal(
         &self,
@@ -183,5 +190,11 @@ impl InterruptInEndpoint {
     }
     pub fn data_ref(&self) -> Weak<(Mutex<InterruptInData>, Condvar)> {
         Arc::downgrade(&self.data)
+    }
+}
+impl Drop for InterruptInEndpoint {
+    fn drop(&mut self) {
+        self.data.0.lock().unwrap().terminate = true;
+        self.data.1.notify_one();
     }
 }
