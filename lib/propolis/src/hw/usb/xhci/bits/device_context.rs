@@ -329,6 +329,9 @@ bitstruct! {
         /// (125 * (1 << interval)) microseconds. See xHCI 1.2 table 6-12.
         pub interval: u8 = 16..24;
 
+        /// Max ESIT Payload Hi. If LEC=1, these are the high-order bits of
+        /// the Max ESIT Payload used to compute USB bandwidth reserved for a
+        /// periodic endpoint in conjunction with Interval. If LEC=0, reserved.
         pub max_endpoint_service_time_interval_payload_high: u8 = 24..32;
 
         reserved2: bool = 32;
@@ -350,6 +353,12 @@ bitstruct! {
         reserved4: u8 = 65..68;
 
         tr_dequeue_pointer_: u64 = 68..128;
+    }
+}
+
+impl EndpointContextFirst {
+    pub fn interval_as_duration(&self) -> std::time::Duration {
+        super::MINIMUM_INTERVAL_TIME * (1 << self.interval())
     }
 }
 
@@ -409,7 +418,10 @@ bitstruct! {
     pub struct EndpointContextSecond(pub u128) {
         pub average_trb_length: u16 = 0..16;
 
-        pub max_endpoint_service_time_interval: u16 = 16..32;
+        /// Max ESIT Payload Lo. Low-order 16 bits of the Max ESIT Payload
+        /// that represents the number of bytes this endpoint will transfer
+        /// during an ESIT, for isochronous and interrupt endpoints.
+        pub max_endpoint_service_time_interval_payload_low: u16 = 16..32;
 
         reserved0: u128 = 32..128;
     }
@@ -421,9 +433,9 @@ impl core::fmt::Debug for EndpointContextSecond {
             f,
             "EndpointContextSecond {{ \
             average_trb_length: {}, \
-            max_endpoint_service_time_interval: {} }}",
+            max_endpoint_service_time_interval_payload_low: {} }}",
             self.average_trb_length(),
-            self.max_endpoint_service_time_interval(),
+            self.max_endpoint_service_time_interval_payload_low(),
         )
     }
 }

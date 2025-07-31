@@ -176,7 +176,9 @@ impl TryFrom<&Trb> for TDEventData {
 #[derive(Debug)]
 pub struct TDNormal {
     pub data_buffer: PointerOrImmediate,
-    pub interrupt_target_on_completion: Option<u16>,
+    pub interrupter_target: u16,
+    pub interrupt_on_completion: bool,
+    pub interrupt_on_short_packet: bool,
     pub trb_pointer: GuestAddr,
 }
 
@@ -188,16 +190,17 @@ impl TryFrom<&(Trb, GuestAddr)> for TDNormal {
         if trb_type != TrbType::Normal {
             Err(Error::WrongTrbType(trb_type, TrbType::Normal))
         } else {
-            let interrupt_target_on_completion = unsafe {
-                if trb.control.normal.interrupt_on_completion() {
-                    Some(trb.status.transfer.interrupter_target())
-                } else {
-                    None
-                }
-            };
             Ok(Self {
                 data_buffer: PointerOrImmediate::from(trb),
-                interrupt_target_on_completion,
+                interrupter_target: unsafe {
+                    trb.status.transfer.interrupter_target()
+                },
+                interrupt_on_completion: unsafe {
+                    trb.control.normal.interrupt_on_completion()
+                },
+                interrupt_on_short_packet: unsafe {
+                    trb.control.normal.interrupt_on_short_packet()
+                },
                 trb_pointer: *ptr,
             })
         }
@@ -422,40 +425,31 @@ impl TransferInfo {
 
         match self {
             TransferInfo::Normal(normal_td) => {
-                let intr_target_on_compl =
-                    normal_td.interrupt_target_on_completion;
+                let interrupter = normal_td.interrupter_target;
                 let trb_pointer = normal_td.trb_pointer;
-                let evt_opt = match usbdev.normal(
-                    slot_id,
-                    endpoint_id,
-                    normal_td,
-                    memctx,
-                ) {
-                    Ok(evt_opt) => evt_opt,
+                match usbdev.normal(slot_id, endpoint_id, normal_td) {
+                    Ok(Some(evt_info)) => vec![TransferEventParams {
+                        evt_info,
+                        interrupter,
+                        block_event_interrupt: false,
+                    }],
+                    Ok(None) => Vec::new(),
                     Err(e) => {
                         slog::error!(log, "USB Normal TD: {e}");
-                        Some(EventInfo::Transfer {
-                            trb_pointer,
-                            completion_code:
-                                TrbCompletionCode::UsbTransactionError,
-                            trb_transfer_length: 0,
-                            slot_id,
-                            endpoint_id,
-                            event_data: false,
-                        })
-                    }
-                };
-                if let Some(evt_info) = evt_opt {
-                    intr_target_on_compl
-                        .map(|interrupter| TransferEventParams {
-                            evt_info,
+                        vec![TransferEventParams {
+                            evt_info: EventInfo::Transfer {
+                                trb_pointer,
+                                completion_code:
+                                    TrbCompletionCode::UsbTransactionError,
+                                trb_transfer_length: 0,
+                                slot_id,
+                                endpoint_id,
+                                event_data: false,
+                            },
                             interrupter,
                             block_event_interrupt: false,
-                        })
-                        .into_iter()
-                        .collect()
-                } else {
-                    vec![] // XXX
+                        }]
+                    }
                 }
             }
             TransferInfo::SetupStage {

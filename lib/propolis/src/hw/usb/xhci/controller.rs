@@ -12,7 +12,7 @@ use bitvec::field::BitField;
 use device_slots::SlotId;
 
 use crate::accessors::MemAccessor;
-use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
+use crate::common::{GuestAddr, GuestRegion, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
 use crate::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
@@ -186,7 +186,28 @@ impl XhciPortWakeHandle {
         }
         return Err("xHC absent".to_string());
     }
-    pub fn finish_xfer(&self, data: &[u8], slot_id: SlotId, endpoint_id: u8) {
+    pub fn finish_xfer(
+        &self,
+        data: &[u8],
+        region: GuestRegion,
+        evt: Option<EventInfo>,
+    ) {
+        if let Some(state) = self.state.upgrade() {
+            let memctx = self.acc_mem.access().unwrap();
+            // eprintln!("take state lock");
+            let mut state = state.lock().unwrap();
+            memctx.write_many(region.0, data);
+            // if data.len() > 0 {
+            //     eprintln!("finish_xfer: {data:x?}, {evt:x?}");
+            // }
+            if let Some(evt) = evt {
+                state.interrupters[self.intr_num]
+                    .enqueue_event(evt, &memctx, false);
+            }
+            // eprintln!("release state lock");
+        }
+    }
+    pub fn finish_xfer2(&self, data: &[u8], slot_id: SlotId, endpoint_id: u8) {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
             // eprintln!("take state lock");
@@ -266,13 +287,9 @@ impl PciXhci {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
 
-        hid_report
-            .lock()
-            .unwrap()
-            .set_port_wake_hdl(self.port_wake_hdl(port_id));
-
-        // TODO: factor this out, used in import too
-        let dev = UsbDevice::new(hid_report.clone());
+        // TODO: factor this out, used in migrate import too
+        let dev =
+            UsbDevice::new(hid_report.clone(), self.port_wake_hdl(port_id));
 
         state.queued_device_connections.push((port_id, dev));
         Ok(())
@@ -1143,7 +1160,7 @@ impl MigrateMulti for PciXhci {
             .map(|(port_id, dev_data)| {
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
-                let mut dev = UsbDevice::new(todo!(/* XXX */));
+                let mut dev = UsbDevice::new(todo!(/* XXX */), todo!());
                 dev.import(&dev_data)?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })

@@ -541,6 +541,13 @@ impl DeviceSlotTable {
                     // set output EP state field to running.
                     let in_ep_ctx =
                         Self::endpoint_context(in_slot_addr, i, memctx)?;
+                    eprintln!(
+                        "configure endpoint: interval {} sec",
+                        in_ep_ctx.interval_as_duration().as_secs_f64()
+                    );
+                    self.usbdev_for_slot(slot_id)
+                        .unwrap()
+                        .configure_endpoint(i, &in_ep_ctx);
                     out_ep_ctx.mutate(|ctx| {
                         *ctx = *in_ep_ctx;
                         ctx.set_endpoint_state(EndpointState::Running);
@@ -952,7 +959,7 @@ impl DeviceSlotTable {
                     dst_dev.import(src_dev)?;
                 } else {
                     // FIXME
-                    let mut dst_dev = UsbDevice::new(todo!(/* XXX */));
+                    let mut dst_dev = UsbDevice::new(todo!(/* XXX */), todo!());
                     dst_dev.import(src_dev)?;
                     *dst = Some(dst_dev);
                 }
