@@ -74,7 +74,7 @@ fn periodic_xfer_wait_loop(
                 Some(EventInfo::Transfer {
                     trb_pointer: xfer.trb_pointer,
                     completion_code: TrbCompletionCode::ShortPacket,
-                    // xHCI 1.2 sect 4.10.1:
+                    // xHCI 1.2 sect 4.10.1, table 6-22:
                     // > The Length field of the Transfer Event shall be set to the residual number
                     // > of bytes *not* written to the Transfer TRBs’ data buffer.
                     //
@@ -82,7 +82,7 @@ fn periodic_xfer_wait_loop(
                     // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
                     //
                     // (both emphases mine)
-                    trb_transfer_length: 0,
+                    trb_transfer_length: region.1 as u32,
                     slot_id,
                     endpoint_id,
                     event_data: false,
@@ -100,7 +100,10 @@ fn periodic_xfer_wait_loop(
                 Some(EventInfo::Transfer {
                     trb_pointer: xfer.trb_pointer,
                     completion_code: TrbCompletionCode::Success,
-                    trb_transfer_length: data.len() as u32,
+                    // As above, so below.
+                    // The wording in the xHCI spec about this field evidently trips up a lot of devices:
+                    // https://github.com/torvalds/linux/commit/34b67198244f2d7d8409fa4eb76204c409c0c97e
+                    trb_transfer_length: 0,
                     slot_id,
                     endpoint_id,
                     event_data: false,
