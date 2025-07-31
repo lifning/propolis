@@ -142,7 +142,9 @@ impl From<&Trb> for PointerOrImmediate {
 #[derive(Debug)]
 pub struct TDEventData {
     pub event_data: u64,
-    pub interrupt_target_on_completion: Option<u16>,
+    pub interrupter_target: u16,
+    pub interrupt_on_completion: bool,
+    pub interrupt_on_short_packet: bool,
     pub block_event_interrupt: bool,
     // TODO: Evaluate Next TRB ?
 }
@@ -155,19 +157,20 @@ impl TryFrom<&Trb> for TDEventData {
         if trb_type != TrbType::EventData {
             Err(Error::WrongTrbType(trb_type, TrbType::EventData))
         } else {
-            let interrupt_target_on_completion = unsafe {
-                if trb.control.status_stage.interrupt_on_completion() {
-                    Some(trb.status.transfer.interrupter_target())
-                } else {
-                    None
-                }
-            };
-            let block_event_interrupt =
-                unsafe { trb.control.normal.block_event_interrupt() };
             Ok(Self {
                 event_data: trb.parameter,
-                interrupt_target_on_completion,
-                block_event_interrupt,
+                interrupter_target: unsafe {
+                    trb.status.transfer.interrupter_target()
+                },
+                interrupt_on_completion: unsafe {
+                    trb.control.normal.interrupt_on_completion()
+                },
+                interrupt_on_short_packet: unsafe {
+                    trb.control.normal.interrupt_on_short_packet()
+                },
+                block_event_interrupt: unsafe {
+                    trb.control.normal.block_event_interrupt()
+                },
             })
         }
     }
@@ -180,12 +183,15 @@ pub struct TDNormal {
     pub interrupt_on_completion: bool,
     pub interrupt_on_short_packet: bool,
     pub trb_pointer: GuestAddr,
+    pub event_data: Option<TDEventData>,
 }
 
-impl TryFrom<&(Trb, GuestAddr)> for TDNormal {
+impl TryFrom<(&Trb, &GuestAddr, Option<TDEventData>)> for TDNormal {
     type Error = Error;
 
-    fn try_from((trb, ptr): &(Trb, GuestAddr)) -> Result<Self> {
+    fn try_from(
+        (trb, ptr, event_data): (&Trb, &GuestAddr, Option<TDEventData>),
+    ) -> Result<Self> {
         let trb_type = unsafe { trb.control.normal.trb_type() };
         if trb_type != TrbType::Normal {
             Err(Error::WrongTrbType(trb_type, TrbType::Normal))
@@ -202,6 +208,7 @@ impl TryFrom<&(Trb, GuestAddr)> for TDNormal {
                     trb.control.normal.interrupt_on_short_packet()
                 },
                 trb_pointer: *ptr,
+                event_data,
             })
         }
     }
@@ -252,7 +259,15 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
         };
         Ok(match first.control.trb_type() {
             TrbType::Normal => {
-                TransferInfo::Normal(TDNormal::try_from(&(*first, *ptr))?)
+                // XXX: not sufficiently general
+                let event_data = td
+                    .trbs
+                    .get(1)
+                    .map(|(trb, _)| TDEventData::try_from(trb))
+                    .transpose()?;
+                TransferInfo::Normal(TDNormal::try_from((
+                    first, ptr, event_data,
+                ))?)
             }
             TrbType::SetupStage => TransferInfo::SetupStage {
                 data: SetupData(first.parameter),
@@ -299,7 +314,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                         .filter(|(trb, _)| {
                             trb.control.trb_type() != TrbType::EventData
                         })
-                        .map(|trb_ptr| TDNormal::try_from(trb_ptr))
+                        .map(|(trb, ptr)| TDNormal::try_from((trb, ptr, None)))
                         .collect::<Result<Vec<_>>>()?;
                     event_data = td.trbs[1..]
                         .into_iter()
@@ -398,12 +413,14 @@ impl TransferInfo {
     ) -> Vec<TransferEventParams> {
         if let TransferInfo::EventData(TDEventData {
             event_data,
-            interrupt_target_on_completion,
+            interrupter_target,
+            interrupt_on_completion,
+            interrupt_on_short_packet: _,
             block_event_interrupt,
         }) = self
         {
-            return interrupt_target_on_completion
-                .map(|interrupter| TransferEventParams {
+            if interrupt_on_completion {
+                return vec![TransferEventParams {
                     evt_info: EventInfo::Transfer {
                         trb_pointer: GuestAddr(event_data),
                         completion_code: TrbCompletionCode::Success,
@@ -412,11 +429,10 @@ impl TransferInfo {
                         endpoint_id,
                         event_data: true,
                     },
-                    interrupter,
+                    interrupter: interrupter_target,
                     block_event_interrupt,
-                })
-                .into_iter()
-                .collect();
+                }];
+            }
         }
 
         // xHCI 1.2 sect 4.11.5.2:
@@ -551,10 +567,12 @@ impl TransferInfo {
                     .chain(event_data.and_then(
                         |TDEventData {
                              event_data,
-                             interrupt_target_on_completion,
+                             interrupter_target,
+                             interrupt_on_completion,
+                             interrupt_on_short_packet: _,
                              block_event_interrupt,
                          }| {
-                            interrupt_target_on_completion.map(|interrupter| {
+                            interrupt_on_completion.then_some(
                                 TransferEventParams {
                                     evt_info: EventInfo::Transfer {
                                         trb_pointer: GuestAddr(event_data),
@@ -567,10 +585,10 @@ impl TransferInfo {
                                         endpoint_id,
                                         event_data: true,
                                     },
-                                    interrupter,
+                                    interrupter: interrupter_target,
                                     block_event_interrupt,
-                                }
-                            })
+                                },
+                            )
                         },
                     ))
                     .collect()
@@ -612,10 +630,12 @@ impl TransferInfo {
                     .chain(event_data.and_then(
                         |TDEventData {
                              event_data,
-                             interrupt_target_on_completion,
+                             interrupter_target,
+                             interrupt_on_completion,
+                             interrupt_on_short_packet: _,
                              block_event_interrupt,
                          }| {
-                            interrupt_target_on_completion.map(|interrupter| {
+                            interrupt_on_completion.then_some(
                                 TransferEventParams {
                                     evt_info: EventInfo::Transfer {
                                         trb_pointer: GuestAddr(event_data),
@@ -625,10 +645,10 @@ impl TransferInfo {
                                         endpoint_id,
                                         event_data: true,
                                     },
-                                    interrupter,
+                                    interrupter: interrupter_target,
                                     block_event_interrupt,
-                                }
-                            })
+                                },
+                            )
                         },
                     ))
                     .collect()

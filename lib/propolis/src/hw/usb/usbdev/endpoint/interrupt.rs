@@ -9,13 +9,16 @@ use std::{
     time::Duration,
 };
 
-use crate::hw::usb::xhci::{
-    bits::ring_data::TrbCompletionCode,
-    controller::XhciPortWakeHandle,
-    device_slots::SlotId,
-    rings::{
-        consumer::transfer::{PointerOrImmediate, TDNormal},
-        producer::event::EventInfo,
+use crate::{
+    common::GuestAddr,
+    hw::usb::xhci::{
+        bits::ring_data::TrbCompletionCode,
+        controller::XhciPortWakeHandle,
+        device_slots::SlotId,
+        rings::{
+            consumer::transfer::{PointerOrImmediate, TDNormal},
+            producer::event::EventInfo,
+        },
     },
 };
 
@@ -69,11 +72,12 @@ fn periodic_xfer_wait_loop(
         };
         if timeout_result.timed_out() {
             // eprintln!("timed out. {} tds", guard.transfers.len());
-            let evt = if xfer.interrupt_on_short_packet {
-                // TODO: event w/ShortPacket
-                Some(EventInfo::Transfer {
+            let completion_code = TrbCompletionCode::ShortPacket;
+            let mut evts = Vec::new();
+            evts.extend(xfer.interrupt_on_short_packet.then_some(
+                EventInfo::Transfer {
                     trb_pointer: xfer.trb_pointer,
-                    completion_code: TrbCompletionCode::ShortPacket,
+                    completion_code,
                     // xHCI 1.2 sect 4.10.1, table 6-22:
                     // > The Length field of the Transfer Event shall be set to the residual number
                     // > of bytes *not* written to the Transfer TRBs’ data buffer.
@@ -81,25 +85,41 @@ fn periodic_xfer_wait_loop(
                     // xHCI 1.2 sect 4.10.1.1.2:
                     // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
                     //
-                    // (both emphases mine)
+                    // (both emphases mine) So... is this the right thing to do?
                     trb_transfer_length: region.1 as u32,
                     slot_id,
                     endpoint_id,
                     event_data: false,
-                })
-            } else {
-                None
-            };
-            port_hdl.finish_xfer(&[], region, evt);
+                },
+            ));
+            if let Some(event_data) = xfer.event_data {
+                evts.extend(event_data.interrupt_on_short_packet.then_some(
+                    EventInfo::Transfer {
+                        trb_pointer: GuestAddr(event_data.event_data),
+                        completion_code: TrbCompletionCode::ShortPacket,
+                        // xHCI 1.2 sect 4.10.1.1.1:
+                        // > an Event Data Transfer Event shall be generated with the
+                        // > Completion Code set to Short Packet and the Length field
+                        // > set to the actual number of bytes received by the TD.
+                        trb_transfer_length: 0,
+                        slot_id,
+                        endpoint_id,
+                        event_data: true,
+                    },
+                ))
+            }
+            port_hdl.finish_xfer(&[], region, evts);
         } else {
             // eprintln!("success. {} tds", guard.transfers.len());
             // unwrap: if we didn't time out, then payload is some
             let data = guard.payload.take().unwrap();
             // TODO: compare ptr.1 with data.len()
-            let evt = if xfer.interrupt_on_completion {
-                Some(EventInfo::Transfer {
+            let completion_code = TrbCompletionCode::Success;
+            let mut evts = Vec::new();
+            evts.extend(xfer.interrupt_on_completion.then_some(
+                EventInfo::Transfer {
                     trb_pointer: xfer.trb_pointer,
-                    completion_code: TrbCompletionCode::Success,
+                    completion_code,
                     // As above, so below.
                     // The wording in the xHCI spec about this field evidently trips up a lot of devices:
                     // https://github.com/torvalds/linux/commit/34b67198244f2d7d8409fa4eb76204c409c0c97e
@@ -107,11 +127,26 @@ fn periodic_xfer_wait_loop(
                     slot_id,
                     endpoint_id,
                     event_data: false,
-                })
-            } else {
-                None
-            };
-            port_hdl.finish_xfer(&data, region, evt);
+                },
+            ));
+            if let Some(event_data) = xfer.event_data {
+                evts.extend(event_data.interrupt_on_completion.then_some(
+                    EventInfo::Transfer {
+                        trb_pointer: GuestAddr(event_data.event_data),
+                        completion_code,
+                        // xHCI 1.2 sect 4.10.1.1.1
+                        // > If a Short Packet does not occur, then the last Event Data Transfer TRB shall
+                        // > generate an Event Data Transfer Event with its Completion Code = Success
+                        // > (assuming no errors) and TRB Transfer Length field equal to the number of bytes
+                        // > transferred since the beginning of the TD
+                        trb_transfer_length: data.len() as u32,
+                        slot_id,
+                        endpoint_id,
+                        event_data: true,
+                    },
+                ))
+            }
+            port_hdl.finish_xfer(&data, region, evts);
         }
         // eprintln!("int-in: release report lock");
     }

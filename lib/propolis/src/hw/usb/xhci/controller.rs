@@ -190,7 +190,7 @@ impl XhciPortWakeHandle {
         &self,
         data: &[u8],
         region: GuestRegion,
-        evt: Option<EventInfo>,
+        evts: impl IntoIterator<Item = EventInfo>,
     ) {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
@@ -200,7 +200,7 @@ impl XhciPortWakeHandle {
             // if data.len() > 0 {
             //     eprintln!("finish_xfer: {data:x?}, {evt:x?}");
             // }
-            if let Some(evt) = evt {
+            for evt in evts.into_iter() {
                 state.interrupters[self.intr_num]
                     .enqueue_event(evt, &memctx, false);
             }
