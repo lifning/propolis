@@ -36,7 +36,7 @@ use super::{
     Error, Result,
 };
 
-const REPORT_SIZE: usize = 5;
+const REPORT_SIZE: usize = 7;
 
 #[derive(Default)]
 pub struct HIDTabletReport {
@@ -65,24 +65,28 @@ impl HIDTabletReport {
         let mouse_left = pe.pressed.intersects(MouseButtons::LEFT);
         let mouse_middle = pe.pressed.intersects(MouseButtons::MIDDLE);
         let mouse_right = pe.pressed.intersects(MouseButtons::RIGHT);
-        // TODO: scroll axes
-        // let scroll_up = pe.pressed.intersects(MouseButtons::SCROLL_A);
-        // let scroll_down = pe.pressed.intersects(MouseButtons::SCROLL_B);
-        // let scroll_left = pe.pressed.intersects(MouseButtons::SCROLL_C);
-        // let scroll_right = pe.pressed.intersects(MouseButtons::SCROLL_D);
+        let scroll_up = pe.pressed.intersects(MouseButtons::SCROLL_A);
+        let scroll_down = pe.pressed.intersects(MouseButtons::SCROLL_B);
+        let scroll_left = pe.pressed.intersects(MouseButtons::SCROLL_C);
+        let scroll_right = pe.pressed.intersects(MouseButtons::SCROLL_D);
 
         let button_bits = HIDMouseButtons(0)
             .with_left(mouse_left)
             .with_middle(mouse_middle)
             .with_right(mouse_right)
             .0;
+        let vert_wheel = scroll_up as i8 - scroll_down as i8;
+        let horiz_wheel = scroll_right as i8 - scroll_left as i8;
+
         let mut data = [0; REPORT_SIZE];
         for (dst, src) in data.iter_mut().zip(
-            // TODO: from the same construct that generates the ReportDescriptor
+            // would be nice if this filtered through the same construct that
+            // generates the ReportDescriptor, should we create such a thing
             [button_bits]
                 .into_iter()
                 .chain(u16::to_le_bytes(x))
-                .chain(u16::to_le_bytes(y)),
+                .chain(u16::to_le_bytes(y))
+                .chain([vert_wheel as u8, horiz_wheel as u8]),
         ) {
             *dst = src;
         }
@@ -214,7 +218,7 @@ impl HIDTabletDevice {
     }
 
     // might be nice to generate this from some nicer builder-pattern thing someday
-    // i.e. ReptDesc::new(Mouse).with_buttons(7).with_axes([X, Y], 0..=0x8000, Absolute)
+    // i.e. ReptDesc::new(Mouse).with_buttons(3).with_axes([X, Y], 0..=0x8000, Absolute)
     pub fn report_descriptor() -> ReportDescriptor {
         ReportDescriptor::new(
             HIDReportType::Input,
@@ -259,6 +263,30 @@ impl HIDTabletDevice {
                             .with_constant(false) // data
                             .with_variable(true) // variable
                             .with_relative(false) // absolute
+                            .input(),
+                        // normal vertical scroll wheel
+                        UsagePage::GenericDesktopControls.item(),
+                        GenericDesktopUsage::Wheel.item(),
+                        ItemTag::LogicalMinimum.one_byte(-127i8 as u32),
+                        ItemTag::LogicalMaximum.one_byte(127),
+                        ItemTag::ReportSize.one_byte(8),
+                        ItemTag::ReportCount.one_byte(1),
+                        InputOutputFeatureItem(0)
+                            .with_constant(false) // data
+                            .with_variable(true) // variable
+                            .with_relative(true) // absolute
+                            .input(),
+                        // horizontal scroll wheel is a bit more obscure
+                        UsagePage::Consumer.item(),
+                        ConsumerUsage::ACPan.item(),
+                        ItemTag::LogicalMinimum.one_byte(-127i8 as u32),
+                        ItemTag::LogicalMaximum.one_byte(127),
+                        ItemTag::ReportSize.one_byte(8),
+                        ItemTag::ReportCount.one_byte(1),
+                        InputOutputFeatureItem(0)
+                            .with_constant(false) // data
+                            .with_variable(true) // variable
+                            .with_relative(true) // absolute
                             .input(),
                     ]),
                 ]),
@@ -484,12 +512,12 @@ mod test {
     #[rustfmt::skip]
     #[test]
     // dual purpose: verify that ReportDescriptor::serialize() does what we want
-    // and trips on attempts to change the report format - which we must not do
-    // in a world in which we care about live migration!
+    // and trips on attempts to change the report format for this device in
+    // particular - which we must not do since we care about live migration!
     fn tablet_descriptor_serialization() {
         let serialized: Vec<u8> =
             super::HIDTabletDevice::report_descriptor().serialize().collect();
-        // similar to HID 1.11 sect E.10
+        // similar to HID 1.11 sect E.10, but with scroll wheels
         assert_eq!(serialized.as_slice(), &[
             5, 1, // usage page (generic desktop)
             9, 2, // usage (mouse)
@@ -515,6 +543,20 @@ mod test {
                     0x75, 0x10, // report size (16)
                     0x95, 2, // report count (2)
                     0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
+                    5, 1, // usage page (generic desktop)
+                    9, 0x38, // usage (wheel)
+                    0x15, 0x81, // logical minimum (-127)
+                    0x25, 0x7f, // logical maximum (127)
+                    0x75, 8, // report size (8)
+                    0x95, 1, // report count (1)
+                    0x81, 6, // input (data, variable, relative)
+                    5, 0xC, // usage page (consumer devices)
+                    0xA, 0x38, 0x02, // usage (application controls: pan)
+                    0x15, 0x81, // logical minimum (-127)
+                    0x25, 0x7f, // logical maximum (127)
+                    0x75, 8, // report size (8)
+                    0x95, 1, // report count (1)
+                    0x81, 6, // input (data, variable, relative)
                 0xC0, // end collection
             0xC0, // end collection
         ])

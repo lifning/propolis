@@ -280,6 +280,82 @@ impl GenericDesktopUsage {
     }
 }
 
+/// HID Usage Tables 1.6 sect 15
+#[repr(u32)]
+#[derive(Copy, Clone, Debug)]
+pub enum ConsumerUsage {
+    Undefined = 0x00,
+    // [...]
+    GenericGUIApplicationControls = 0x200,
+    ACNew = 0x201,
+    ACOpen = 0x202,
+    ACClose = 0x203,
+    ACExit = 0x204,
+    ACMaximize = 0x205,
+    ACMinimize = 0x206,
+    ACSave = 0x207,
+    ACPrint = 0x208,
+    ACProperties = 0x209,
+    ACUndo = 0x21A,
+    ACCopy = 0x21B,
+    ACCut = 0x21C,
+    ACPaste = 0x21D,
+    ACSelectAll = 0x21E,
+    ACFind = 0x21F,
+    ACFindAndReplace = 0x220,
+    ACSearch = 0x221,
+    ACGoTo = 0x222,
+    ACHome = 0x223,
+    ACBack = 0x224,
+    ACForward = 0x225,
+    ACStop = 0x226,
+    ACRefresh = 0x227,
+    ACPreviousLink = 0x228,
+    ACNextLink = 0x229,
+    ACBookmarks = 0x22A,
+    ACHistory = 0x22B,
+    ACSubscriptions = 0x22C,
+    ACZoomIn = 0x22D,
+    ACZoomOut = 0x22E,
+    ACZoom = 0x22F,
+    ACFullScreenView = 0x230,
+    ACNormalView = 0x231,
+    ACViewToggle = 0x232,
+    ACScrollUp = 0x233,
+    ACScrollDown = 0x234,
+    ACScroll = 0x235,
+    ACPanLeft = 0x236,
+    ACPanRight = 0x237,
+    ACPan = 0x238,
+    ACNewWindow = 0x239,
+    ACTileHorizontally = 0x23A,
+    ACTileVertically = 0x23B,
+    ACFormat = 0x23C,
+    ACEdit = 0x23D,
+    ACBold = 0x23E,
+    ACItalics = 0x23F,
+    ACUnderline = 0x240,
+    ACStrikethrough = 0x241,
+    ACSubscript = 0x242,
+    ACSuperscript = 0x243,
+    ACAllCaps = 0x244,
+    ACRotate = 0x245,
+    ACResize = 0x246,
+    ACFlipHorizontal = 0x247,
+    ACFlipVertical = 0x248,
+    // [...]
+}
+impl ConsumerUsage {
+    pub fn item(&self) -> Part {
+        let value = *self as u32;
+        if value > 0xff {
+            ItemTag::Usage.two_byte(value)
+        } else {
+            ItemTag::Usage.one_byte(value)
+        }
+    }
+}
+
 /// HID Usage Tables 1.6 sect 16
 #[repr(u32)]
 pub enum DigitizerUsage {
