@@ -421,7 +421,6 @@ impl Collection {
 
 #[derive(Debug)]
 pub enum Part {
-    // TODO: fancier than u32 for item value
     Item(ItemPrefix, u32),
     Collection(Collection, Vec<Part>),
 }

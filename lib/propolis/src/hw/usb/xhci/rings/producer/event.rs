@@ -10,7 +10,14 @@ use crate::vmm::MemCtx;
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
-    fn xhci_producer_ring_enqueue_trb(offset: usize, data: u64, trb_type: u8) {}
+    fn xhci_producer_ring_enqueue_trb(
+        offset: usize,
+        data: u64,
+        trb_type: u8,
+        status: u32,
+        control: u32,
+    ) {
+    }
     fn xhci_producer_ring_set_dequeue_ptr(ptr: usize) {}
 }
 
@@ -153,7 +160,9 @@ impl EventRing {
         probes::xhci_producer_ring_enqueue_trb!(|| (
             enq_ptr.0 as usize,
             trb.parameter,
-            trb.control.trb_type() as u8
+            trb.control.trb_type() as u8,
+            unsafe { trb.status.transfer }.0,
+            unsafe { trb.control.normal }.0
         ));
 
         enq_ptr.0 += size_of::<Trb>() as u64;

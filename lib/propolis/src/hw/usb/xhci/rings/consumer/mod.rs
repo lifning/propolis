@@ -15,7 +15,14 @@ pub mod doorbell;
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
-    fn xhci_consumer_ring_dequeue_trb(offset: usize, data: u64, trb_type: u8) {}
+    fn xhci_consumer_ring_dequeue_trb(
+        offset: usize,
+        data: u64,
+        trb_type: u8,
+        status: u32,
+        control: u32,
+    ) {
+    }
     fn xhci_consumer_ring_follow_link_trb(offset: usize, data: u64) {}
     fn xhci_consumer_ring_set_dequeue_ptr(ptr: usize, cycle_state: bool) {}
 }
@@ -81,7 +88,7 @@ fn check_aligned_addr(addr: GuestAddr) -> Result<()> {
 impl<T: WorkItem> ConsumerRing<T> {
     pub fn new(addr: GuestAddr, cycle_state: bool) -> Result<Self> {
         check_aligned_addr(addr)?;
-        eprintln!("new transfer ring at {addr:#x?}");
+        eprintln!("new transfer ring at {addr:x?}");
         Ok(Self {
             start_addr: addr,
             dequeue_ptr: addr,
@@ -187,7 +194,9 @@ impl<T: WorkItem> ConsumerRing<T> {
                 probes::xhci_consumer_ring_dequeue_trb!(|| (
                     this_deq_ptr.0 as usize,
                     trb.parameter,
-                    trb.control.trb_type() as u8
+                    trb.control.trb_type() as u8,
+                    unsafe { trb.status.transfer }.0,
+                    unsafe { trb.control.normal }.0,
                 ));
                 return Ok(Some((trb, this_deq_ptr)));
             } else {
