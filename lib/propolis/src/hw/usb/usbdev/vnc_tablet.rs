@@ -59,8 +59,8 @@ bitstruct! {
 impl HIDTabletReport {
     pub fn pointer_event(&mut self, pe: PointerEvent, spec: Spec) {
         // div: spec.width and spec.height are NonZeroUsize
-        let x = (pe.position.x as usize * 0x8000 / spec.width) as u16;
-        let y = (pe.position.y as usize * 0x8000 / spec.height) as u16;
+        let x = (pe.position.x as usize * 0x7fff / spec.width) as u16;
+        let y = (pe.position.y as usize * 0x7fff / spec.height) as u16;
         // remap VNC button IDs to HID
         let mouse_left = pe.pressed.intersects(MouseButtons::LEFT);
         let mouse_middle = pe.pressed.intersects(MouseButtons::MIDDLE);
@@ -218,7 +218,7 @@ impl HIDTabletDevice {
     }
 
     // might be nice to generate this from some nicer builder-pattern thing someday
-    // i.e. ReptDesc::new(Mouse).with_buttons(3).with_axes([X, Y], 0..=0x8000, Absolute)
+    // i.e. ReptDesc::new(Mouse).with_buttons(5).with_axes([X, Y], 0..=0x7fff, Absolute)
     pub fn report_descriptor() -> ReportDescriptor {
         ReportDescriptor::new(
             HIDReportType::Input,
@@ -231,14 +231,14 @@ impl HIDTabletDevice {
                     Collection::Physical.items([
                         UsagePage::Button.item(),
                         // VNC mouse button reports are in the form of a one-byte
-                        // bitfield, with bit 0 representing 'disabled', so 1..=7
+                        // bitfield, with bit 0 representing 'disabled', so 1..=5
                         // (HID Button values start at 1 for "primary")
                         ItemTag::UsageMinimum.one_byte(1),
-                        ItemTag::UsageMaximum.one_byte(3),
+                        ItemTag::UsageMaximum.one_byte(5),
                         ItemTag::LogicalMinimum.one_byte(0),
                         ItemTag::LogicalMaximum.one_byte(1),
-                        // 3 buttons to report...
-                        ItemTag::ReportCount.one_byte(3),
+                        // 5 buttons to report...
+                        ItemTag::ReportCount.one_byte(5),
                         ItemTag::ReportSize.one_byte(1),
                         // 1 bit each
                         InputOutputFeatureItem(0)
@@ -246,16 +246,16 @@ impl HIDTabletDevice {
                             .with_variable(true) // variable
                             .with_relative(false) // absolute
                             .input(),
-                        // 5 bit padding to round out the byte in the report
+                        // 3 bit padding to round out the byte in the report
                         // (similar to Mouse example in HID 1.11 sect E.10)
                         ItemTag::ReportCount.one_byte(1),
-                        ItemTag::ReportSize.one_byte(5),
+                        ItemTag::ReportSize.one_byte(3),
                         InputOutputFeatureItem(0).with_constant(true).input(),
                         UsagePage::GenericDesktopControls.item(),
                         GenericDesktopUsage::X.item(),
                         GenericDesktopUsage::Y.item(),
                         ItemTag::LogicalMinimum.one_byte(0),
-                        ItemTag::LogicalMaximum.two_byte(0x8000u32),
+                        ItemTag::LogicalMaximum.two_byte(0x7fffu32),
                         // two axes, 16-bits each
                         ItemTag::ReportSize.one_byte(16),
                         ItemTag::ReportCount.one_byte(2),
@@ -290,22 +290,6 @@ impl HIDTabletDevice {
                             .input(),
                     ]),
                 ]),
-                /* if absolute-mouse doesn't work, maybe we use Digitizer page
-                Part::Item(
-                    ItemTag::UsagePage.one_byte(),
-                    UsagePage::Digitizers as u32,
-                ),
-                Part::Item(
-                    ItemTag::Usage.one_byte(),
-                    DigitizerUsage::Digitizer as u32,
-                ),
-                Part::Collection(
-                    Collection::Application,
-                    vec![
-                        // TODO report id 2, 3
-                    ],
-                ),
-                */
             ],
         )
     }
@@ -368,6 +352,7 @@ impl HIDTabletDevice {
         endpoint_id: u8,
         normal_td: TDNormal,
     ) -> Result<Option<EventInfo>> {
+        // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         if let Some(ep) = &self.interrupt_endpoint {
             ep.normal(slot_id, endpoint_id, normal_td);
         }
@@ -517,46 +502,46 @@ mod test {
     fn tablet_descriptor_serialization() {
         let serialized: Vec<u8> =
             super::HIDTabletDevice::report_descriptor().serialize().collect();
-        // similar to HID 1.11 sect E.10, but with scroll wheels
-        assert_eq!(serialized.as_slice(), &[
+        // similar to HID 1.11 sect E.10, but absolute x/y, and with scroll wheels
+         assert_eq!(serialized.as_slice(), &[
             5, 1, // usage page (generic desktop)
             9, 2, // usage (mouse)
             0xA1, 1, // collection (application)
                 9, 1, // usage (pointer)
                 0xA1, 0, // collection (physical)
                     5, 9, // usage page (buttons)
-                    0x19, 1, // usage minimum (1)
-                    0x29, 3, // usage maximum (3)
-                    0x15, 0, // logical minimum (0)
-                    0x25, 1, // logical maximum (1)
-                    0x95, 3, // report count (3)
-                    0x75, 1, // report size (1)
-                    0x81, 2, // input (data, variable, absolute), 3 button bits
-                    0x95, 1, // report count (1)
-                    0x75, 5, // report size (5)
-                    0x81, 1, // input (constant), 5 bit padding
+                        0x19, 1, // usage minimum (1)
+                        0x29, 5, // usage maximum (5)
+                        0x15, 0, // logical minimum (0)
+                        0x25, 1, // logical maximum (1)
+                        0x95, 5, // report count (5)
+                        0x75, 1, // report size (1)
+                        0x81, 2, // input (data, variable, absolute), 5 button bits
+                        0x95, 1, // report count (1)
+                        0x75, 3, // report size (3)
+                        0x81, 1, // input (constant), 3 bit padding
                     5, 1, // usage page (generic desktop)
-                    9, 0x30, // usage (x)
-                    9, 0x31, // usage (y)
-                    0x15, 0, // logical minimum (0)
-                    0x26, 0, 0x80, // logical maximum (0x8000)
-                    0x75, 0x10, // report size (16)
-                    0x95, 2, // report count (2)
-                    0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
+                        9, 0x30, // usage (x)
+                        9, 0x31, // usage (y)
+                        0x15, 0, // logical minimum (0)
+                        0x26, 0xff, 0x7f, // logical maximum (0x7fff)
+                        0x75, 0x10, // report size (16)
+                        0x95, 2, // report count (2)
+                        0x81, 2, // input (data, variable, absolute), 2 position shorts (x & y)
                     5, 1, // usage page (generic desktop)
-                    9, 0x38, // usage (wheel)
-                    0x15, 0x81, // logical minimum (-127)
-                    0x25, 0x7f, // logical maximum (127)
-                    0x75, 8, // report size (8)
-                    0x95, 1, // report count (1)
-                    0x81, 6, // input (data, variable, relative)
-                    5, 0xC, // usage page (consumer devices)
-                    0xA, 0x38, 0x02, // usage (application controls: pan)
-                    0x15, 0x81, // logical minimum (-127)
-                    0x25, 0x7f, // logical maximum (127)
-                    0x75, 8, // report size (8)
-                    0x95, 1, // report count (1)
-                    0x81, 6, // input (data, variable, relative)
+                        9, 0x38, // usage (wheel)
+                        0x15, 0x81, // logical minimum (-127)
+                        0x25, 0x7f, // logical maximum (127)
+                        0x75, 8, // report size (8)
+                        0x95, 1, // report count (1)
+                        0x81, 6, // input (data, variable, relative)
+                    5, 0x0C, // usage page (consumer devices)
+                        0x0A, 0x38, 0x02, // usage (application controls: pan)
+                        0x15, 0x81, // logical minimum (-127)
+                        0x25, 0x7f, // logical maximum (127)
+                        0x75, 8, // report size (8)
+                        0x95, 1, // report count (1)
+                        0x81, 6, // input (data, variable, relative)
                 0xC0, // end collection
             0xC0, // end collection
         ])

@@ -95,10 +95,10 @@ struct io_info {
 
 struct io_info io[uint64_t];
 
-propolis$target:::xhci_consumer_ring_dequeue_trb /* (offset, parameter, trb_type) */
+propolis$target:::xhci_consumer_ring_dequeue_trb /* (offset, parameter, trb_type, status, control) */
 {
     if (arg2 < 64) {
-        printf("[%Y] [0x%08x] Dequeued %s TRB (type %d) with parameter 0x%x\n", walltimestamp, arg0, trb_types[arg2], arg2, arg1);
+        printf("[%Y] [0x%08x] Dequeued %s TRB (type %d) with parameter 0x%x, status 0x%x, control 0x%x\n", walltimestamp, arg0, trb_types[arg2], arg2, arg1, arg3, arg4);
     } else {
         printf("[%Y] [0x%08x] Dequeued invalid TRB type (%d)\n", walltimestamp, arg0, arg2);
     }
@@ -109,10 +109,10 @@ propolis$target:::xhci_consumer_ring_set_dequeue_ptr /* (pointer, cycle_state) *
     printf("[%Y] [0x%08x] Guest xHCD set consumer ring dequeue pointer; cycle state %d\n", walltimestamp, arg0, arg1);
 }
 
-propolis$target:::xhci_producer_ring_enqueue_trb /* (offset, data, trb_type) */
+propolis$target:::xhci_producer_ring_enqueue_trb /* (offset, parameter, trb_type, status, control) */
 {
     if (arg2 < 64) {
-        printf("[%Y] [0x%08x] Enqueued %s TRB (type %d) with parameter 0x%x\n", walltimestamp, arg0, trb_types[arg2], arg2, arg1);
+        printf("[%Y] [0x%08x] Enqueued %s TRB (type %d) with parameter 0x%x, status 0x%x, control 0x%x\n", walltimestamp, arg0, trb_types[arg2], arg2, arg1, arg3, arg4);
     } else {
         printf("[%Y] [0x%08x] Enqueued invalid TRB type (%d)\n", walltimestamp, arg0, arg2);
     }
