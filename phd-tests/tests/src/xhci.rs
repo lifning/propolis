@@ -38,6 +38,6 @@ async fn usb_device_enumerates(ctx: &Framework) {
             &format!("cat /sys/devices/pci0000:00/0000:00:{PCI_DEV:02}.0/usb1/1-{USB_PORT}/idVendor"),
         )
         .await?;
-    // it's a device provided by us (0x1de)!
-    assert_eq!(output, "01de");
+    // it's a device provided by Oxide (registered USB vendor ID 0x38c6)
+    assert_eq!(output, "38c6");
 }

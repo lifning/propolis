@@ -65,3 +65,12 @@ pub mod pci {
     /// PCI Device ID for the Propolis PCI-PCI bridge.
     pub const PROPOLIS_BRIDGE_DEV_ID: u16 = 0x2;
 }
+
+/// USB-specific IDs
+pub mod usb {
+    /// The Oxide USB Vendor ID assigned by USB-IF
+    pub const VENDOR_OXIDE: u16 = 0x38c6;
+
+    /// FIXME: PLACEHOLDER
+    pub const PROPOLIS_USB_TABLET_DEV_ID: u16 = 0x7ab1;
+}

@@ -187,7 +187,7 @@ impl XhciPortWakeHandle {
         }
         return Err("xHC absent".to_string());
     }
-    pub fn finish_xfer(
+    pub fn write_data_and_send_events(
         &self,
         data: &[u8],
         region: GuestRegion,
@@ -195,12 +195,8 @@ impl XhciPortWakeHandle {
     ) {
         if let Some(state) = self.state.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
-            // eprintln!("take state lock");
             let mut state = state.lock().unwrap();
             memctx.write_many(region.0, data);
-            // if data.len() > 0 {
-            //     eprintln!("finish_xfer: {data:x?}, {evt:x?}");
-            // }
             for evt in evts.into_iter() {
                 if let Err(e) = state.interrupters[self.intr_num]
                     .enqueue_event(evt, &memctx, false)
@@ -211,7 +207,6 @@ impl XhciPortWakeHandle {
                     );
                 }
             }
-            // eprintln!("release state lock");
         }
     }
 }

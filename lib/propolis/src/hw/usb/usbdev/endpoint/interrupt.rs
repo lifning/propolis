@@ -47,23 +47,20 @@ fn periodic_xfer_wait_loop(
 ) {
     while let Some(pair) = weak_data.upgrade() {
         let (mtx, cvar) = &*pair;
-        // eprintln!("int-in: acquire main lock");
-        let guard = mtx.lock().unwrap();
-        // eprintln!("int-in: wait 1");
         let guard = cvar
-            .wait_while(guard, |x| x.transfers.is_empty() && !x.terminate)
+            .wait_while(mtx.lock().unwrap(), |x| {
+                x.transfers.is_empty() && !x.terminate
+            })
             .unwrap();
         if guard.terminate {
             break;
         }
 
-        // eprintln!("int-in: wait 2");
         let timeout = guard.period;
         let (mut guard, timeout_result) = cvar
             .wait_timeout_while(guard, timeout, |x| x.payload.is_none())
             .unwrap();
 
-        // eprintln!("int-in: waits over");
         // unwrap: this loop is the only pop from transfers & we wait_while it's empty
         let xfer = guard.transfers.pop_front().unwrap();
 
@@ -92,16 +89,15 @@ fn periodic_xfer_wait_loop(
                 complete_transfer(data, xfer, port_hdl, slot_id, endpoint_id);
             }
         } else {
-            // eprintln!("success. {} tds", guard.transfers.len());
             // unwrap: if we didn't time out, then payload is some
             let data = guard.payload.take().unwrap();
             complete_transfer(data, xfer, port_hdl, slot_id, endpoint_id);
         }
-        // eprintln!("int-in: release report lock");
     }
     eprintln!("int-in loop: bailed");
 }
 
+// TODO: dtrace probe
 fn notify_short_packet(
     xfer: &TDNormal,
     port_hdl: &Arc<XhciPortWakeHandle>,
@@ -113,7 +109,7 @@ fn notify_short_packet(
     };
     let completion_code = TrbCompletionCode::ShortPacket;
     let mut evts = Vec::new();
-    let should_interrupt_xfer = xfer.interrupt_on_short_packet;
+    let should_interrupt_xfer = false; // XXX xfer.interrupt_on_short_packet; XXX why not?
     evts.extend(should_interrupt_xfer.then_some(EventInfo::Transfer {
         trb_pointer: xfer.trb_pointer,
         completion_code,
@@ -145,9 +141,10 @@ fn notify_short_packet(
             event_data: true,
         }))
     }
-    port_hdl.finish_xfer(&[], region, evts);
+    port_hdl.write_data_and_send_events(&[], region, evts);
 }
 
+// TODO: dtrace probe
 fn complete_transfer(
     data: Vec<u8>,
     xfer: TDNormal,
@@ -191,7 +188,7 @@ fn complete_transfer(
             event_data: true,
         }))
     }
-    port_hdl.finish_xfer(&data, region, evts);
+    port_hdl.write_data_and_send_events(&data, region, evts);
 }
 
 impl InterruptInEndpoint {
