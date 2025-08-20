@@ -10,14 +10,17 @@ use rgb_frame::Spec;
 
 use crate::{
     // XXX: abstraction leak while figuring things out
-    hw::usb::xhci::{
-        bits::device_context::EndpointContext,
-        controller::XhciPortWakeHandle,
-        device_slots::SlotId,
-        port::PortId,
-        rings::{
-            consumer::transfer::{PointerOrImmediate, TDNormal},
-            producer::event::EventInfo,
+    hw::{
+        ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
+        usb::xhci::{
+            bits::device_context::EndpointContext,
+            controller::XhciPortWakeHandle,
+            device_slots::SlotId,
+            port::PortId,
+            rings::{
+                consumer::transfer::{PointerOrImmediate, TDNormal},
+                producer::event::EventInfo,
+            },
         },
     },
     vmm::MemCtx,
@@ -43,7 +46,6 @@ pub struct HIDTabletReport {
     // data: VecDeque<[u8; REPORT_SIZE]>,
     last_data: [u8; REPORT_SIZE],
     slot_id: Option<SlotId>,
-    endpoint: u8, // XXX constructor
     // where the unanswered transfer lives
     xfer_dataref: Option<Weak<(Mutex<InterruptInData>, Condvar)>>,
 }
@@ -94,7 +96,6 @@ impl HIDTabletReport {
 
         if let Some(dataref) = &self.xfer_dataref {
             if let Some(dataref) = dataref.upgrade() {
-                // eprintln!("pointer event dataref lock");
                 dataref.0.lock().unwrap().set_payload(data.to_vec());
                 dataref.1.notify_one();
             }
@@ -128,8 +129,6 @@ impl HIDTabletDevice {
         report: Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: XhciPortWakeHandle,
     ) -> Self {
-        // eprintln!("constructor report lock");
-        report.lock().unwrap().endpoint = 3; // XXX
         Self {
             control_endpoint: Default::default(),
             interrupt_endpoint: None,
@@ -147,8 +146,8 @@ impl HIDTabletDevice {
             device_subclass: SubclassCode(0),
             device_protocol: ProtocolCode(0),
             max_packet_size_0: MaxSizeZeroEP::_64,
-            vendor_id: VendorId(0x1de),
-            product_id: ProductId(0x7ab1),
+            vendor_id: VendorId(VENDOR_OXIDE),
+            product_id: ProductId(PROPOLIS_USB_TABLET_DEV_ID),
             device_version: Bcd16(0),
             manufacturer_name: Self::MANUFACTURER_NAME_INDEX,
             product_name: Self::PRODUCT_NAME_INDEX,
@@ -198,7 +197,7 @@ impl HIDTabletDevice {
     fn string_descriptor(idx: u8) -> StringDescriptor {
         let s: &str = match StringIndex(idx) {
             Self::MANUFACTURER_NAME_INDEX => "Oxide Computer Company",
-            Self::PRODUCT_NAME_INDEX => "Absolute Mouse",
+            Self::PRODUCT_NAME_INDEX => "Propolis HID Tablet",
             Self::SERIAL_INDEX => "9002",
             Self::CONFIG_NAME_INDEX => "Absolute Mouse Configuration",
             Self::INTERFACE_NAME_INDEX => "Absolute Mouse Interface",
@@ -230,9 +229,8 @@ impl HIDTabletDevice {
                     GenericDesktopUsage::Pointer.item(),
                     Collection::Physical.items([
                         UsagePage::Button.item(),
-                        // VNC mouse button reports are in the form of a one-byte
-                        // bitfield, with bit 0 representing 'disabled', so 1..=5
-                        // (HID Button values start at 1 for "primary")
+                        // HID Button values are, for a righty-mouse mapping,
+                        // left, right, middle
                         ItemTag::UsageMinimum.one_byte(1),
                         ItemTag::UsageMaximum.one_byte(5),
                         ItemTag::LogicalMinimum.one_byte(0),
