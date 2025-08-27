@@ -4,6 +4,7 @@
 
 //! Emulated USB Host Controller
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -77,12 +78,14 @@ pub struct XhciState {
 
     port_regs: [Box<dyn port::XhciUsbPort>; MAX_PORTS as usize],
 
+    port_wake_handles: HashMap<PortId, Arc<XhciPortWakeHandle>>,
+
     /// Event Data Transfer Length Accumulator (EDTLA).
     pub(super) evt_data_xfer_len_accum: u32,
 
     /// USB devices to attach (currently only supports a proof-of-concept
     /// "device" used for testing basic xHC functionality)
-    queued_device_connections: Vec<(PortId, UsbDevice)>,
+    queued_device_connections: Vec<(PortId, Box<dyn UsbDevice>)>,
     vmm_hdl: Arc<VmmHdl>,
 }
 
@@ -135,6 +138,7 @@ impl XhciState {
                 Box::new(port::Usb3Port::default()),
                 Box::new(port::Usb3Port::default()),
             ],
+            port_wake_handles: Default::default(),
             evt_data_xfer_len_accum: 0,
             queued_device_connections: vec![],
         }
@@ -249,17 +253,25 @@ impl PciXhci {
         Arc::new(Self { pci_state, state, log })
     }
 
-    fn port_wake_hdl(&self, port_id: PortId) -> XhciPortWakeHandle {
-        XhciPortWakeHandle {
-            intr_num: 0,
-            port_id,
-            acc_mem: self
-                .pci_state
-                .acc_mem
-                .child(Some("xHCI interrupter handle".to_string())),
-            state: Arc::downgrade(&self.state),
-            log: self.log.clone(),
-        }
+    fn port_wake_hdl(
+        &self,
+        state: &mut XhciState,
+        port_id: PortId,
+    ) -> Arc<XhciPortWakeHandle> {
+        state
+            .port_wake_handles
+            .entry(port_id)
+            .or_insert_with(|| XhciPortWakeHandle {
+                intr_num: 0,
+                port_id,
+                acc_mem: self
+                    .pci_state
+                    .acc_mem
+                    .child(Some("xHCI interrupter handle".to_string())),
+                state: Arc::downgrade(&self.state),
+                log: self.log.clone(),
+            })
+            .clone()
     }
 
     pub fn add_usb_device(
@@ -272,8 +284,10 @@ impl PciXhci {
         let port_id = PortId::try_from(raw_port)?;
 
         // TODO: factor this out, used in migrate import too
-        let dev =
-            UsbDevice::new(hid_report.clone(), self.port_wake_hdl(port_id));
+        let dev = UsbDevice::new(
+            hid_report.clone(),
+            self.port_wake_hdl(port_id, &mut state),
+        );
 
         state.queued_device_connections.push((port_id, dev));
         Ok(())
@@ -1041,6 +1055,7 @@ impl MigrateMulti for PciXhci {
             dev_slots,
             config,
             port_regs,
+            port_wake_handles,
             evt_data_xfer_len_accum,
             queued_device_connections,
             vmm_hdl: _,
@@ -1138,13 +1153,14 @@ impl MigrateMulti for PciXhci {
             })
             .transpose()?;
         state.dev_slots.import(&dev_slots)?;
+
         // FIXME
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
-                let mut dev = UsbDevice::new(todo!(/* XXX */), todo!());
+                let mut dev = UsbDevice::try_from_payload();
                 dev.import(&dev_data)?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })

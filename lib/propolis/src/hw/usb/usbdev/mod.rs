@@ -5,6 +5,18 @@
 use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 
+use crate::{migrate::MigrateMulti, vmm::MemCtx};
+
+use super::xhci::{
+    bits::device_context::EndpointContext,
+    device_slots::SlotId,
+    port::PortId,
+    rings::{
+        consumer::transfer::{PointerOrImmediate, TDNormal},
+        producer::event::EventInfo,
+    },
+};
+
 pub mod descriptor;
 pub mod endpoint;
 pub mod requests;
@@ -14,8 +26,29 @@ pub mod hid;
 pub mod demo_state_tracker;
 pub mod vnc_tablet;
 
-// pub type UsbDevice = demo_state_tracker::NullUsbDevice;
-pub type UsbDevice = vnc_tablet::HIDTabletDevice;
+pub trait UsbDevice: Send + Sync + MigrateMulti + 'static {
+    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()>;
+    fn data_stage(
+        &mut self,
+        endpoint_id: u8,
+        data_buffer: PointerOrImmediate,
+        data_direction: RequestDirection,
+        memctx: &MemCtx,
+    ) -> Result<usize>;
+    fn configure_endpoint(&mut self, endpoint_id: u8, ep_ctx: &EndpointContext);
+    fn normal(
+        &mut self,
+        slot_id: SlotId,
+        endpoint_id: u8,
+        normal_td: TDNormal,
+    ) -> Result<Option<EventInfo>>; // TODO: eventinfo construction in xhci module
+    fn status_stage(
+        &mut self,
+        endpoint_id: u8,
+        status_direction: RequestDirection,
+    ) -> Result<()>;
+    fn set_address(&self, slot_id: SlotId, _port_id: PortId);
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -70,12 +103,14 @@ mod probes {
 
 pub mod migrate {
     use super::endpoint::migrate::EndpointV1;
+    use super::vnc_tablet::migrate::TabletDeviceV1;
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
-    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    #[derive(Serialize, Deserialize, Debug)]
     pub enum UsbDeviceTypeV1 {
         Null,
+        Tablet(TabletDeviceV1),
     }
 
     #[derive(Serialize, Deserialize)]

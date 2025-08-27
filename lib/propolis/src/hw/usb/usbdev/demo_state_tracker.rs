@@ -196,11 +196,11 @@ impl NullUsbDevice {
         value: &super::migrate::UsbDeviceV1,
     ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
         let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
-        if *device_type != super::migrate::UsbDeviceTypeV1::Null {
+        let super::migrate::UsbDeviceTypeV1::Null = device_type else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 format!("USB device type mismatch {device_type:?} != Null"),
             ));
-        }
+        };
         if let Some(ep) = endpoints.get(&0) {
             self.control_endpoint.import(ep)?;
         } else {

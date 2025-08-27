@@ -23,6 +23,7 @@ use crate::{
             },
         },
     },
+    migrate::MigrateMulti,
     vmm::MemCtx,
 };
 
@@ -36,7 +37,7 @@ use super::{
     hid::{report::*, *},
     probes,
     requests::{RequestDirection, SetupData},
-    Error, Result,
+    Error, Result, UsbDevice,
 };
 
 const REPORT_SIZE: usize = 7;
@@ -128,14 +129,14 @@ impl HIDTabletDevice {
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: XhciPortWakeHandle,
-    ) -> Self {
-        Self {
+    ) -> Box<Self> {
+        Box::new(Self {
             control_endpoint: Default::default(),
             interrupt_endpoint: None,
             idle_duration_4ms: 0,
             report,
             port_wake_hdl: Arc::new(port_wake_hdl),
-        }
+        })
     }
 
     fn device_descriptor() -> DeviceDescriptor {
@@ -292,107 +293,6 @@ impl HIDTabletDevice {
         )
     }
 
-    pub fn setup_stage(
-        &mut self,
-        endpoint_id: u8,
-        setup: SetupData,
-    ) -> Result<()> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
-            eprintln!("in {endpoint_id}: {req:?}");
-            let payload = self.payload_for(req)?;
-            self.control_endpoint.set_payload(payload)?;
-        }
-        Ok(())
-    }
-
-    pub fn data_stage(
-        &mut self,
-        endpoint_id: u8,
-        data_buffer: PointerOrImmediate,
-        data_direction: RequestDirection,
-        memctx: &MemCtx,
-    ) -> Result<usize> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
-    }
-
-    pub fn configure_endpoint(
-        &mut self,
-        endpoint_id: u8,
-        ep_ctx: &EndpointContext,
-    ) {
-        if endpoint_id == 3 {
-            let interrupt_in_endpoint = InterruptInEndpoint::new(
-                ep_ctx.interval_as_duration(),
-                Arc::downgrade(&self.port_wake_hdl),
-            );
-            // XXX ugly
-            // eprintln!("configure ep report lock");
-            self.report
-                .lock()
-                .unwrap()
-                .set_ep_data(interrupt_in_endpoint.data_ref());
-            self.interrupt_endpoint = Some(interrupt_in_endpoint);
-            eprintln!("endpoint setup done");
-        } else {
-            eprintln!("wat");
-        }
-    }
-
-    pub fn normal(
-        &mut self,
-        slot_id: SlotId,
-        endpoint_id: u8,
-        normal_td: TDNormal,
-    ) -> Result<Option<EventInfo>> {
-        // eprintln!("normal {endpoint_id}: {normal_td:x?}");
-        if let Some(ep) = &self.interrupt_endpoint {
-            ep.normal(slot_id, endpoint_id, normal_td);
-        }
-        Ok(None)
-    }
-
-    pub fn status_stage(
-        &mut self,
-        endpoint_id: u8,
-        status_direction: RequestDirection,
-    ) -> Result<()> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        match self.control_endpoint.status_stage(status_direction)? {
-            Some((req, _payload)) => {
-                eprintln!("out {endpoint_id}: {req:?}");
-                match req {
-                    ControlRequestInfo::SetConfiguration {
-                        configuration: _,
-                    } => {
-                        // TODO: check config value
-                        Ok(())
-                    }
-                    ControlRequestInfo::Class(HIDRequestInfo::SetIdle {
-                        duration_4ms,
-                        report_id: _,
-                        interface: _,
-                    }) => {
-                        // TODO: error if not 0
-                        self.idle_duration_4ms = duration_4ms;
-                        Ok(())
-                    }
-                    x => Err(Error::UnimplementedRequestBehavior(format!(
-                        "{x:?}"
-                    ))),
-                }
-            }
-            None => Ok(()),
-        }
-    }
-
     // TODO: not alloc unnecessarily
     fn payload_for(
         &self,
@@ -452,17 +352,122 @@ impl HIDTabletDevice {
             }
         })
     }
+}
 
-    pub fn import(
+impl UsbDevice for HIDTabletDevice {
+    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+            eprintln!("in {endpoint_id}: {req:?}");
+            let payload = self.payload_for(req)?;
+            self.control_endpoint.set_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    fn data_stage(
+        &mut self,
+        endpoint_id: u8,
+        data_buffer: PointerOrImmediate,
+        data_direction: RequestDirection,
+        memctx: &MemCtx,
+    ) -> Result<usize> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
+    }
+
+    fn configure_endpoint(
+        &mut self,
+        endpoint_id: u8,
+        ep_ctx: &EndpointContext,
+    ) {
+        if endpoint_id == 3 {
+            let interrupt_in_endpoint = InterruptInEndpoint::new(
+                ep_ctx.interval_as_duration(),
+                Arc::downgrade(&self.port_wake_hdl),
+            );
+            // XXX ugly
+            // eprintln!("configure ep report lock");
+            self.report
+                .lock()
+                .unwrap()
+                .set_ep_data(interrupt_in_endpoint.data_ref());
+            self.interrupt_endpoint = Some(interrupt_in_endpoint);
+            eprintln!("endpoint setup done");
+        } else {
+            eprintln!("wat");
+        }
+    }
+
+    fn normal(
+        &mut self,
+        slot_id: SlotId,
+        endpoint_id: u8,
+        normal_td: TDNormal,
+    ) -> Result<Option<EventInfo>> {
+        // eprintln!("normal {endpoint_id}: {normal_td:x?}");
+        if let Some(ep) = &self.interrupt_endpoint {
+            ep.normal(slot_id, endpoint_id, normal_td);
+        }
+        Ok(None)
+    }
+
+    fn status_stage(
+        &mut self,
+        endpoint_id: u8,
+        status_direction: RequestDirection,
+    ) -> Result<()> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        match self.control_endpoint.status_stage(status_direction)? {
+            Some((req, _payload)) => {
+                eprintln!("out {endpoint_id}: {req:?}");
+                match req {
+                    ControlRequestInfo::SetConfiguration {
+                        configuration: _,
+                    } => {
+                        // TODO: check config value
+                        Ok(())
+                    }
+                    ControlRequestInfo::Class(HIDRequestInfo::SetIdle {
+                        duration_4ms,
+                        report_id: _,
+                        interface: _,
+                    }) => {
+                        // TODO: error if not 0
+                        self.idle_duration_4ms = duration_4ms;
+                        Ok(())
+                    }
+                    x => Err(Error::UnimplementedRequestBehavior(format!(
+                        "{x:?}"
+                    ))),
+                }
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn set_address(&self, slot_id: SlotId, _port_id: PortId) {
+        self.report.lock().unwrap().slot_id = Some(slot_id);
+    }
+}
+
+impl MigrateMulti for HIDTabletDevice {
+    fn import(
         &mut self,
         value: &super::migrate::UsbDeviceV1,
     ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
         let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
-        if *device_type != super::migrate::UsbDeviceTypeV1::Null {
+        let super::migrate::UsbDeviceTypeV1::Tablet(..) = device_type else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB device type mismatch {device_type:?} != Null"),
+                format!("USB device type mismatch {device_type:?} != Tablet"),
             ));
-        }
+        };
         if let Some(ep) = endpoints.get(&0) {
             self.control_endpoint.import(ep)?;
         } else {
@@ -473,7 +478,7 @@ impl HIDTabletDevice {
         Ok(())
     }
 
-    pub fn export(&self) -> super::migrate::UsbDeviceV1 {
+    fn export(&self) -> super::migrate::UsbDeviceV1 {
         super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
             endpoints: [(0, self.control_endpoint.export())]
@@ -481,11 +486,13 @@ impl HIDTabletDevice {
                 .collect(),
         }
     }
+}
 
-    pub fn set_address(&self, slot_id: SlotId, _port_id: PortId) {
-        eprintln!("set address report lock");
-        self.report.lock().unwrap().slot_id = Some(slot_id);
-    }
+pub mod migrate {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct TabletDeviceV1 {}
 }
 
 #[cfg(test)]

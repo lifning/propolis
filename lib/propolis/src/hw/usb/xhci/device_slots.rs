@@ -959,7 +959,7 @@ impl DeviceSlotTable {
                     dst_dev.import(src_dev)?;
                 } else {
                     // FIXME
-                    let mut dst_dev = UsbDevice::new(todo!(/* XXX */), todo!());
+                    let mut dst_dev = UsbDevice::try_from_payload(src_dev);
                     dst_dev.import(src_dev)?;
                     *dst = Some(dst_dev);
                 }
