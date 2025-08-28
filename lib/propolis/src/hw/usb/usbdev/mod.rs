@@ -2,13 +2,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::sync::{Arc, Mutex};
+
 use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
+use vnc_tablet::HIDTabletReport;
 
 use crate::vmm::MemCtx;
 
 use super::xhci::{
     bits::device_context::EndpointContext,
+    controller::XhciPortWakeHandle,
     device_slots::SlotId,
     port::PortId,
     rings::{
@@ -25,6 +29,51 @@ pub mod hid;
 
 pub mod demo_state_tracker;
 pub mod vnc_tablet;
+
+pub enum UsbDeviceType {
+    Null,
+    HidTablet,
+}
+
+impl UsbDeviceType {
+    pub fn create(
+        &self,
+        hid_report: &Arc<Mutex<HIDTabletReport>>,
+        port_wake_hdl: Arc<XhciPortWakeHandle>,
+    ) -> Box<dyn UsbDevice> {
+        match self {
+            UsbDeviceType::Null => {
+                todo!() //demo_state_tracker::NullUsbDevice::default())
+            }
+            UsbDeviceType::HidTablet => {
+                Box::new(vnc_tablet::HIDTabletDevice::new(
+                    hid_report.clone(),
+                    port_wake_hdl,
+                ))
+            }
+        }
+    }
+
+    pub fn create_from_payload(
+        payload: &migrate::UsbDeviceV1,
+        hid_report: &Arc<Mutex<HIDTabletReport>>,
+        port_wake_hdl: Arc<XhciPortWakeHandle>,
+    ) -> core::result::Result<
+        Box<dyn UsbDevice>,
+        crate::migrate::MigrateStateError,
+    > {
+        let mut dev = match &payload.device_type {
+            migrate::UsbDeviceTypeV1::Null => {
+                Self::Null.create(hid_report, port_wake_hdl)
+            }
+            migrate::UsbDeviceTypeV1::Tablet(tablet_payload) => {
+                Self::HidTablet.create(hid_report, port_wake_hdl)
+            }
+        };
+        dev.import(&payload)?;
+        Ok(dev)
+    }
+}
 
 pub trait UsbDevice: Send + Sync + 'static {
     fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()>;

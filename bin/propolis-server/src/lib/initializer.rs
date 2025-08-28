@@ -44,7 +44,7 @@ use propolis::hw::qemu::{
 };
 use propolis::hw::uart::LpcUart;
 use propolis::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
-use propolis::hw::usb::xhci;
+use propolis::hw::usb::{usbdev, xhci};
 use propolis::hw::{nvme, virtio};
 use propolis::intr_pins;
 use propolis::vmm::{self, Builder, Machine};
@@ -905,10 +905,16 @@ impl MachineInitializer<'_> {
                         "xhc_pci_path" => %xhc_spec.pci_path,
                         "usb_port" => %usb.root_hub_port_num,
                     );
-                    xhc.add_usb_device(usb.root_hub_port_num, hid_report)
-                        .map_err(
-                            MachineInitError::UsbRootHubPortNumberInvalid,
-                        )?;
+                    let device_type = match usb.usb_device_type {
+                        instance_spec::components::devices::UsbDeviceType::Null => usbdev::UsbDeviceType::Null,
+                        instance_spec::components::devices::UsbDeviceType::HidTablet => usbdev::UsbDeviceType::HidTablet,
+                    };
+                    xhc.add_usb_device(
+                        usb.root_hub_port_num,
+                        device_type,
+                        hid_report,
+                    )
+                    .map_err(MachineInitError::UsbRootHubPortNumberInvalid)?;
                 }
             }
 

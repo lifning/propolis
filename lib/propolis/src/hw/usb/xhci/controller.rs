@@ -16,8 +16,8 @@ use crate::accessors::MemAccessor;
 use crate::common::{GuestAddr, GuestRegion, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
-use crate::hw::usb::usbdev::vnc_tablet::{HIDTabletDevice, HIDTabletReport};
-use crate::hw::usb::usbdev::UsbDevice;
+use crate::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
+use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::port::PortId;
 use crate::hw::usb::xhci::rings::consumer::doorbell;
@@ -278,17 +278,15 @@ impl PciXhci {
     pub fn add_usb_device(
         &self,
         raw_port: u8,
-        // TODO: pass the device-specifics better than this. VmObjects ref?
+        device_type: UsbDeviceType,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
 
         // TODO: factor this out, used in migrate import too
-        let dev = HIDTabletDevice::new(
-            hid_report.clone(),
-            self.port_wake_hdl(&mut state, port_id),
-        );
+        let dev = device_type
+            .create(hid_report, self.port_wake_hdl(&mut state, port_id));
 
         state.queued_device_connections.push((port_id, dev));
         Ok(())
@@ -1078,12 +1076,17 @@ impl MigrateMulti for PciXhci {
                 .map(|xi| xi.export())
                 .collect::<Result<Vec<_>, _>>()?,
             command_ring: command_ring.as_ref().map(|cr| cr.export()),
-            dev_slots: dev_slots.export(),
+            dev_slots: dev_slots.export()?,
             port_regs: port_regs.iter().map(|port| port.export()).collect(),
             queued_device_connections: queued_device_connections
                 .iter()
-                .map(|(port_id, usbdev)| (port_id.as_raw_id(), usbdev.export()))
-                .collect(),
+                .map(|(port_id, usbdev)| {
+                    Ok::<_, crate::migrate::MigrateStateError>((
+                        port_id.as_raw_id(),
+                        usbdev.export()?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         };
 
         output.push(mstate.into())?;
@@ -1153,16 +1156,19 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
-        state.dev_slots.import(&dev_slots)?;
+        state.dev_slots.import(&dev_slots, ctx)?;
 
-        // FIXME
+        // FIXME: overwrites and re-creates all pending devices unconditionally
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {
                 let port_id = PortId::try_from(port_id)
                     .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
-                let mut dev = UsbDevice::try_from_payload();
-                dev.import(&dev_data)?;
+                let dev = UsbDeviceType::create_from_payload(
+                    &dev_data,
+                    ctx.hid_report,
+                    self.port_wake_hdl(&mut state, port_id),
+                )?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })
             .collect::<Result<Vec<_>, _>>()?;

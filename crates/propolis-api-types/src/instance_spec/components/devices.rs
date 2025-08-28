@@ -214,7 +214,15 @@ pub struct UsbDevice {
     /// For USB 2.0 devices, valid values are 1-4, inclusive.
     /// For USB 3.0 devices, valid values are 5-8, inclusive.
     pub root_hub_port_num: u8,
-    // TODO(lif): a field for device type (e.g. HID tablet, mass storage...)
+    /// Which kind of supported USB device this is (e.g. `hid_tablet`)
+    pub usb_device_type: UsbDeviceType,
+}
+
+#[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum UsbDeviceType {
+    Null,
+    HidTablet,
 }
 
 /// Describes a synthetic device that registers for VM lifecycle notifications

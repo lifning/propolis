@@ -406,7 +406,7 @@ impl<'dr> VmConfig<'dr> {
             for usb_dev in usb_devs {
                 let _old = spec.components.insert(
                     format!("{xhc_key}-{}", usb_dev.root_hub_port_num).into(),
-                    ComponentV0::UsbPlaceholder(usb_dev.to_owned()),
+                    ComponentV0::UsbDevice(usb_dev.to_owned()),
                 );
                 assert!(_old.is_none());
             }

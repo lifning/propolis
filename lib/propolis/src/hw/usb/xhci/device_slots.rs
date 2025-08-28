@@ -7,7 +7,7 @@ use std::ops::Deref;
 use zerocopy::{FromBytes, FromZeros};
 
 use crate::common::GuestAddr;
-use crate::hw::usb::usbdev::UsbDevice;
+use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
 use crate::vmm::MemCtx;
 
 use super::bits::device_context::{
@@ -191,8 +191,8 @@ impl DeviceSlotTable {
     pub fn attach_to_root_hub_port_address(
         &mut self,
         port_id: PortId,
-        usb_dev: UsbDevice,
-    ) -> Result<(), UsbDevice> {
+        usb_dev: Box<dyn UsbDevice>,
+    ) -> Result<(), Box<dyn UsbDevice>> {
         if let Some(dev) = self.port_devs[port_id.as_index()].replace(usb_dev) {
             Err(dev)
         } else {
@@ -202,7 +202,7 @@ impl DeviceSlotTable {
 
     pub fn detach_all_for_reset(
         &mut self,
-    ) -> impl Iterator<Item = (PortId, UsbDevice)> + '_ {
+    ) -> impl Iterator<Item = (PortId, Box<dyn UsbDevice>)> + '_ {
         self.port_devs.iter_mut().enumerate().flat_map(|(i, opt_dev)| {
             opt_dev
                 .take()
@@ -213,7 +213,7 @@ impl DeviceSlotTable {
     pub fn usbdev_for_slot(
         &mut self,
         slot_id: SlotId,
-    ) -> Result<&mut UsbDevice, Error> {
+    ) -> Result<&mut Box<dyn UsbDevice>, Error> {
         let slot = self.slot_mut(slot_id)?;
         let idx = slot
             .port_address
@@ -919,9 +919,12 @@ impl DeviceSlotTable {
         }
     }
 
-    pub fn export(&self) -> migrate::DeviceSlotTableV1 {
+    pub fn export(
+        &self,
+    ) -> Result<migrate::DeviceSlotTableV1, crate::migrate::MigrateStateError>
+    {
         let Self { dcbaap, slots, port_devs, log: _ } = self;
-        migrate::DeviceSlotTableV1 {
+        Ok(migrate::DeviceSlotTableV1 {
             dcbaap: dcbaap.as_ref().map(|x| x.0),
             slots: slots
                 .iter()
@@ -929,14 +932,17 @@ impl DeviceSlotTable {
                 .collect(),
             port_devs: port_devs
                 .iter()
-                .map(|opt| opt.as_ref().map(|usbdev| usbdev.export()))
-                .collect(),
-        }
+                .map(|opt| {
+                    opt.as_ref().map(|usbdev| usbdev.export()).transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 
     pub fn import(
         &mut self,
         value: &migrate::DeviceSlotTableV1,
+        ctx: &crate::migrate::MigrateCtx,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
         self.dcbaap = dcbaap.map(GuestAddr);
@@ -959,8 +965,11 @@ impl DeviceSlotTable {
                     dst_dev.import(src_dev)?;
                 } else {
                     // FIXME
-                    let mut dst_dev = UsbDevice::try_from_payload(src_dev);
-                    dst_dev.import(src_dev)?;
+                    let dst_dev = UsbDeviceType::create_from_payload(
+                        src_dev,
+                        ctx.hid_report,
+                        port_wake_hdl,
+                    )?;
                     *dst = Some(dst_dev);
                 }
             }

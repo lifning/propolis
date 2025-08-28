@@ -135,7 +135,7 @@ impl From<Spec> for InstanceSpecV0 {
         }
 
         for (id, usb) in usbdevs {
-            insert_component(&mut spec, id, ComponentV0::UsbPlaceholder(usb));
+            insert_component(&mut spec, id, ComponentV0::UsbDevice(usb));
         }
 
         for (name, desc) in serial {
@@ -390,7 +390,7 @@ impl TryFrom<InstanceSpecV0> for Spec {
                 ComponentV0::Xhci(xhci) => {
                     builder.add_xhci_controller(device_id, xhci)?;
                 }
-                ComponentV0::UsbPlaceholder(usbdev) => {
+                ComponentV0::UsbDevice(usbdev) => {
                     if xhci_controllers.contains(&usbdev.xhc_device) {
                         builder.add_usb_device(device_id, usbdev)?;
                     } else {

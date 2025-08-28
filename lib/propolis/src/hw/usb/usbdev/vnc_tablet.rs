@@ -129,14 +129,14 @@ impl HIDTabletDevice {
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortWakeHandle>,
-    ) -> Box<Self> {
-        Box::new(Self {
+    ) -> Self {
+        Self {
             control_endpoint: Default::default(),
             interrupt_endpoint: None,
             idle_duration_4ms: 0,
             report,
             port_wake_hdl,
-        })
+        }
     }
 
     fn device_descriptor() -> DeviceDescriptor {

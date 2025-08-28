@@ -567,8 +567,7 @@ async fn initialize_vm_objects(
     ))?;
     init.initialize_network_devices(&chipset).await?;
 
-    // XXX
-    let hid_report = Arc::new(Mutex::new(HIDTabletReport::default()));
+    let hid_report = Arc::default();
     init.initialize_xhc_usb(&chipset, &hid_report)?;
 
     #[cfg(feature = "failure-injection")]

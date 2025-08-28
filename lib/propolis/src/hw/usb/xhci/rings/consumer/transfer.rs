@@ -369,7 +369,7 @@ impl TransferInfo {
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
-        usbdev: &mut UsbDevice,
+        usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {
@@ -407,7 +407,7 @@ impl TransferInfo {
         slot_id: SlotId,
         endpoint_id: u8,
         evt_data_xfer_len_accum: &mut u32,
-        usbdev: &mut UsbDevice,
+        usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {

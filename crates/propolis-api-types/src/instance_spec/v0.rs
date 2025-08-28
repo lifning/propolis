@@ -29,7 +29,7 @@ pub enum ComponentV0 {
     SoftNpuP9(components::devices::SoftNpuP9),
     P9fs(components::devices::P9fs),
     Xhci(components::devices::XhciController),
-    UsbPlaceholder(components::devices::UsbDevice),
+    UsbDevice(components::devices::UsbDevice),
     MigrationFailureInjector(components::devices::MigrationFailureInjector),
     CrucibleStorageBackend(components::backends::CrucibleStorageBackend),
     FileStorageBackend(components::backends::FileStorageBackend),

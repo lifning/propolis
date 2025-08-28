@@ -14,7 +14,8 @@ use propolis_client::{
         ComponentV0, Cpuid, CpuidVendor, DlpiNetworkBackend,
         FileStorageBackend, MigrationFailureInjector, NvmeDisk, P9fs, PciPath,
         PciPciBridge, SoftNpuP9, SoftNpuPciPort, SoftNpuPort, SpecKey,
-        UsbDevice, VirtioDisk, VirtioNetworkBackend, VirtioNic, XhciController,
+        UsbDevice, UsbDeviceType, VirtioDisk, VirtioNetworkBackend, VirtioNic,
+        XhciController,
     },
     support::nvme_serial_from_str,
 };
@@ -287,9 +288,36 @@ impl TryFrom<&super::Config> for SpecConfig {
 
                     spec.components.insert(
                         device_id,
-                        ComponentV0::UsbPlaceholder(UsbDevice {
+                        ComponentV0::UsbDevice(UsbDevice {
                             root_hub_port_num,
                             xhc_device,
+                            usb_device_type: UsbDeviceType::Null,
+                        }),
+                    );
+                }
+                "usb-hid-tablet" => {
+                    let root_hub_port_num = device
+                        .get_integer("root-hub-port")
+                        .filter(|x| (1..=8).contains(x))
+                        .ok_or_else(|| {
+                            TomlToSpecError::InvalidUsbPort(
+                                device_name.to_owned(),
+                            )
+                        })? as u8;
+
+                    let xhc_device: SpecKey =
+                        device.get("xhc-device").ok_or_else(|| {
+                            TomlToSpecError::NoHostControllerNameForUsbDevice(
+                                device_name.to_owned(),
+                            )
+                        })?;
+
+                    spec.components.insert(
+                        device_id,
+                        ComponentV0::UsbDevice(UsbDevice {
+                            root_hub_port_num,
+                            xhc_device,
+                            usb_device_type: UsbDeviceType::HidTablet,
                         }),
                     );
                 }
