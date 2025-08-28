@@ -5,7 +5,7 @@
 use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 
-use crate::{migrate::MigrateMulti, vmm::MemCtx};
+use crate::vmm::MemCtx;
 
 use super::xhci::{
     bits::device_context::EndpointContext,
@@ -26,7 +26,7 @@ pub mod hid;
 pub mod demo_state_tracker;
 pub mod vnc_tablet;
 
-pub trait UsbDevice: Send + Sync + MigrateMulti + 'static {
+pub trait UsbDevice: Send + Sync + 'static {
     fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()>;
     fn data_stage(
         &mut self,
@@ -48,6 +48,16 @@ pub trait UsbDevice: Send + Sync + MigrateMulti + 'static {
         status_direction: RequestDirection,
     ) -> Result<()>;
     fn set_address(&self, slot_id: SlotId, _port_id: PortId);
+    fn import(
+        &mut self,
+        payload: &migrate::UsbDeviceV1,
+    ) -> core::result::Result<(), crate::migrate::MigrateStateError>;
+    fn export(
+        &self,
+    ) -> core::result::Result<
+        migrate::UsbDeviceV1,
+        crate::migrate::MigrateStateError,
+    >;
 }
 
 #[derive(Debug, thiserror::Error)]

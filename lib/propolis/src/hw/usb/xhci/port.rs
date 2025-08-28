@@ -17,7 +17,7 @@ pub enum PortWrite {
     BusReset,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct PortId(u8);
 

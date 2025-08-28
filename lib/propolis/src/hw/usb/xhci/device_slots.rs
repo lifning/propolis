@@ -163,7 +163,7 @@ pub struct DeviceSlotTable {
     /// See xHCI 1.2 Section 5.4.6
     dcbaap: Option<GuestAddr>,
     slots: Vec<Option<DeviceSlot>>,
-    port_devs: [Option<UsbDevice>; MAX_PORTS as usize],
+    port_devs: [Option<Box<dyn UsbDevice>>; MAX_PORTS as usize],
     log: slog::Logger,
 }
 

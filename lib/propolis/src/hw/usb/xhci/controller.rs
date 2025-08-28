@@ -16,7 +16,7 @@ use crate::accessors::MemAccessor;
 use crate::common::{GuestAddr, GuestRegion, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
-use crate::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
+use crate::hw::usb::usbdev::vnc_tablet::{HIDTabletDevice, HIDTabletReport};
 use crate::hw::usb::usbdev::UsbDevice;
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::port::PortId;
@@ -83,8 +83,7 @@ pub struct XhciState {
     /// Event Data Transfer Length Accumulator (EDTLA).
     pub(super) evt_data_xfer_len_accum: u32,
 
-    /// USB devices to attach (currently only supports a proof-of-concept
-    /// "device" used for testing basic xHC functionality)
+    /// USB devices to attach
     queued_device_connections: Vec<(PortId, Box<dyn UsbDevice>)>,
     vmm_hdl: Arc<VmmHdl>,
 }
@@ -261,15 +260,17 @@ impl PciXhci {
         state
             .port_wake_handles
             .entry(port_id)
-            .or_insert_with(|| XhciPortWakeHandle {
-                intr_num: 0,
-                port_id,
-                acc_mem: self
-                    .pci_state
-                    .acc_mem
-                    .child(Some("xHCI interrupter handle".to_string())),
-                state: Arc::downgrade(&self.state),
-                log: self.log.clone(),
+            .or_insert_with(|| {
+                Arc::new(XhciPortWakeHandle {
+                    intr_num: 0,
+                    port_id,
+                    acc_mem: self
+                        .pci_state
+                        .acc_mem
+                        .child(Some("xHCI interrupter handle".to_string())),
+                    state: Arc::downgrade(&self.state),
+                    log: self.log.clone(),
+                })
             })
             .clone()
     }
@@ -277,16 +278,16 @@ impl PciXhci {
     pub fn add_usb_device(
         &self,
         raw_port: u8,
-        // TODO: pass the device-specifics better than this
+        // TODO: pass the device-specifics better than this. VmObjects ref?
         hid_report: &Arc<Mutex<HIDTabletReport>>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
 
         // TODO: factor this out, used in migrate import too
-        let dev = UsbDevice::new(
+        let dev = HIDTabletDevice::new(
             hid_report.clone(),
-            self.port_wake_hdl(port_id, &mut state),
+            self.port_wake_hdl(&mut state, port_id),
         );
 
         state.queued_device_connections.push((port_id, dev));
@@ -546,7 +547,7 @@ impl PciXhci {
                         }
                     }
 
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "command ring at {:#x}",
                         state.crcr.command_ring_pointer().0
@@ -850,7 +851,7 @@ impl PciXhci {
 
             Doorbell(0) => {
                 reg_index = 0;
-                slog::debug!(self.log, "doorbell 0");
+                slog::trace!(self.log, "doorbell 0");
                 // xHCI 1.2 section 4.9.3, table 5-43
                 let doorbell_register = bits::DoorbellRegister(wo.read_u32());
                 if doorbell_register.db_target() == 0 {
@@ -872,7 +873,7 @@ impl PciXhci {
                 // TODO: care about DoorbellRegister::db_stream_id for USB3
                 let doorbell_register = bits::DoorbellRegister(wo.read_u32());
                 let endpoint_id = doorbell_register.db_target();
-                slog::debug!(
+                slog::trace!(
                     self.log,
                     "doorbell slot {slot_id} ep {endpoint_id}"
                 );

@@ -9,9 +9,9 @@ use rfb::proto::{MouseButtons, PointerEvent};
 use rgb_frame::Spec;
 
 use crate::{
-    // XXX: abstraction leak while figuring things out
     hw::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
+        // XXX: some of this is abstraction leakage while figuring things out
         usb::xhci::{
             bits::device_context::EndpointContext,
             controller::XhciPortWakeHandle,
@@ -23,7 +23,6 @@ use crate::{
             },
         },
     },
-    migrate::MigrateMulti,
     vmm::MemCtx,
 };
 
@@ -44,8 +43,9 @@ const REPORT_SIZE: usize = 7;
 
 #[derive(Default)]
 pub struct HIDTabletReport {
-    // data: VecDeque<[u8; REPORT_SIZE]>,
+    // for control-endpoint Get_Report requests
     last_data: [u8; REPORT_SIZE],
+    // XXX: can we lose this
     slot_id: Option<SlotId>,
     // where the unanswered transfer lives
     xfer_dataref: Option<Weak<(Mutex<InterruptInData>, Condvar)>>,
@@ -128,14 +128,14 @@ impl HIDTabletDevice {
 
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: XhciPortWakeHandle,
+        port_wake_hdl: Arc<XhciPortWakeHandle>,
     ) -> Box<Self> {
         Box::new(Self {
             control_endpoint: Default::default(),
             interrupt_endpoint: None,
             idle_duration_4ms: 0,
             report,
-            port_wake_hdl: Arc::new(port_wake_hdl),
+            port_wake_hdl,
         })
     }
 
@@ -391,13 +391,11 @@ impl UsbDevice for HIDTabletDevice {
                 Arc::downgrade(&self.port_wake_hdl),
             );
             // XXX ugly
-            // eprintln!("configure ep report lock");
             self.report
                 .lock()
                 .unwrap()
                 .set_ep_data(interrupt_in_endpoint.data_ref());
             self.interrupt_endpoint = Some(interrupt_in_endpoint);
-            eprintln!("endpoint setup done");
         } else {
             eprintln!("wat");
         }
@@ -455,9 +453,7 @@ impl UsbDevice for HIDTabletDevice {
     fn set_address(&self, slot_id: SlotId, _port_id: PortId) {
         self.report.lock().unwrap().slot_id = Some(slot_id);
     }
-}
 
-impl MigrateMulti for HIDTabletDevice {
     fn import(
         &mut self,
         value: &super::migrate::UsbDeviceV1,
@@ -478,13 +474,18 @@ impl MigrateMulti for HIDTabletDevice {
         Ok(())
     }
 
-    fn export(&self) -> super::migrate::UsbDeviceV1 {
-        super::migrate::UsbDeviceV1 {
+    fn export(
+        &self,
+    ) -> core::result::Result<
+        super::migrate::UsbDeviceV1,
+        crate::migrate::MigrateStateError,
+    > {
+        Ok(super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
             endpoints: [(0, self.control_endpoint.export())]
                 .into_iter()
                 .collect(),
-        }
+        })
     }
 }
 
