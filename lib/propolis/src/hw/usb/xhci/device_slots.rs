@@ -943,6 +943,7 @@ impl DeviceSlotTable {
         &mut self,
         value: &migrate::DeviceSlotTableV1,
         ctx: &crate::migrate::MigrateCtx,
+        wake_handles: &super::controller::XhciPortWakeHandleCollection,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
         self.dcbaap = dcbaap.map(GuestAddr);
@@ -955,7 +956,9 @@ impl DeviceSlotTable {
                 ),
             ));
         }
-        for (dst, src) in self.port_devs.iter_mut().zip(port_devs) {
+        for (port_index_raw, (dst, src)) in
+            self.port_devs.iter_mut().zip(port_devs).enumerate()
+        {
             if src.is_none() {
                 *dst = None;
             } else {
@@ -964,11 +967,13 @@ impl DeviceSlotTable {
                     // device exists in this port already, update its state
                     dst_dev.import(src_dev)?;
                 } else {
+                    let port_id =
+                        PortId::try_from((port_index_raw + 1) as u8).unwrap();
                     // FIXME
                     let dst_dev = UsbDeviceType::create_from_payload(
                         src_dev,
                         ctx.hid_report,
-                        port_wake_hdl,
+                        wake_handles.handle_for_port(port_id),
                     )?;
                     *dst = Some(dst_dev);
                 }

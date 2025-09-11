@@ -78,8 +78,6 @@ pub struct XhciState {
 
     port_regs: [Box<dyn port::XhciUsbPort>; MAX_PORTS as usize],
 
-    port_wake_handles: HashMap<PortId, Arc<XhciPortWakeHandle>>,
-
     /// Event Data Transfer Length Accumulator (EDTLA).
     pub(super) evt_data_xfer_len_accum: u32,
 
@@ -137,7 +135,6 @@ impl XhciState {
                 Box::new(port::Usb3Port::default()),
                 Box::new(port::Usb3Port::default()),
             ],
-            port_wake_handles: Default::default(),
             evt_data_xfer_len_accum: 0,
             queued_device_connections: vec![],
         }
@@ -154,16 +151,56 @@ impl XhciState {
     }
 }
 
+pub struct XhciPortWakeHandleCollection {
+    acc_mem: MemAccessor,
+    state_weak: Weak<Mutex<XhciState>>,
+    handles: Mutex<HashMap<PortId, Arc<XhciPortWakeHandle>>>,
+    log: slog::Logger,
+}
+
+impl XhciPortWakeHandleCollection {
+    fn new(
+        acc_mem: MemAccessor,
+        state_weak: Weak<Mutex<XhciState>>,
+        log: slog::Logger,
+    ) -> Self {
+        Self { acc_mem, state_weak, handles: Default::default(), log }
+    }
+
+    pub(super) fn handle_for_port(
+        &self,
+        port_id: PortId,
+    ) -> Arc<XhciPortWakeHandle> {
+        self.handles
+            .lock()
+            .unwrap()
+            .entry(port_id)
+            .or_insert_with(|| {
+                Arc::new(XhciPortWakeHandle {
+                    intr_num: 0,
+                    port_id,
+                    acc_mem: self
+                        .acc_mem
+                        .child(Some("xHCI interrupter handle".to_string())),
+                    state_weak: self.state_weak.clone(),
+                    log: self.log.clone(),
+                })
+            })
+            .clone()
+    }
+}
+
 pub struct XhciPortWakeHandle {
     intr_num: usize,
     acc_mem: MemAccessor,
-    state: Weak<Mutex<XhciState>>,
+    state_weak: Weak<Mutex<XhciState>>,
     port_id: PortId,
     log: slog::Logger,
 }
 impl XhciPortWakeHandle {
+    /// Wake a port if it is in suspend, generating an Event TRB.
     pub fn wake_up(&self) -> Result<(), String> {
-        if let Some(state) = self.state.upgrade() {
+        if let Some(state) = self.state_weak.upgrade() {
             if let Some(memctx) = self.acc_mem.access() {
                 let mut state = state.lock().unwrap();
                 if let Some(evt) = state.port_regs[self.port_id.as_index()]
@@ -190,13 +227,15 @@ impl XhciPortWakeHandle {
         }
         return Err("xHC absent".to_string());
     }
+
+    /// Complete a transaction and post the given Event TRBs to the Event Ring
     pub fn write_data_and_send_events(
         &self,
         data: &[u8],
         region: GuestRegion,
         evts: impl IntoIterator<Item = EventInfo>,
     ) {
-        if let Some(state) = self.state.upgrade() {
+        if let Some(state) = self.state_weak.upgrade() {
             let memctx = self.acc_mem.access().unwrap();
             let mut state = state.lock().unwrap();
             memctx.write_many(region.0, data);
@@ -221,6 +260,8 @@ pub struct PciXhci {
 
     /// Controller state
     state: Arc<Mutex<XhciState>>,
+
+    port_wake_handles: XhciPortWakeHandleCollection,
 
     log: slog::Logger,
 }
@@ -249,30 +290,13 @@ impl PciXhci {
         let state =
             Arc::new(Mutex::new(XhciState::new(&pci_state, hdl, log.clone())));
 
-        Arc::new(Self { pci_state, state, log })
-    }
+        let port_wake_handles = XhciPortWakeHandleCollection::new(
+            pci_state.acc_mem.child(None),
+            Arc::downgrade(&state),
+            log.clone(),
+        );
 
-    fn port_wake_hdl(
-        &self,
-        state: &mut XhciState,
-        port_id: PortId,
-    ) -> Arc<XhciPortWakeHandle> {
-        state
-            .port_wake_handles
-            .entry(port_id)
-            .or_insert_with(|| {
-                Arc::new(XhciPortWakeHandle {
-                    intr_num: 0,
-                    port_id,
-                    acc_mem: self
-                        .pci_state
-                        .acc_mem
-                        .child(Some("xHCI interrupter handle".to_string())),
-                    state: Arc::downgrade(&self.state),
-                    log: self.log.clone(),
-                })
-            })
-            .clone()
+        Arc::new(Self { pci_state, state, port_wake_handles, log })
     }
 
     pub fn add_usb_device(
@@ -285,8 +309,10 @@ impl PciXhci {
         let port_id = PortId::try_from(raw_port)?;
 
         // TODO: factor this out, used in migrate import too
-        let dev = device_type
-            .create(hid_report, self.port_wake_hdl(&mut state, port_id));
+        let dev = device_type.create(
+            hid_report,
+            self.port_wake_handles.handle_for_port(port_id),
+        );
 
         state.queued_device_connections.push((port_id, dev));
         Ok(())
@@ -1054,7 +1080,6 @@ impl MigrateMulti for PciXhci {
             dev_slots,
             config,
             port_regs,
-            port_wake_handles,
             evt_data_xfer_len_accum,
             queued_device_connections,
             vmm_hdl: _,
@@ -1156,7 +1181,7 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
-        state.dev_slots.import(&dev_slots, ctx)?;
+        state.dev_slots.import(&dev_slots, ctx, &self.port_wake_handles)?; // HACK
 
         // FIXME: overwrites and re-creates all pending devices unconditionally
         state.queued_device_connections = queued_device_connections
@@ -1167,7 +1192,7 @@ impl MigrateMulti for PciXhci {
                 let dev = UsbDeviceType::create_from_payload(
                     &dev_data,
                     ctx.hid_report,
-                    self.port_wake_hdl(&mut state, port_id),
+                    self.port_wake_handles.handle_for_port(port_id),
                 )?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })
