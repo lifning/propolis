@@ -45,8 +45,6 @@ const REPORT_SIZE: usize = 7;
 pub struct HIDTabletReport {
     // for control-endpoint Get_Report requests
     last_data: [u8; REPORT_SIZE],
-    // XXX: can we lose this
-    slot_id: Option<SlotId>,
     // where the unanswered transfer lives
     xfer_dataref: Option<Weak<(Mutex<InterruptInData>, Condvar)>>,
 }
@@ -450,10 +448,6 @@ impl UsbDevice for HIDTabletDevice {
         }
     }
 
-    fn set_address(&self, slot_id: SlotId, _port_id: PortId) {
-        self.report.lock().unwrap().slot_id = Some(slot_id);
-    }
-
     fn import(
         &mut self,
         value: &super::migrate::UsbDeviceV1,
@@ -471,6 +465,13 @@ impl UsbDevice for HIDTabletDevice {
                 format!("USB endpoint 0 missing"),
             ));
         }
+        if let Some(ep) = endpoints.get(&1) {
+            self.interrupt_endpoint.import(ep)?;
+        } else {
+            return Err(crate::migrate::MigrateStateError::ImportFailed(
+                format!("USB interrupt endpoint 1 missing"),
+            ));
+        }
         Ok(())
     }
 
@@ -482,9 +483,12 @@ impl UsbDevice for HIDTabletDevice {
     > {
         Ok(super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
-            endpoints: [(0, self.control_endpoint.export())]
-                .into_iter()
-                .collect(),
+            endpoints: [
+                (0, self.control_endpoint.export()),
+                (1, self.interrupt_endpoint.export()),
+            ]
+            .into_iter()
+            .collect(),
         })
     }
 }

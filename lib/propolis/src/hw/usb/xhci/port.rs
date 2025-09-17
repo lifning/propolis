@@ -279,7 +279,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         }
 
         if is_usb3 {
-            todo!("usb3 portsc controller-side change")
+            todo!("usb3 portsc controller-side change (no usb3 devices implemented yet)")
             // TODO: if Hot Reset transitioned to Warm Reset, set WRC to 1
         } else {
             // for concise readability

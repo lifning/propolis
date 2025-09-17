@@ -43,7 +43,7 @@ impl UsbDeviceType {
     ) -> Box<dyn UsbDevice> {
         match self {
             UsbDeviceType::Null => {
-                todo!() //demo_state_tracker::NullUsbDevice::default())
+                Box::new(demo_state_tracker::NullUsbDevice::default())
             }
             UsbDeviceType::HidTablet => {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
@@ -96,7 +96,7 @@ pub trait UsbDevice: Send + Sync + 'static {
         endpoint_id: u8,
         status_direction: RequestDirection,
     ) -> Result<()>;
-    fn set_address(&self, slot_id: SlotId, _port_id: PortId);
+    fn set_address(&self, slot_id: SlotId, _port_id: PortId) {}
     fn import(
         &mut self,
         payload: &migrate::UsbDeviceV1,

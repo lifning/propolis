@@ -22,6 +22,25 @@ use crate::{
     },
 };
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn usb_interrupt_xfer_complete(
+        slot_id: u8,
+        endpoint_id: u8,
+        ptr: u64,
+        bytes: usize,
+    ) {
+    }
+    fn usb_interrupt_xfer_shortpacket(
+        slot_id: u8,
+        endpoint_id: u8,
+        ptr: u64,
+        bytes_requested: usize,
+        bytes_received: usize,
+    ) {
+    }
+}
+
 pub struct InterruptInData {
     transfers: VecDeque<TDNormal>,
     payload: Option<Vec<u8>>,
@@ -97,7 +116,6 @@ fn periodic_xfer_wait_loop(
     eprintln!("int-in loop: bailed");
 }
 
-// TODO: dtrace probe
 fn notify_short_packet(
     xfer: &TDNormal,
     port_hdl: &Arc<XhciPortWakeHandle>,
@@ -141,6 +159,13 @@ fn notify_short_packet(
             event_data: true,
         }))
     }
+    probes::usb_interrupt_xfer_shortpacket!(|| (
+        u8::from(slot_id),
+        endpoint_id,
+        region.0 .0,
+        region.1,
+        0,
+    ));
     port_hdl.write_data_and_send_events(&[], region, evts);
 }
 
@@ -188,6 +213,12 @@ fn complete_transfer(
             event_data: true,
         }))
     }
+    probes::usb_interrupt_xfer_complete!(|| (
+        u8::from(slot_id),
+        endpoint_id,
+        region.0 .0,
+        region.1,
+    ));
     port_hdl.write_data_and_send_events(&data, region, evts);
 }
 

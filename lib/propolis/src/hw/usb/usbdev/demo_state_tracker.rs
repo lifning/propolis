@@ -3,7 +3,15 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::{
-    hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate, vmm::MemCtx,
+    hw::usb::xhci::{
+        device_slots::SlotId,
+        port::PortId,
+        rings::{
+            consumer::transfer::{PointerOrImmediate, TDNormal},
+            producer::event::EventInfo,
+        },
+    },
+    vmm::MemCtx,
 };
 
 use super::{
@@ -14,7 +22,7 @@ use super::{
     },
     probes,
     requests::{RequestDirection, SetupData},
-    Error, Result,
+    Error, Result, UsbDevice,
 };
 
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
@@ -22,6 +30,102 @@ use super::{
 pub struct NullUsbDevice {
     control_endpoint:
         Endpoint<ControlRequestInfo<NoClassRequestInfo>, InAndOut>,
+}
+
+impl UsbDevice for NullUsbDevice {
+    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+            let payload = self.payload_for(req)?;
+            self.control_endpoint.set_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    fn data_stage(
+        &mut self,
+        endpoint_id: u8,
+        data_buffer: PointerOrImmediate,
+        data_direction: RequestDirection,
+        memctx: &MemCtx,
+    ) -> Result<usize> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
+    }
+
+    fn status_stage(
+        &mut self,
+        endpoint_id: u8,
+        status_direction: RequestDirection,
+    ) -> Result<()> {
+        if endpoint_id != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        match self.control_endpoint.status_stage(status_direction)? {
+            Some((req, _payload)) => match req {
+                ControlRequestInfo::SetConfiguration { configuration: _ } => {
+                    // TODO: check config value
+                    Ok(())
+                }
+                x => Err(Error::UnimplementedRequestBehavior(format!("{x:?}"))),
+            },
+            None => Ok(()),
+        }
+    }
+
+    fn import(
+        &mut self,
+        value: &super::migrate::UsbDeviceV1,
+    ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
+        let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
+        let super::migrate::UsbDeviceTypeV1::Null = device_type else {
+            return Err(crate::migrate::MigrateStateError::ImportFailed(
+                format!("USB device type mismatch {device_type:?} != Null"),
+            ));
+        };
+        if let Some(ep) = endpoints.get(&0) {
+            self.control_endpoint.import(ep)?;
+        } else {
+            return Err(crate::migrate::MigrateStateError::ImportFailed(
+                format!("USB endpoint 0 missing"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn export(
+        &self,
+    ) -> core::result::Result<
+        super::migrate::UsbDeviceV1,
+        crate::migrate::MigrateStateError,
+    > {
+        Ok(super::migrate::UsbDeviceV1 {
+            device_type: super::migrate::UsbDeviceTypeV1::Null,
+            endpoints: [(0, self.control_endpoint.export())]
+                .into_iter()
+                .collect(),
+        })
+    }
+
+    fn configure_endpoint(
+        &mut self,
+        _endpoint_id: u8,
+        _ep_ctx: &crate::hw::usb::xhci::bits::device_context::EndpointContext,
+    ) {
+    }
+
+    fn normal(
+        &mut self,
+        _slot_id: SlotId,
+        _endpoint_id: u8,
+        _normal_td: TDNormal,
+    ) -> Result<Option<EventInfo>> {
+        Ok(None)
+    }
 }
 
 impl NullUsbDevice {
@@ -100,55 +204,6 @@ impl NullUsbDevice {
             num_configurations: 0,
         }
     }
-
-    pub fn setup_stage(
-        &mut self,
-        endpoint_id: u8,
-        setup: SetupData,
-    ) -> Result<()> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
-            let payload = self.payload_for(req)?;
-            self.control_endpoint.set_payload(payload)?;
-        }
-        Ok(())
-    }
-
-    pub fn data_stage(
-        &mut self,
-        endpoint_id: u8,
-        data_buffer: PointerOrImmediate,
-        data_direction: RequestDirection,
-        memctx: &MemCtx,
-    ) -> Result<usize> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
-    }
-
-    pub fn status_stage(
-        &mut self,
-        endpoint_id: u8,
-        status_direction: RequestDirection,
-    ) -> Result<()> {
-        if endpoint_id != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        match self.control_endpoint.status_stage(status_direction)? {
-            Some((req, _payload)) => match req {
-                ControlRequestInfo::SetConfiguration { configuration: _ } => {
-                    // TODO: check config value
-                    Ok(())
-                }
-                x => Err(Error::UnimplementedRequestBehavior(format!("{x:?}"))),
-            },
-            None => Ok(()),
-        }
-    }
-
     fn payload_for(
         &self,
         req: ControlRequestInfo<NoClassRequestInfo>,
@@ -189,34 +244,5 @@ impl NullUsbDevice {
                 )))
             }
         })
-    }
-
-    pub fn import(
-        &mut self,
-        value: &super::migrate::UsbDeviceV1,
-    ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
-        let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
-        let super::migrate::UsbDeviceTypeV1::Null = device_type else {
-            return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB device type mismatch {device_type:?} != Null"),
-            ));
-        };
-        if let Some(ep) = endpoints.get(&0) {
-            self.control_endpoint.import(ep)?;
-        } else {
-            return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB endpoint 0 missing"),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn export(&self) -> super::migrate::UsbDeviceV1 {
-        super::migrate::UsbDeviceV1 {
-            device_type: super::migrate::UsbDeviceTypeV1::Null,
-            endpoints: [(0, self.control_endpoint.export())]
-                .into_iter()
-                .collect(),
-        }
     }
 }
