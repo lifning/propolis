@@ -2,7 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Condvar, Mutex, Weak},
+};
 
 use bitstruct::bitstruct;
 use rfb::proto::{MouseButtons, PointerEvent};
@@ -16,7 +19,6 @@ use crate::{
             bits::device_context::EndpointContext,
             controller::XhciPortWakeHandle,
             device_slots::SlotId,
-            port::PortId,
             rings::{
                 consumer::transfer::{PointerOrImmediate, TDNormal},
                 producer::event::EventInfo,
@@ -466,8 +468,17 @@ impl UsbDevice for HIDTabletDevice {
             ));
         }
         if let Some(ep) = endpoints.get(&1) {
-            self.interrupt_endpoint.import(ep)?;
+            let interrupt_ep =
+                self.interrupt_endpoint.get_or_insert_with(|| {
+                    InterruptInEndpoint::new(
+                        period,
+                        Arc::downgrade(&self.port_wake_hdl),
+                    )
+                });
+            interrupt_ep.import(ep)?;
         } else {
+            self.interrupt_endpoint = None; // drop() terminates transfer thread
+
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 format!("USB interrupt endpoint 1 missing"),
             ));
@@ -481,14 +492,14 @@ impl UsbDevice for HIDTabletDevice {
         super::migrate::UsbDeviceV1,
         crate::migrate::MigrateStateError,
     > {
+        let mut endpoints: BTreeMap<_, _> =
+            [(0, self.control_endpoint.export())].into_iter().collect();
+        if let Some(interrupt_ep) = &self.interrupt_endpoint {
+            endpoints.insert(1, interrupt_ep.export()?);
+        }
         Ok(super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
-            endpoints: [
-                (0, self.control_endpoint.export()),
-                (1, self.interrupt_endpoint.export()),
-            ]
-            .into_iter()
-            .collect(),
+            endpoints,
         })
     }
 }

@@ -44,7 +44,7 @@ where
     _2spooky: PhantomData<Dir>,
 }
 
-// #[derive(Default)] wants T: Default and Dir: Default, even as Phantoms
+// #[derive(Default)] would want T: Default and Dir: Default, even as Phantoms
 impl<T, Dir> Default for Endpoint<T, Dir>
 where
     T: TryFrom<SetupData>,

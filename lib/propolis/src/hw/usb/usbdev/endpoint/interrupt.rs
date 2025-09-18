@@ -47,6 +47,7 @@ pub struct InterruptInData {
     period: Duration,
     ids: Option<(SlotId, u8)>,
     terminate: bool,
+    block_migration: bool,
 }
 
 impl InterruptInData {
@@ -66,7 +67,7 @@ fn periodic_xfer_wait_loop(
 ) {
     while let Some(pair) = weak_data.upgrade() {
         let (mtx, cvar) = &*pair;
-        let guard = cvar
+        let mut guard = cvar
             .wait_while(mtx.lock().unwrap(), |x| {
                 x.transfers.is_empty() && !x.terminate
             })
@@ -74,6 +75,9 @@ fn periodic_xfer_wait_loop(
         if guard.terminate {
             break;
         }
+
+        // position in thread loop becomes state we must consider
+        guard.block_migration = true;
 
         let timeout = guard.period;
         let (mut guard, timeout_result) = cvar
@@ -107,12 +111,17 @@ fn periodic_xfer_wait_loop(
             if let Some(data) = guard.payload.take() {
                 complete_transfer(data, xfer, port_hdl, slot_id, endpoint_id);
             }
+
+            guard.block_migration = false;
         } else {
             // unwrap: if we didn't time out, then payload is some
             let data = guard.payload.take().unwrap();
             complete_transfer(data, xfer, port_hdl, slot_id, endpoint_id);
+
+            guard.block_migration = false;
         }
     }
+    // TODO: slog::error!
     eprintln!("int-in loop: bailed");
 }
 
@@ -169,7 +178,6 @@ fn notify_short_packet(
     port_hdl.write_data_and_send_events(&[], region, evts);
 }
 
-// TODO: dtrace probe
 fn complete_transfer(
     data: Vec<u8>,
     xfer: TDNormal,
@@ -231,6 +239,7 @@ impl InterruptInEndpoint {
                 period,
                 ids: None,
                 terminate: false,
+                block_migration: false,
             }),
             Condvar::new(),
         ));
@@ -253,6 +262,31 @@ impl InterruptInEndpoint {
     }
     pub fn data_ref(&self) -> Weak<(Mutex<InterruptInData>, Condvar)> {
         Arc::downgrade(&self.data)
+    }
+
+    pub fn import(
+        &mut self,
+        ep: &super::migrate::EndpointV1,
+    ) -> Result<(), crate::migrate::MigrateStateError> {
+        todo!()
+    }
+
+    pub fn export(
+        &self,
+    ) -> Result<super::migrate::EndpointV1, crate::migrate::MigrateStateError>
+    {
+        let guard = self.data.0.lock().unwrap();
+        let guard =
+            self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
+        let InterruptInData {
+            transfers,
+            payload,
+            period,
+            ids,
+            terminate,
+            block_migration: _,
+        } = &*guard;
+        todo!()
     }
 }
 impl Drop for InterruptInEndpoint {
