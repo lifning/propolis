@@ -455,11 +455,16 @@ impl UsbDevice for HIDTabletDevice {
         value: &super::migrate::UsbDeviceV1,
     ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
         let super::migrate::UsbDeviceV1 { device_type, endpoints } = value;
-        let super::migrate::UsbDeviceTypeV1::Tablet(..) = device_type else {
+        let super::migrate::UsbDeviceTypeV1::Tablet(tablet_data) = device_type
+        else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 format!("USB device type mismatch {device_type:?} != Tablet"),
             ));
         };
+
+        self.idle_duration_4ms = tablet_data.idle_duration_4ms;
+        self.report.lock().unwrap() = tablet_data.report;
+
         if let Some(ep) = endpoints.get(&0) {
             self.control_endpoint.import(ep)?;
         } else {
@@ -468,6 +473,7 @@ impl UsbDevice for HIDTabletDevice {
             ));
         }
         if let Some(ep) = endpoints.get(&1) {
+            let interrupt_ep_data = todo!("{ep:?}");
             let interrupt_ep =
                 self.interrupt_endpoint.get_or_insert_with(|| {
                     InterruptInEndpoint::new(

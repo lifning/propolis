@@ -268,6 +268,15 @@ impl InterruptInEndpoint {
         &mut self,
         ep: &super::migrate::EndpointV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
+        // TODO: can we unify the way this is represented for periodic / bulk / control
+        let super::migrate::EndpointV1 {
+            current_setup: None,
+            payload,
+            bytes_transferred,
+        } = ep
+        else {
+            return Err(todo!());
+        };
         todo!()
     }
 
