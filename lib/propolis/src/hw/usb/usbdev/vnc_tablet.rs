@@ -31,9 +31,8 @@ use crate::{
 use super::{
     descriptor::*,
     endpoint::{
-        control::ControlRequestInfo,
+        control::{ControlEndpoint, ControlRequestInfo},
         interrupt::{InterruptInData, InterruptInEndpoint},
-        Endpoint, InAndOut,
     },
     hid::{report::*, *},
     probes,
@@ -112,7 +111,7 @@ impl HIDTabletReport {
 }
 
 pub struct HIDTabletDevice {
-    control_endpoint: Endpoint<ControlRequestInfo<HIDRequestInfo>, InAndOut>,
+    control_endpoint: ControlEndpoint<HIDRequestInfo>,
     interrupt_endpoint: Option<InterruptInEndpoint>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,

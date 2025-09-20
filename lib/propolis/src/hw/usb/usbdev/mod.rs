@@ -111,8 +111,6 @@ pub trait UsbDevice: Send + Sync + 'static {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("mismatched Endpoint and Setup Stage transfer direction in transfer: {0:?} != {1:?}")]
-    EndpointVsSetupDirectionMismatch(RequestDirection, RequestDirection),
     #[error("mismatched Setup Stage and Data Stage transfer direction in transfer: {0:?} != {1:?}")]
     SetupVsDataDirectionMismatch(RequestDirection, RequestDirection),
     #[error("given an immediate for IN transfer")]

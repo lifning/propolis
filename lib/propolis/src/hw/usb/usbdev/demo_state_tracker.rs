@@ -5,7 +5,6 @@
 use crate::{
     hw::usb::xhci::{
         device_slots::SlotId,
-        port::PortId,
         rings::{
             consumer::transfer::{PointerOrImmediate, TDNormal},
             producer::event::EventInfo,
@@ -16,9 +15,8 @@ use crate::{
 
 use super::{
     descriptor::*,
-    endpoint::{
-        control::{ControlRequestInfo, NoClassRequestInfo},
-        Endpoint, InAndOut,
+    endpoint::control::{
+        ControlEndpoint, ControlRequestInfo, NoClassRequestInfo,
     },
     probes,
     requests::{RequestDirection, SetupData},
@@ -28,8 +26,7 @@ use super::{
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 #[derive(Default)]
 pub struct NullUsbDevice {
-    control_endpoint:
-        Endpoint<ControlRequestInfo<NoClassRequestInfo>, InAndOut>,
+    control_endpoint: ControlEndpoint<NoClassRequestInfo>,
 }
 
 impl UsbDevice for NullUsbDevice {

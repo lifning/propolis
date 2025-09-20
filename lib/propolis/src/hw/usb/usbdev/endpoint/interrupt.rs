@@ -45,7 +45,7 @@ pub struct InterruptInData {
     transfers: VecDeque<TDNormal>,
     payload: Option<Vec<u8>>,
     period: Duration,
-    ids: Option<(SlotId, u8)>,
+    slot_and_ep_ids: Option<(SlotId, u8)>,
     terminate: bool,
     block_migration: bool,
 }
@@ -95,7 +95,7 @@ fn periodic_xfer_wait_loop(
         // too many at once (xHCI 1.2 sect 4.14.3)
 
         let Some(port_hdl) = port_hdl.upgrade() else { break };
-        let Some((slot_id, endpoint_id)) = guard.ids else {
+        let Some((slot_id, endpoint_id)) = guard.slot_and_ep_ids else {
             continue;
         };
         if timeout_result.timed_out() {
@@ -120,6 +120,7 @@ fn periodic_xfer_wait_loop(
 
             guard.block_migration = false;
         }
+        cvar.notify_one();
     }
     // TODO: slog::error!
     eprintln!("int-in loop: bailed");
@@ -237,7 +238,7 @@ impl InterruptInEndpoint {
                 transfers: VecDeque::new(),
                 payload: None,
                 period,
-                ids: None,
+                slot_and_ep_ids: None,
                 terminate: false,
                 block_migration: false,
             }),
@@ -257,7 +258,7 @@ impl InterruptInEndpoint {
     ) {
         let mut data = self.data.0.lock().unwrap();
         data.transfers.push_back(normal_td);
-        data.ids = Some((slot_id, endpoint_id));
+        data.slot_and_ep_ids = Some((slot_id, endpoint_id));
         self.data.1.notify_one();
     }
     pub fn data_ref(&self) -> Weak<(Mutex<InterruptInData>, Condvar)> {
@@ -269,14 +270,12 @@ impl InterruptInEndpoint {
         ep: &super::migrate::EndpointV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         // TODO: can we unify the way this is represented for periodic / bulk / control
-        let super::migrate::EndpointV1 {
-            current_setup: None,
-            payload,
-            bytes_transferred,
-        } = ep
-        else {
+        let super::migrate::EndpointV1::InterruptIn {} = ep else {
             return Err(todo!());
         };
+        let guard = self.data.0.lock().unwrap();
+        let guard =
+            self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
         todo!()
     }
 
@@ -291,7 +290,7 @@ impl InterruptInEndpoint {
             transfers,
             payload,
             period,
-            ids,
+            slot_and_ep_ids,
             terminate,
             block_migration: _,
         } = &*guard;
