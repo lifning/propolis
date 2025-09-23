@@ -381,6 +381,7 @@ impl UsbDevice for HIDTabletDevice {
 
     fn configure_endpoint(
         &mut self,
+        slot_id: SlotId,
         endpoint_id: u8,
         ep_ctx: &EndpointContext,
     ) {
@@ -388,6 +389,8 @@ impl UsbDevice for HIDTabletDevice {
             let interrupt_in_endpoint = InterruptInEndpoint::new(
                 ep_ctx.interval_as_duration(),
                 Arc::downgrade(&self.port_wake_hdl),
+                slot_id,
+                endpoint_id,
             );
             // XXX ugly
             self.report
@@ -402,15 +405,18 @@ impl UsbDevice for HIDTabletDevice {
 
     fn normal(
         &mut self,
-        slot_id: SlotId,
         endpoint_id: u8,
         normal_td: TDNormal,
     ) -> Result<Option<EventInfo>> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
-        if let Some(ep) = &self.interrupt_endpoint {
-            ep.normal(slot_id, endpoint_id, normal_td);
+        if endpoint_id == 3 {
+            if let Some(ep) = &self.interrupt_endpoint {
+                ep.normal(normal_td);
+            }
+            Ok(None)
+        } else {
+            todo!()
         }
-        Ok(None)
     }
 
     fn status_stage(
@@ -464,20 +470,22 @@ impl UsbDevice for HIDTabletDevice {
         self.idle_duration_4ms = tablet_data.idle_duration_4ms;
         self.report.lock().unwrap() = tablet_data.report;
 
-        if let Some(ep) = endpoints.get(&0) {
+        if let Some(ep) = endpoints.get(&1) {
             self.control_endpoint.import(ep)?;
         } else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 format!("USB endpoint 0 missing"),
             ));
         }
-        if let Some(ep) = endpoints.get(&1) {
+        if let Some(ep) = endpoints.get(&3) {
             let interrupt_ep_data = todo!("{ep:?}");
             let interrupt_ep =
                 self.interrupt_endpoint.get_or_insert_with(|| {
                     InterruptInEndpoint::new(
                         period,
                         Arc::downgrade(&self.port_wake_hdl),
+                        slot_id,
+                        endpoint_id,
                     )
                 });
             interrupt_ep.import(ep)?;
@@ -498,9 +506,9 @@ impl UsbDevice for HIDTabletDevice {
         crate::migrate::MigrateStateError,
     > {
         let mut endpoints: BTreeMap<_, _> =
-            [(0, self.control_endpoint.export())].into_iter().collect();
+            [(1, self.control_endpoint.export())].into_iter().collect();
         if let Some(interrupt_ep) = &self.interrupt_endpoint {
-            endpoints.insert(1, interrupt_ep.export()?);
+            endpoints.insert(3, interrupt_ep.export()?);
         }
         Ok(super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,

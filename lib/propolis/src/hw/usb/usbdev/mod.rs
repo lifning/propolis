@@ -84,10 +84,14 @@ pub trait UsbDevice: Send + Sync + 'static {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<usize>;
-    fn configure_endpoint(&mut self, endpoint_id: u8, ep_ctx: &EndpointContext);
-    fn normal(
+    fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
+        endpoint_id: u8,
+        ep_ctx: &EndpointContext,
+    );
+    fn normal(
+        &mut self,
         endpoint_id: u8,
         normal_td: TDNormal,
     ) -> Result<Option<EventInfo>>; // TODO: eventinfo construction in xhci module

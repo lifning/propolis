@@ -175,11 +175,11 @@ where
         &mut self,
         value: &super::migrate::EndpointV1,
     ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
-        let super::migrate::EndpointV1::Control {
+        let super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {
             current_setup,
             payload,
             bytes_transferred,
-        } = value
+        }) = value
         else {
             return Err(todo!());
         };
@@ -191,11 +191,11 @@ where
 
     pub fn export(&self) -> super::migrate::EndpointV1 {
         let Self { current_setup, payload, bytes_transferred, _spooky } = self;
-        super::migrate::EndpointV1::Control {
+        super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {
             current_setup: current_setup.as_ref().map(|x| x.0),
             payload: payload.to_owned(),
             bytes_transferred: *bytes_transferred,
-        }
+        })
     }
 }
 
@@ -271,5 +271,16 @@ impl TryFrom<SetupData> for NoClassRequestInfo {
 
     fn try_from(setup: SetupData) -> Result<Self> {
         Err(Error::ClassRequestOnNonClassEndpoint(setup))
+    }
+}
+
+pub mod migrate {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    pub struct ControlEndpointV1 {
+        pub current_setup: Option<u64>,
+        pub payload: Option<Vec<u8>>,
+        pub bytes_transferred: usize,
     }
 }

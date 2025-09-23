@@ -547,7 +547,7 @@ impl DeviceSlotTable {
                     );
                     self.usbdev_for_slot(slot_id)
                         .unwrap()
-                        .configure_endpoint(i, &in_ep_ctx);
+                        .configure_endpoint(slot_id, i, &in_ep_ctx);
                     out_ep_ctx.mutate(|ctx| {
                         *ctx = *in_ep_ctx;
                         ctx.set_endpoint_state(EndpointState::Running);

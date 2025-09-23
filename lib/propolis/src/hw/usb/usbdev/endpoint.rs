@@ -8,13 +8,14 @@ pub mod interrupt;
 pub mod migrate {
     use serde::{Deserialize, Serialize};
 
+    use super::{
+        control::migrate::ControlEndpointV1,
+        interrupt::migrate::InterruptInEndpointV1,
+    };
+
     #[derive(Serialize, Deserialize)]
     pub enum EndpointV1 {
-        Control {
-            current_setup: Option<u64>,
-            payload: Option<Vec<u8>>,
-            bytes_transferred: usize,
-        },
-        InterruptIn {},
+        Control(ControlEndpointV1),
+        InterruptIn(InterruptInEndpointV1),
     }
 }
