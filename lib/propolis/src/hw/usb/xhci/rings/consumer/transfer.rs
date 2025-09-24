@@ -106,7 +106,7 @@ impl TransferDescriptor {
 pub enum PointerOrImmediate {
     Pointer(GuestRegion),
     #[allow(dead_code)]
-    // have not yet implemented anything with out payloads that can use this
+    // have not yet implemented anything with Out payloads that can use this
     Immediate([u8; 8], usize),
 }
 
@@ -443,7 +443,7 @@ impl TransferInfo {
             TransferInfo::Normal(normal_td) => {
                 let interrupter = normal_td.interrupter_target;
                 let trb_pointer = normal_td.trb_pointer;
-                match usbdev.normal(slot_id, endpoint_id, normal_td) {
+                match usbdev.normal(endpoint_id, normal_td) {
                     Ok(Some(evt_info)) => vec![TransferEventParams {
                         evt_info,
                         interrupter,
@@ -667,6 +667,137 @@ impl TransferInfo {
                 Vec::new()
             }
             TransferInfo::NoOp => Vec::new(),
+        }
+    }
+}
+
+pub mod migrate {
+    use serde::{Deserialize, Serialize};
+
+    use crate::{
+        common::{GuestAddr, GuestRegion},
+        hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate,
+    };
+
+    use super::{TDEventData, TDNormal};
+
+    #[derive(Serialize, Deserialize)]
+    pub struct TDNormalV1 {
+        pub data_buffer: (u64, usize),
+        pub data_buffer_is_immediate: bool,
+        pub interrupter_target: u16,
+        pub interrupt_on_completion: bool,
+        pub interrupt_on_short_packet: bool,
+        pub trb_pointer: u64,
+        pub event_data: Option<TDEventDataV1>,
+    }
+
+    impl From<&TDNormalV1> for TDNormal {
+        fn from(value: &TDNormalV1) -> Self {
+            let TDNormalV1 {
+                data_buffer,
+                data_buffer_is_immediate,
+                interrupter_target,
+                interrupt_on_completion,
+                interrupt_on_short_packet,
+                trb_pointer,
+                event_data,
+            } = value;
+            Self {
+                data_buffer: if *data_buffer_is_immediate {
+                    PointerOrImmediate::Immediate(
+                        data_buffer.0.to_ne_bytes(),
+                        data_buffer.1,
+                    )
+                } else {
+                    PointerOrImmediate::Pointer(crate::common::GuestRegion(
+                        GuestAddr(data_buffer.0),
+                        data_buffer.1,
+                    ))
+                },
+                interrupter_target: *interrupter_target,
+                interrupt_on_completion: *interrupt_on_completion,
+                interrupt_on_short_packet: *interrupt_on_short_packet,
+                trb_pointer: GuestAddr(*trb_pointer),
+                event_data: event_data.as_ref().map(From::from),
+            }
+        }
+    }
+
+    impl From<&TDNormal> for TDNormalV1 {
+        fn from(value: &TDNormal) -> Self {
+            let TDNormal {
+                data_buffer,
+                interrupter_target,
+                interrupt_on_completion,
+                interrupt_on_short_packet,
+                trb_pointer,
+                event_data,
+            } = value;
+            let (data_buffer, data_buffer_is_immediate) = match data_buffer {
+                PointerOrImmediate::Pointer(GuestRegion(addr, len)) => {
+                    ((addr.0, *len), false)
+                }
+                PointerOrImmediate::Immediate(arr, len) => {
+                    ((u64::from_ne_bytes(*arr), *len), true)
+                }
+            };
+            Self {
+                data_buffer,
+                data_buffer_is_immediate,
+                interrupter_target: *interrupter_target,
+                interrupt_on_completion: *interrupt_on_completion,
+                interrupt_on_short_packet: *interrupt_on_short_packet,
+                trb_pointer: trb_pointer.0,
+                event_data: event_data.as_ref().map(From::from),
+            }
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct TDEventDataV1 {
+        pub event_data: u64,
+        pub interrupter_target: u16,
+        pub interrupt_on_completion: bool,
+        pub interrupt_on_short_packet: bool,
+        pub block_event_interrupt: bool,
+    }
+
+    impl From<&TDEventDataV1> for TDEventData {
+        fn from(value: &TDEventDataV1) -> Self {
+            let TDEventDataV1 {
+                event_data,
+                interrupter_target,
+                interrupt_on_completion,
+                interrupt_on_short_packet,
+                block_event_interrupt,
+            } = value;
+            Self {
+                event_data: *event_data,
+                interrupter_target: *interrupter_target,
+                interrupt_on_completion: *interrupt_on_completion,
+                interrupt_on_short_packet: *interrupt_on_short_packet,
+                block_event_interrupt: *block_event_interrupt,
+            }
+        }
+    }
+
+    impl From<&TDEventData> for TDEventDataV1 {
+        fn from(value: &TDEventData) -> Self {
+            let TDEventData {
+                event_data,
+                interrupter_target,
+                interrupt_on_completion,
+                interrupt_on_short_packet,
+                block_event_interrupt,
+            } = value;
+            Self {
+                event_data: *event_data,
+                interrupter_target: *interrupter_target,
+                interrupt_on_completion: *interrupt_on_completion,
+                interrupt_on_short_packet: *interrupt_on_short_packet,
+                block_event_interrupt: *block_event_interrupt,
+            }
         }
     }
 }

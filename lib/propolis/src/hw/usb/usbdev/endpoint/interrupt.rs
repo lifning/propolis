@@ -137,7 +137,8 @@ impl PeriodicTransferPollThread {
         };
         let completion_code = TrbCompletionCode::ShortPacket;
         let mut evts = Vec::new();
-        let should_interrupt_xfer = false; // XXX xfer.interrupt_on_short_packet; XXX why not?
+        /* XXX: this causes incorrect behavior when uncommented - why?
+        let should_interrupt_xfer = xfer.interrupt_on_short_packet;
         evts.extend(should_interrupt_xfer.then_some(EventInfo::Transfer {
             trb_pointer: xfer.trb_pointer,
             completion_code,
@@ -154,6 +155,7 @@ impl PeriodicTransferPollThread {
             endpoint_id: self.endpoint_id,
             event_data: false,
         }));
+        */
         if let Some(event_data) = &xfer.event_data {
             let should_interrupt_ed = event_data.interrupt_on_short_packet;
             evts.extend(should_interrupt_ed.then_some(EventInfo::Transfer {
@@ -287,8 +289,15 @@ impl InterruptInEndpoint {
             return Err(todo!());
         };
         let guard = self.data.0.lock().unwrap();
-        let guard =
+        let mut guard =
             self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
+        if guard.terminate {
+            return Err(todo!()); // loop bailed from missing port handle
+        }
+        guard.transfers = transfers.into_iter().map(From::from).collect();
+        guard.payload = payload.to_owned();
+        guard.period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
+
         todo!()
     }
 
@@ -313,8 +322,8 @@ impl InterruptInEndpoint {
             period.as_secs_f64() / MINIMUM_INTERVAL_TIME.as_secs_f64();
         Ok(super::migrate::EndpointV1::InterruptIn(
             migrate::InterruptInEndpointV1 {
-                transfers: (),
-                payload: payload.clone(),
+                transfers: transfers.iter().map(From::from).collect(),
+                payload: payload.to_owned(),
                 period_ticks,
             },
         ))
@@ -329,6 +338,8 @@ impl Drop for InterruptInEndpoint {
 
 pub mod migrate {
     use serde::{Deserialize, Serialize};
+
+    use crate::hw::usb::xhci::rings::consumer::transfer::migrate::TDNormalV1;
 
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
