@@ -100,6 +100,21 @@ impl TransferDescriptor {
         }
         return true;
     }
+
+    fn to_transfer_trbs(&self) -> Result<Vec<TransferTrb>> {
+        let mut xfer_trbs = Vec::with_capacity(self.trbs.len());
+        let mut iter = self.trbs.iter().peekable();
+        while let Some((trb, addr)) = iter.next() {
+            let edtrb = iter
+                .next_if(|(edtrb, _)| {
+                    edtrb.control.trb_type() == TrbType::EventData
+                })
+                // unwrap: only error in TryFrom impl is type not being EventData
+                .map(|(edtrb, _)| EventDataTrb::try_from(edtrb).unwrap());
+            xfer_trbs.push(TransferTrb::try_from((trb, addr, edtrb))?);
+        }
+        Ok(xfer_trbs)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -139,17 +154,12 @@ impl From<&Trb> for PointerOrImmediate {
     }
 }
 
-#[derive(Debug)]
-pub struct TDEventData {
-    pub event_data: u64,
-    pub interrupter_target: u16,
-    pub interrupt_on_completion: bool,
-    pub interrupt_on_short_packet: bool,
-    pub block_event_interrupt: bool,
-    // TODO: Evaluate Next TRB ?
+#[derive(Debug, Copy, Clone)]
+pub struct EventDataTrb {
+    trb: Trb,
 }
 
-impl TryFrom<&Trb> for TDEventData {
+impl TryFrom<&Trb> for EventDataTrb {
     type Error = Error;
 
     fn try_from(trb: &Trb) -> Result<Self> {
@@ -157,66 +167,79 @@ impl TryFrom<&Trb> for TDEventData {
         if trb_type != TrbType::EventData {
             Err(Error::WrongTrbType(trb_type, TrbType::EventData))
         } else {
-            Ok(Self {
-                event_data: trb.parameter,
-                interrupter_target: unsafe {
-                    trb.status.transfer.interrupter_target()
-                },
-                interrupt_on_completion: unsafe {
-                    trb.control.normal.interrupt_on_completion()
-                },
-                interrupt_on_short_packet: unsafe {
-                    trb.control.normal.interrupt_on_short_packet()
-                },
-                block_event_interrupt: unsafe {
-                    trb.control.normal.block_event_interrupt()
-                },
-            })
+            Ok(Self { trb: *trb })
         }
     }
 }
 
-#[derive(Debug)]
-pub struct TDNormal {
-    pub data_buffer: PointerOrImmediate,
-    pub interrupter_target: u16,
-    pub interrupt_on_completion: bool,
-    pub interrupt_on_short_packet: bool,
-    pub trb_pointer: GuestAddr,
-    pub event_data: Option<TDEventData>,
+impl EventDataTrb {
+    pub fn event_data(&self) -> u64 {
+        self.trb.parameter
+    }
+    pub fn interrupter_target(&self) -> u16 {
+        unsafe { self.trb.status.transfer }.interrupter_target()
+    }
+    pub fn interrupt_on_completion(&self) -> bool {
+        unsafe { self.trb.control.normal }.interrupt_on_completion()
+    }
+    pub fn interrupt_on_short_packet(&self) -> bool {
+        unsafe { self.trb.control.normal }.interrupt_on_short_packet()
+    }
+    pub fn block_event_interrupt(&self) -> bool {
+        unsafe { self.trb.control.normal }.block_event_interrupt()
+    }
+    // TODO: Evaluate Next TRB ?
 }
 
-impl TryFrom<(&Trb, &GuestAddr, Option<TDEventData>)> for TDNormal {
+// WIP: making sure we can serialize scatter-gather properly in the future,
+// i.e. multiple normal TRBs and event data TRBs
+#[derive(Debug, Copy, Clone)]
+pub struct TransferTrb {
+    trb: Trb,
+    addr: GuestAddr,
+    event_data: Option<EventDataTrb>,
+}
+
+impl TransferTrb {
+    pub fn data_buffer(&self) -> PointerOrImmediate {
+        PointerOrImmediate::from(&self.trb)
+    }
+    pub fn interrupter_target(&self) -> u16 {
+        unsafe { self.trb.status.transfer }.interrupter_target()
+    }
+    pub fn interrupt_on_completion(&self) -> bool {
+        unsafe { self.trb.control.normal }.interrupt_on_completion()
+    }
+    pub fn interrupt_on_short_packet(&self) -> bool {
+        unsafe { self.trb.control.normal }.interrupt_on_short_packet()
+    }
+
+    pub fn trb_pointer(&self) -> GuestAddr {
+        self.addr
+    }
+    pub fn event_data(&self) -> Option<&EventDataTrb> {
+        self.event_data.as_ref()
+    }
+}
+
+impl TryFrom<(&Trb, &GuestAddr, Option<EventDataTrb>)> for TransferTrb {
     type Error = Error;
 
     fn try_from(
-        (trb, ptr, event_data): (&Trb, &GuestAddr, Option<TDEventData>),
+        (trb, ptr, event_data): (&Trb, &GuestAddr, Option<EventDataTrb>),
     ) -> Result<Self> {
         let trb_type = unsafe { trb.control.normal.trb_type() };
-        if trb_type != TrbType::Normal {
-            Err(Error::WrongTrbType(trb_type, TrbType::Normal))
+        if matches!(trb_type, TrbType::Normal | TrbType::DataStage) {
+            Ok(Self { trb: *trb, addr: *ptr, event_data })
         } else {
-            Ok(Self {
-                data_buffer: PointerOrImmediate::from(trb),
-                interrupter_target: unsafe {
-                    trb.status.transfer.interrupter_target()
-                },
-                interrupt_on_completion: unsafe {
-                    trb.control.normal.interrupt_on_completion()
-                },
-                interrupt_on_short_packet: unsafe {
-                    trb.control.normal.interrupt_on_short_packet()
-                },
-                trb_pointer: *ptr,
-                event_data,
-            })
+            Err(Error::WrongTrbType(trb_type, TrbType::Normal))
         }
     }
 }
 
 #[derive(Debug)]
 pub enum TransferInfo {
-    Normal(TDNormal),
+    Normal(Vec<TransferTrb>),
     SetupStage {
         data: SetupData,
         interrupt_target_on_completion: Option<u16>,
@@ -224,22 +247,18 @@ pub enum TransferInfo {
         trb_pointer: GuestAddr,
     },
     DataStage {
-        data_buffer: PointerOrImmediate,
-        interrupt_target_on_completion: Option<u16>,
         direction: TrbDirection,
-        payload: Vec<TDNormal>,
-        event_data: Option<TDEventData>,
-        trb_pointer: GuestAddr,
+        payload: Vec<TransferTrb>,
     },
     StatusStage {
         interrupt_target_on_completion: Option<u16>,
         direction: TrbDirection,
-        event_data: Option<TDEventData>,
+        event_data: Option<EventDataTrb>,
         trb_pointer: GuestAddr,
     },
     // unimplemented
     Isoch {},
-    EventData(TDEventData),
+    EventData(EventDataTrb),
     NoOp,
 }
 
@@ -258,17 +277,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
             }
         };
         Ok(match first.control.trb_type() {
-            TrbType::Normal => {
-                // XXX: not sufficiently general
-                let event_data = td
-                    .trbs
-                    .get(1)
-                    .map(|(trb, _)| TDEventData::try_from(trb))
-                    .transpose()?;
-                TransferInfo::Normal(TDNormal::try_from((
-                    first, ptr, event_data,
-                ))?)
-            }
+            TrbType::Normal => TransferInfo::Normal(td.to_transfer_trbs()?),
             TrbType::SetupStage => TransferInfo::SetupStage {
                 data: SetupData(first.parameter),
                 interrupt_target_on_completion,
@@ -278,19 +287,24 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                 trb_pointer: *ptr,
             },
             TrbType::DataStage => {
-                let event_data;
-                let payload;
                 if unsafe { first.control.data_stage.immediate_data() } {
                     // xHCI 1.2 table 6-29: "If the IDT flag is set in one
                     // Data Stage TRB of a TD, then it shall be the only
                     // Transfer TRB of the TD. An Event Data TRB may also
                     // be included in the TD."
-                    payload = Vec::new();
-                    event_data = td
+                    let event_data = td
                         .trbs
                         .get(1)
-                        .map(|(trb, _)| TDEventData::try_from(trb))
-                        .transpose()?
+                        .map(|(trb, _)| EventDataTrb::try_from(trb))
+                        .transpose()?;
+                    TransferInfo::DataStage {
+                        direction: unsafe {
+                            first.control.data_stage.direction()
+                        },
+                        payload: vec![TransferTrb::try_from((
+                            first, ptr, event_data,
+                        ))?],
+                    }
                 } else {
                     // xHCI 1.2 table 6-29 (and sect 3.2.9): "a Data Stage TD is
                     // defined as a Data Stage TRB followed by zero or more
@@ -309,28 +323,12 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                     // and "Event Data" as a TRB Type with ID 7.
                     // xHCI 1.2 sect 1.6 defines "Event Data TRB" as "A Normal
                     // Transfer TRB with its Event Data (ED) flag equal to 1.")
-                    payload = td.trbs[1..]
-                        .into_iter()
-                        .filter(|(trb, _)| {
-                            trb.control.trb_type() != TrbType::EventData
-                        })
-                        .map(|(trb, ptr)| TDNormal::try_from((trb, ptr, None)))
-                        .collect::<Result<Vec<_>>>()?;
-                    event_data = td.trbs[1..]
-                        .into_iter()
-                        .find(|(trb, _)| {
-                            trb.control.trb_type() == TrbType::EventData
-                        })
-                        .map(|(trb, _)| TDEventData::try_from(trb))
-                        .transpose()?;
-                };
-                TransferInfo::DataStage {
-                    data_buffer: PointerOrImmediate::from(first),
-                    interrupt_target_on_completion,
-                    direction: unsafe { first.control.data_stage.direction() },
-                    payload,
-                    event_data,
-                    trb_pointer: *ptr,
+                    TransferInfo::DataStage {
+                        direction: unsafe {
+                            first.control.data_stage.direction()
+                        },
+                        payload: td.to_transfer_trbs()?,
+                    }
                 }
             }
             TrbType::StatusStage => TransferInfo::StatusStage {
@@ -342,13 +340,13 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                 event_data: td
                     .trbs
                     .get(1)
-                    .map(|(trb, _)| TDEventData::try_from(trb))
+                    .map(|(trb, _)| EventDataTrb::try_from(trb))
                     .transpose()?,
                 trb_pointer: *ptr,
             },
             TrbType::Isoch => TransferInfo::Isoch {},
             TrbType::EventData => {
-                TransferInfo::EventData(TDEventData::try_from(first)?)
+                TransferInfo::EventData(EventDataTrb::try_from(first)?)
             }
             TrbType::NoOp => TransferInfo::NoOp,
             _ => return Err(Error::InvalidTransferDescriptor(*first)),
@@ -411,26 +409,19 @@ impl TransferInfo {
         memctx: &MemCtx,
         log: &slog::Logger,
     ) -> Vec<TransferEventParams> {
-        if let TransferInfo::EventData(TDEventData {
-            event_data,
-            interrupter_target,
-            interrupt_on_completion,
-            interrupt_on_short_packet: _,
-            block_event_interrupt,
-        }) = self
-        {
-            if interrupt_on_completion {
+        if let TransferInfo::EventData(ed) = &self {
+            if ed.interrupt_on_completion() {
                 return vec![TransferEventParams {
                     evt_info: EventInfo::Transfer {
-                        trb_pointer: GuestAddr(event_data),
+                        trb_pointer: GuestAddr(ed.event_data()),
                         completion_code: TrbCompletionCode::Success,
                         trb_transfer_length: *evt_data_xfer_len_accum,
                         slot_id,
                         endpoint_id,
                         event_data: true,
                     },
-                    interrupter: interrupter_target,
-                    block_event_interrupt,
+                    interrupter: ed.interrupter_target(),
+                    block_event_interrupt: ed.block_event_interrupt(),
                 }];
             }
         }
@@ -440,10 +431,10 @@ impl TransferInfo {
         *evt_data_xfer_len_accum = 0;
 
         match self {
-            TransferInfo::Normal(normal_td) => {
-                let interrupter = normal_td.interrupter_target;
-                let trb_pointer = normal_td.trb_pointer;
-                match usbdev.normal(endpoint_id, normal_td) {
+            TransferInfo::Normal(xfer_trbs) => {
+                let interrupter = xfer_trbs.interrupter_target();
+                let trb_pointer = xfer_trbs.trb_pointer();
+                match usbdev.normal(endpoint_id, &xfer_trbs) {
                     Ok(Some(evt_info)) => vec![TransferEventParams {
                         evt_info,
                         interrupter,
@@ -515,14 +506,7 @@ impl TransferInfo {
                     .into_iter()
                     .collect()
             }
-            TransferInfo::DataStage {
-                data_buffer,
-                interrupt_target_on_completion,
-                direction,
-                payload,
-                event_data,
-                trb_pointer,
-            } => {
+            TransferInfo::DataStage { direction, payload } => {
                 let req_dir = match direction {
                     TrbDirection::Out => RequestDirection::HostToDevice,
                     TrbDirection::In => RequestDirection::DeviceToHost,
@@ -564,33 +548,26 @@ impl TransferInfo {
                         block_event_interrupt: false,
                     })
                     .into_iter()
-                    .chain(event_data.and_then(
-                        |TDEventData {
-                             event_data,
-                             interrupter_target,
-                             interrupt_on_completion,
-                             interrupt_on_short_packet: _,
-                             block_event_interrupt,
-                         }| {
-                            interrupt_on_completion.then_some(
-                                TransferEventParams {
-                                    evt_info: EventInfo::Transfer {
-                                        trb_pointer: GuestAddr(event_data),
-                                        // xHCI 1.2 sect 4.11.5.2: Event Data
-                                        // inherits the completion code of the
-                                        // previous TRB
-                                        completion_code,
-                                        trb_transfer_length: 0,
-                                        slot_id,
-                                        endpoint_id,
-                                        event_data: true,
-                                    },
-                                    interrupter: interrupter_target,
-                                    block_event_interrupt,
+                    .chain(event_data.and_then(|ed| {
+                        ed.interrupt_on_completion().then_some(
+                            TransferEventParams {
+                                evt_info: EventInfo::Transfer {
+                                    trb_pointer: GuestAddr(ed.event_data()),
+                                    // xHCI 1.2 sect 4.11.5.2: Event Data
+                                    // inherits the completion code of the
+                                    // previous TRB
+                                    completion_code,
+                                    trb_transfer_length: 0,
+                                    slot_id,
+                                    endpoint_id,
+                                    event_data: true,
                                 },
-                            )
-                        },
-                    ))
+                                interrupter: ed.interrupter_target(),
+                                block_event_interrupt: ed
+                                    .block_event_interrupt(),
+                            },
+                        )
+                    }))
                     .collect()
             }
             TransferInfo::StatusStage {
@@ -627,30 +604,23 @@ impl TransferInfo {
                         block_event_interrupt: false,
                     })
                     .into_iter()
-                    .chain(event_data.and_then(
-                        |TDEventData {
-                             event_data,
-                             interrupter_target,
-                             interrupt_on_completion,
-                             interrupt_on_short_packet: _,
-                             block_event_interrupt,
-                         }| {
-                            interrupt_on_completion.then_some(
-                                TransferEventParams {
-                                    evt_info: EventInfo::Transfer {
-                                        trb_pointer: GuestAddr(event_data),
-                                        completion_code,
-                                        trb_transfer_length: 0,
-                                        slot_id,
-                                        endpoint_id,
-                                        event_data: true,
-                                    },
-                                    interrupter: interrupter_target,
-                                    block_event_interrupt,
+                    .chain(event_data.and_then(|ed| {
+                        ed.interrupt_on_completion().then_some(
+                            TransferEventParams {
+                                evt_info: EventInfo::Transfer {
+                                    trb_pointer: GuestAddr(ed.event_data()),
+                                    completion_code,
+                                    trb_transfer_length: 0,
+                                    slot_id,
+                                    endpoint_id,
+                                    event_data: true,
                                 },
-                            )
-                        },
-                    ))
+                                interrupter: ed.interrupter_target(),
+                                block_event_interrupt: ed
+                                    .block_event_interrupt(),
+                            },
+                        )
+                    }))
                     .collect()
             }
 
@@ -675,129 +645,94 @@ pub mod migrate {
     use serde::{Deserialize, Serialize};
 
     use crate::{
-        common::{GuestAddr, GuestRegion},
-        hw::usb::xhci::rings::consumer::transfer::PointerOrImmediate,
+        common::GuestAddr,
+        hw::usb::xhci::bits::ring_data::{
+            Trb, TrbControlField, TrbControlFieldNormal, TrbStatusField,
+            TrbStatusFieldTransfer,
+        },
     };
 
-    use super::{TDEventData, TDNormal};
+    use super::{EventDataTrb, TransferTrb};
 
     #[derive(Serialize, Deserialize)]
-    pub struct TDNormalV1 {
-        pub data_buffer: (u64, usize),
-        pub data_buffer_is_immediate: bool,
-        pub interrupter_target: u16,
-        pub interrupt_on_completion: bool,
-        pub interrupt_on_short_packet: bool,
-        pub trb_pointer: u64,
-        pub event_data: Option<TDEventDataV1>,
+    pub struct TrbV1 {
+        pub parameter: u64,
+        pub status: u32,
+        pub control: u32,
     }
 
-    impl From<&TDNormalV1> for TDNormal {
-        fn from(value: &TDNormalV1) -> Self {
-            let TDNormalV1 {
-                data_buffer,
-                data_buffer_is_immediate,
-                interrupter_target,
-                interrupt_on_completion,
-                interrupt_on_short_packet,
-                trb_pointer,
-                event_data,
-            } = value;
+    impl From<&TrbV1> for Trb {
+        fn from(value: &TrbV1) -> Self {
+            let TrbV1 { parameter, status, control } = value;
             Self {
-                data_buffer: if *data_buffer_is_immediate {
-                    PointerOrImmediate::Immediate(
-                        data_buffer.0.to_ne_bytes(),
-                        data_buffer.1,
-                    )
-                } else {
-                    PointerOrImmediate::Pointer(crate::common::GuestRegion(
-                        GuestAddr(data_buffer.0),
-                        data_buffer.1,
-                    ))
+                parameter: *parameter,
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer(*status),
                 },
-                interrupter_target: *interrupter_target,
-                interrupt_on_completion: *interrupt_on_completion,
-                interrupt_on_short_packet: *interrupt_on_short_packet,
-                trb_pointer: GuestAddr(*trb_pointer),
+                control: TrbControlField {
+                    normal: TrbControlFieldNormal(*control),
+                },
+            }
+        }
+    }
+
+    impl From<&Trb> for TrbV1 {
+        fn from(trb: &Trb) -> Self {
+            Self {
+                parameter: trb.parameter,
+                status: unsafe { trb.status.transfer.0 },
+                control: unsafe { trb.control.normal.0 },
+            }
+        }
+    }
+
+    // XXX: need to further generalize to what Normal TDs can possibly include,
+    // multiple TRBs in the case of scatter-gather (and multple Event Data TRBs)
+
+    #[derive(Serialize, Deserialize)]
+    pub struct TransferTrbV1 {
+        pub trb: TrbV1,
+        pub trb_addr: u64,
+        pub event_data: Option<EventDataTrbV1>,
+    }
+
+    impl From<&TransferTrbV1> for TransferTrb {
+        fn from(value: &TransferTrbV1) -> Self {
+            let TransferTrbV1 { trb, trb_addr, event_data } = value;
+            Self {
+                trb: Trb::from(trb),
+                addr: GuestAddr(*trb_addr),
                 event_data: event_data.as_ref().map(From::from),
             }
         }
     }
 
-    impl From<&TDNormal> for TDNormalV1 {
-        fn from(value: &TDNormal) -> Self {
-            let TDNormal {
-                data_buffer,
-                interrupter_target,
-                interrupt_on_completion,
-                interrupt_on_short_packet,
-                trb_pointer,
-                event_data,
-            } = value;
-            let (data_buffer, data_buffer_is_immediate) = match data_buffer {
-                PointerOrImmediate::Pointer(GuestRegion(addr, len)) => {
-                    ((addr.0, *len), false)
-                }
-                PointerOrImmediate::Immediate(arr, len) => {
-                    ((u64::from_ne_bytes(*arr), *len), true)
-                }
-            };
+    impl From<&TransferTrb> for TransferTrbV1 {
+        fn from(value: &TransferTrb) -> Self {
+            let TransferTrb { trb: raw_trb, addr: trb_addr, event_data } =
+                value;
             Self {
-                data_buffer,
-                data_buffer_is_immediate,
-                interrupter_target: *interrupter_target,
-                interrupt_on_completion: *interrupt_on_completion,
-                interrupt_on_short_packet: *interrupt_on_short_packet,
-                trb_pointer: trb_pointer.0,
+                trb: TrbV1::from(raw_trb),
+                trb_addr: trb_addr.0,
                 event_data: event_data.as_ref().map(From::from),
             }
         }
     }
 
     #[derive(Serialize, Deserialize)]
-    pub struct TDEventDataV1 {
-        pub event_data: u64,
-        pub interrupter_target: u16,
-        pub interrupt_on_completion: bool,
-        pub interrupt_on_short_packet: bool,
-        pub block_event_interrupt: bool,
+    pub struct EventDataTrbV1 {
+        trb: TrbV1,
     }
 
-    impl From<&TDEventDataV1> for TDEventData {
-        fn from(value: &TDEventDataV1) -> Self {
-            let TDEventDataV1 {
-                event_data,
-                interrupter_target,
-                interrupt_on_completion,
-                interrupt_on_short_packet,
-                block_event_interrupt,
-            } = value;
-            Self {
-                event_data: *event_data,
-                interrupter_target: *interrupter_target,
-                interrupt_on_completion: *interrupt_on_completion,
-                interrupt_on_short_packet: *interrupt_on_short_packet,
-                block_event_interrupt: *block_event_interrupt,
-            }
+    impl From<&EventDataTrbV1> for EventDataTrb {
+        fn from(value: &EventDataTrbV1) -> Self {
+            Self { trb: Trb::from(&value.trb) }
         }
     }
 
-    impl From<&TDEventData> for TDEventDataV1 {
-        fn from(value: &TDEventData) -> Self {
-            let TDEventData {
-                event_data,
-                interrupter_target,
-                interrupt_on_completion,
-                interrupt_on_short_packet,
-                block_event_interrupt,
-            } = value;
-            Self {
-                event_data: *event_data,
-                interrupter_target: *interrupter_target,
-                interrupt_on_completion: *interrupt_on_completion,
-                interrupt_on_short_packet: *interrupt_on_short_packet,
-                block_event_interrupt: *block_event_interrupt,
-            }
+    impl From<&EventDataTrb> for EventDataTrbV1 {
+        fn from(value: &EventDataTrb) -> Self {
+            Self { trb: TrbV1::from(&value.trb) }
         }
     }
 }

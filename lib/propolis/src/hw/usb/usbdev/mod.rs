@@ -16,7 +16,7 @@ use super::xhci::{
     device_slots::SlotId,
     port::PortId,
     rings::{
-        consumer::transfer::{PointerOrImmediate, TDNormal},
+        consumer::transfer::{PointerOrImmediate, TransferTrb},
         producer::event::EventInfo,
     },
 };
@@ -93,7 +93,7 @@ pub trait UsbDevice: Send + Sync + 'static {
     fn normal(
         &mut self,
         endpoint_id: u8,
-        normal_td: TDNormal,
+        normal_td: &[TransferTrb],
     ) -> Result<Option<EventInfo>>; // TODO: eventinfo construction in xhci module
     fn status_stage(
         &mut self,

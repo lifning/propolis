@@ -6,7 +6,7 @@ use crate::{
     hw::usb::xhci::{
         device_slots::SlotId,
         rings::{
-            consumer::transfer::{PointerOrImmediate, TDNormal},
+            consumer::transfer::{PointerOrImmediate, TransferTrb},
             producer::event::EventInfo,
         },
     },
@@ -110,6 +110,7 @@ impl UsbDevice for NullUsbDevice {
 
     fn configure_endpoint(
         &mut self,
+        _slot_id: SlotId,
         _endpoint_id: u8,
         _ep_ctx: &crate::hw::usb::xhci::bits::device_context::EndpointContext,
     ) {
@@ -117,9 +118,8 @@ impl UsbDevice for NullUsbDevice {
 
     fn normal(
         &mut self,
-        _slot_id: SlotId,
         _endpoint_id: u8,
-        _normal_td: TDNormal,
+        _normal_td: &[TransferTrb],
     ) -> Result<Option<EventInfo>> {
         Ok(None)
     }

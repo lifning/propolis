@@ -20,7 +20,7 @@ use crate::{
             controller::XhciPortWakeHandle,
             device_slots::SlotId,
             rings::{
-                consumer::transfer::{PointerOrImmediate, TDNormal},
+                consumer::transfer::{PointerOrImmediate, TransferTrb},
                 producer::event::EventInfo,
             },
         },
@@ -406,12 +406,12 @@ impl UsbDevice for HIDTabletDevice {
     fn normal(
         &mut self,
         endpoint_id: u8,
-        normal_td: TDNormal,
+        xfer_trbs: &[TransferTrb],
     ) -> Result<Option<EventInfo>> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         if endpoint_id == 3 {
             if let Some(ep) = &self.interrupt_endpoint {
-                ep.normal(normal_td);
+                ep.normal(xfer_trbs);
             }
             Ok(None)
         } else {

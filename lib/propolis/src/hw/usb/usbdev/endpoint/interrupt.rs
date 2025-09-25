@@ -16,7 +16,7 @@ use crate::{
         controller::XhciPortWakeHandle,
         device_slots::SlotId,
         rings::{
-            consumer::transfer::{PointerOrImmediate, TDNormal},
+            consumer::transfer::{PointerOrImmediate, TransferTrb},
             producer::event::EventInfo,
         },
     },
@@ -42,7 +42,7 @@ mod probes {
 }
 
 pub struct InterruptInData {
-    transfers: VecDeque<TDNormal>,
+    transfers: VecDeque<TransferTrb>,
     payload: Option<Vec<u8>>,
     period: Duration,
     terminate: bool,
@@ -86,7 +86,7 @@ impl PeriodicTransferPollThread {
             // unwrap: this loop is the only pop from transfers & we wait_while it's empty
             let xfer = guard.transfers.pop_front().unwrap();
 
-            let PointerOrImmediate::Pointer(_) = xfer.data_buffer else {
+            let PointerOrImmediate::Pointer(_) = xfer.data_buffer() else {
                 continue;
             };
 
@@ -129,10 +129,10 @@ impl PeriodicTransferPollThread {
 
     fn notify_short_packet(
         &self,
-        xfer: &TDNormal,
+        xfer: &TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
     ) {
-        let PointerOrImmediate::Pointer(region) = xfer.data_buffer else {
+        let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
             unreachable!()
         };
         let completion_code = TrbCompletionCode::ShortPacket;
@@ -156,10 +156,10 @@ impl PeriodicTransferPollThread {
             event_data: false,
         }));
         */
-        if let Some(event_data) = &xfer.event_data {
-            let should_interrupt_ed = event_data.interrupt_on_short_packet;
+        if let Some(event_data) = &xfer.event_data() {
+            let should_interrupt_ed = event_data.interrupt_on_short_packet();
             evts.extend(should_interrupt_ed.then_some(EventInfo::Transfer {
-                trb_pointer: GuestAddr(event_data.event_data),
+                trb_pointer: GuestAddr(event_data.event_data()),
                 completion_code,
                 // xHCI 1.2 sect 4.10.1.1.1:
                 // > an Event Data Transfer Event shall be generated with the
@@ -184,19 +184,19 @@ impl PeriodicTransferPollThread {
     fn complete_transfer(
         &self,
         data: Vec<u8>,
-        xfer: TDNormal,
+        xfer: TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
     ) {
-        let PointerOrImmediate::Pointer(region) = xfer.data_buffer else {
+        let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
             unreachable!()
         };
         // TODO: compare ptr.1 with data.len()
         let completion_code = TrbCompletionCode::Success;
         let should_interrupt_xfer =
-            xfer.interrupt_on_short_packet || xfer.interrupt_on_completion;
+            xfer.interrupt_on_short_packet() || xfer.interrupt_on_completion();
         let mut evts = Vec::new();
         evts.extend(should_interrupt_xfer.then_some(EventInfo::Transfer {
-            trb_pointer: xfer.trb_pointer,
+            trb_pointer: xfer.trb_pointer(),
             completion_code,
             // As above, so below.
             // The wording in the xHCI spec about this field evidently trips up a lot of devices:
@@ -206,11 +206,11 @@ impl PeriodicTransferPollThread {
             endpoint_id: self.endpoint_id,
             event_data: false,
         }));
-        if let Some(event_data) = xfer.event_data {
-            let should_interrupt_ed = event_data.interrupt_on_short_packet
-                || event_data.interrupt_on_completion;
+        if let Some(event_data) = xfer.event_data() {
+            let should_interrupt_ed = event_data.interrupt_on_short_packet()
+                || event_data.interrupt_on_completion();
             evts.extend(should_interrupt_ed.then_some(EventInfo::Transfer {
-                trb_pointer: GuestAddr(event_data.event_data),
+                trb_pointer: GuestAddr(event_data.event_data()),
                 completion_code,
                 // xHCI 1.2 sect 4.10.1.1.1
                 // > If a Short Packet does not occur, then the last Event Data Transfer TRB shall
@@ -267,9 +267,9 @@ impl InterruptInEndpoint {
         Self { data, _jh }
     }
 
-    pub fn normal(&self, normal_td: TDNormal) {
+    pub fn normal(&self, xfer_trbs: &[TransferTrb]) {
         let mut data = self.data.0.lock().unwrap();
-        data.transfers.push_back(normal_td);
+        data.transfers.extend(xfer_trbs);
         self.data.1.notify_one();
     }
 
@@ -339,11 +339,11 @@ impl Drop for InterruptInEndpoint {
 pub mod migrate {
     use serde::{Deserialize, Serialize};
 
-    use crate::hw::usb::xhci::rings::consumer::transfer::migrate::TDNormalV1;
+    use crate::hw::usb::xhci::rings::consumer::transfer::migrate::TransferTrbV1;
 
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
-        pub transfers: Vec<TDNormalV1>, // maybe?
+        pub transfers: Vec<TransferTrbV1>, // maybe?
         pub payload: Option<Vec<u8>>,
         pub period_ticks: f64,
     }
