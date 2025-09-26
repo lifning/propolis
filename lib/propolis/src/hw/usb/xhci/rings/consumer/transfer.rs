@@ -213,6 +213,9 @@ impl TransferTrb {
     pub fn interrupt_on_short_packet(&self) -> bool {
         unsafe { self.trb.control.normal }.interrupt_on_short_packet()
     }
+    pub fn block_event_interrupt(&self) -> bool {
+        unsafe { self.trb.control.normal }.block_event_interrupt()
+    }
 
     pub fn trb_pointer(&self) -> GuestAddr {
         self.addr
@@ -248,7 +251,7 @@ pub enum TransferInfo {
     },
     DataStage {
         direction: TrbDirection,
-        payload: Vec<TransferTrb>,
+        transfer_trbs: Vec<TransferTrb>,
     },
     StatusStage {
         interrupt_target_on_completion: Option<u16>,
@@ -301,7 +304,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                         direction: unsafe {
                             first.control.data_stage.direction()
                         },
-                        payload: vec![TransferTrb::try_from((
+                        transfer_trbs: vec![TransferTrb::try_from((
                             first, ptr, event_data,
                         ))?],
                     }
@@ -327,7 +330,7 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                         direction: unsafe {
                             first.control.data_stage.direction()
                         },
-                        payload: td.to_transfer_trbs()?,
+                        transfer_trbs: td.to_transfer_trbs()?,
                     }
                 }
             }
@@ -506,22 +509,14 @@ impl TransferInfo {
                     .into_iter()
                     .collect()
             }
-            TransferInfo::DataStage { direction, payload } => {
+            TransferInfo::DataStage { direction, transfer_trbs } => {
                 let req_dir = match direction {
                     TrbDirection::Out => RequestDirection::HostToDevice,
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                if !payload.is_empty() {
-                    slog::warn!(
-                        log,
-                        "ignoring {} Normal TDs in Data Stage",
-                        payload.len(),
-                    )
-                }
-
                 let (trb_transfer_length, completion_code) = match usbdev
-                    .data_stage(endpoint_id, data_buffer, req_dir, &memctx)
+                    .data_stage(endpoint_id, &transfer_trbs, req_dir, &memctx)
                 {
                     Ok(x) => (x as u32, TrbCompletionCode::Success),
                     Err(e) => {

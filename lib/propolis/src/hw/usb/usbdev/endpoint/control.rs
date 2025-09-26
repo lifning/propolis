@@ -6,7 +6,7 @@ use core::fmt::Debug;
 use std::marker::PhantomData;
 
 use crate::{
-    common::{GuestData, GuestRegion},
+    common::{GuestAddr, GuestData, GuestRegion},
     hw::usb::{
         usbdev::{
             descriptor::DescriptorType,
@@ -15,7 +15,15 @@ use crate::{
             },
             Error, Result,
         },
-        xhci::rings::consumer::transfer::PointerOrImmediate,
+        xhci::{
+            bits::ring_data::TrbCompletionCode,
+            rings::{
+                consumer::transfer::{
+                    PointerOrImmediate, TransferEventParams, TransferTrb,
+                },
+                producer::event::EventInfo,
+            },
+        },
     },
     vmm::MemCtx,
 };
@@ -25,6 +33,7 @@ where
     ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
     C: TryFrom<SetupData, Error = Error> + Debug,
 {
+    // TODO: slot and endpoint ID in constructor
     current_setup: Option<SetupData>,
     payload: Option<Vec<u8>>,
     bytes_transferred: usize,
@@ -44,6 +53,62 @@ where
             bytes_transferred: 0,
             _spooky: PhantomData,
         }
+    }
+}
+
+fn completion_events_for_trb(
+    trb: &TransferTrb,
+    completion_code: TrbCompletionCode,
+    bytes_transferred: usize,
+) -> Vec<TransferEventParams> {
+    let interrupter = trb.interrupter_target();
+    trb.interrupt_on_completion()
+        .then_some(TransferEventParams {
+            evt_info: EventInfo::Transfer {
+                trb_pointer: trb.trb_pointer(),
+                completion_code,
+                trb_transfer_length: bytes_transfered as u32,
+                slot_id,
+                endpoint_id,
+                event_data: false,
+            },
+            interrupter,
+            block_event_interrupt: trb.block_event_interrupt(),
+        })
+        .into_iter()
+        .chain(trb.event_data().and_then(|edtrb| {
+            edtrb.interrupt_on_completion().then_some(TransferEventParams {
+                evt_info: EventInfo::Transfer {
+                    trb_pointer: GuestAddr(edtrb.event_data()),
+                    completion_code,
+                    trb_transfer_length: (),
+                    slot_id,
+                    endpoint_id,
+                    event_data: true,
+                },
+                interrupter,
+                block_event_interrupt: edtrb.block_event_interrupt(),
+            })
+        }))
+        .collect()
+}
+
+fn transfer_in(
+    trb: &TransferTrb,
+    payload: &[u8],
+    memctx: &MemCtx,
+) -> Vec<TransferEventParams> {
+    let region_opt =
+        if let PointerOrImmediate::Pointer(region) = trb.data_buffer() {
+            Some(region)
+        } else {
+            None
+        };
+    match region_opt
+        .map(|region| memctx.write_from(region.0, payload, region.1))
+    {
+        Some(_) => todo!(),
+        None => completion_events_for_trb(trb),
     }
 }
 
@@ -84,10 +149,10 @@ where
 
     pub fn data_stage(
         &mut self,
-        data_buffer: PointerOrImmediate,
+        xfer_trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<usize> {
+    ) -> Result<Vec<TransferEventParams>> {
         if let Some(setup_data) = self.current_setup.as_ref() {
             if data_direction != setup_data.direction() {
                 return Err(Error::SetupVsDataDirectionMismatch(
@@ -95,50 +160,60 @@ where
                     data_direction,
                 ));
             }
-            let count = match setup_data.direction() {
-                RequestDirection::DeviceToHost => {
-                    if let Some(payload) = &self.payload {
-                        let PointerOrImmediate::Pointer(region) = data_buffer
-                        else {
-                            return Err(Error::ImmediateParameterForInTransfer);
-                        };
-                        memctx
-                            .write_from(
-                                region.0,
-                                &payload[self.bytes_transferred..],
-                                region.1,
-                            )
-                            .ok_or(Error::DataStageWriteFailed)?
-                    } else {
-                        return Err(Error::MissingPayloadForInRequest(
-                            setup_data.request(),
-                        ));
-                    }
-                }
-                RequestDirection::HostToDevice => {
-                    let payload = self.payload.get_or_insert_default();
-                    match data_buffer {
-                        PointerOrImmediate::Pointer(GuestRegion(ptr, len)) => {
-                            payload.resize(self.bytes_transferred + len, 0u8);
+            for trb in xfer_trbs {
+                let count = match setup_data.direction() {
+                    RequestDirection::DeviceToHost => {
+                        if let Some(payload) = &self.payload {
+                            let PointerOrImmediate::Pointer(region) =
+                                trb.data_buffer()
+                            else {
+                                return Err(
+                                    Error::ImmediateParameterForInTransfer,
+                                );
+                            };
                             memctx
-                                .read_into(
-                                    ptr,
-                                    &mut GuestData::from(
-                                        &mut payload[self.bytes_transferred..],
-                                    ),
-                                    len,
+                                .write_from(
+                                    region.0,
+                                    &payload[self.bytes_transferred..],
+                                    region.1,
                                 )
-                                .ok_or(Error::DataStageReadFailed)?
-                        }
-                        PointerOrImmediate::Immediate(arr, len) => {
-                            payload.extend_from_slice(&arr[..len]);
-                            len
+                                .ok_or(Error::DataStageWriteFailed)?
+                        } else {
+                            return Err(Error::MissingPayloadForInRequest(
+                                setup_data.request(),
+                            ));
                         }
                     }
-                }
-            };
-            self.bytes_transferred += count;
-            Ok(count)
+                    RequestDirection::HostToDevice => {
+                        let payload = self.payload.get_or_insert_default();
+                        match xfer_trbs {
+                            PointerOrImmediate::Pointer(GuestRegion(
+                                ptr,
+                                len,
+                            )) => {
+                                payload
+                                    .resize(self.bytes_transferred + len, 0u8);
+                                memctx
+                                    .read_into(
+                                        ptr,
+                                        &mut GuestData::from(
+                                            &mut payload
+                                                [self.bytes_transferred..],
+                                        ),
+                                        len,
+                                    )
+                                    .ok_or(Error::DataStageReadFailed)?
+                            }
+                            PointerOrImmediate::Immediate(arr, len) => {
+                                payload.extend_from_slice(&arr[..len]);
+                                len
+                            }
+                        }
+                    }
+                };
+                self.bytes_transferred += count;
+            }
+            Ok(todo!())
         } else {
             Err(Error::NoSetupStageBefore("Data Stage"))
         }

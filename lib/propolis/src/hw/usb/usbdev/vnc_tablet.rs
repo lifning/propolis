@@ -20,7 +20,9 @@ use crate::{
             controller::XhciPortWakeHandle,
             device_slots::SlotId,
             rings::{
-                consumer::transfer::{PointerOrImmediate, TransferTrb},
+                consumer::transfer::{
+                    PointerOrImmediate, TransferEventParams, TransferTrb,
+                },
                 producer::event::EventInfo,
             },
         },
@@ -369,14 +371,14 @@ impl UsbDevice for HIDTabletDevice {
     fn data_stage(
         &mut self,
         endpoint_id: u8,
-        data_buffer: PointerOrImmediate,
+        xfer_trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<usize> {
+    ) -> Result<Vec<TransferEventParams>> {
         if endpoint_id != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
-        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
+        self.control_endpoint.data_stage(xfer_trbs, data_direction, memctx)
     }
 
     fn configure_endpoint(
@@ -407,15 +409,15 @@ impl UsbDevice for HIDTabletDevice {
         &mut self,
         endpoint_id: u8,
         xfer_trbs: &[TransferTrb],
-    ) -> Result<Option<EventInfo>> {
+    ) -> Result<Vec<TransferEventParams>> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         if endpoint_id == 3 {
             if let Some(ep) = &self.interrupt_endpoint {
                 ep.normal(xfer_trbs);
             }
-            Ok(None)
+            Ok(vec![])
         } else {
-            todo!()
+            Err(todo!())
         }
     }
 
