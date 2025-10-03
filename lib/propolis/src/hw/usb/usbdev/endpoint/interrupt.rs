@@ -261,9 +261,13 @@ impl InterruptInEndpoint {
             slot_id,
             endpoint_id,
         };
-        let _jh = std::thread::spawn(move || {
-            periodic_poll_thread.main_loop();
-        });
+        let _jh = std::thread::Builder::new()
+            .name(format!(
+                "xhci interrupt in endpoint {slot_id:?} {endpoint_id:?}"
+            ))
+            .spawn(move || {
+                periodic_poll_thread.main_loop();
+            });
         Self { data, _jh }
     }
 

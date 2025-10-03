@@ -59,6 +59,26 @@ impl SlotId {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+pub struct EndpointId(u8);
+
+impl From<u8> for EndpointId {
+    fn from(value: u8) -> Self {
+        if value > 31 {
+            panic!("EndpointId must be <= 31, got {value}")
+        } else {
+            Self(value)
+        }
+    }
+}
+
+impl From<EndpointId> for u8 {
+    fn from(value: EndpointId) -> Self {
+        value.0
+    }
+}
+
 struct MemCtxValue<'a, T: Copy + FromBytes> {
     value: T,
     addr: GuestAddr,
@@ -91,7 +111,7 @@ impl<T: Copy + FromBytes> Deref for MemCtxValue<'_, T> {
 }
 
 struct DeviceSlot {
-    endpoints: HashMap<u8, TransferRing>,
+    endpoints: HashMap<EndpointId, TransferRing>,
     port_address: Option<PortId>,
 }
 impl DeviceSlot {
@@ -99,7 +119,11 @@ impl DeviceSlot {
         Self { endpoints: HashMap::new(), port_address: None }
     }
 
-    fn set_endpoint_tr(&mut self, endpoint_id: u8, ep_ctx: EndpointContext) {
+    fn set_endpoint_tr(
+        &mut self,
+        endpoint_id: EndpointId,
+        ep_ctx: EndpointContext,
+    ) {
         self.endpoints.insert(
             endpoint_id,
             // unwrap: tr_dequeue_pointer's lower 4 bits are 0, will always be TRB-aligned
@@ -111,7 +135,7 @@ impl DeviceSlot {
         );
     }
 
-    fn unset_endpoint_tr(&mut self, endpoint_id: u8) {
+    fn unset_endpoint_tr(&mut self, endpoint_id: EndpointId) {
         self.endpoints.remove(&endpoint_id);
     }
 
@@ -124,14 +148,16 @@ impl DeviceSlot {
             .map(PortId::try_from)
             .transpose()
             .map_err(crate::migrate::MigrateStateError::ImportFailed)?;
-        for ep_id in self.endpoints.keys().copied().collect::<Vec<_>>() {
+        for ep_id in
+            self.endpoints.keys().copied().map(u8::from).collect::<Vec<_>>()
+        {
             if !endpoints.contains_key(&ep_id) {
-                self.endpoints.remove(&ep_id);
+                self.endpoints.remove(&EndpointId::from(ep_id));
             }
         }
         for (ep_id, ep) in endpoints {
             self.endpoints.insert(
-                *ep_id,
+                EndpointId::from(*ep_id),
                 TransferRing::try_from(ep).map_err(|e| {
                     crate::migrate::MigrateStateError::ImportFailed(format!(
                         "{e:?}"
@@ -147,7 +173,7 @@ impl DeviceSlot {
         migrate::DeviceSlotV1 {
             endpoints: endpoints
                 .iter()
-                .map(|(ep_id, ep)| (*ep_id, ep.export()))
+                .map(|(ep_id, ep)| (u8::from(*ep_id), ep.export()))
                 .collect(),
             port_address: port_address.map(|port_id| port_id.as_raw_id()),
         }
@@ -239,14 +265,14 @@ impl DeviceSlotTable {
 
     fn endpoint_context(
         slot_addr: GuestAddr,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         memctx: &MemCtx,
     ) -> Option<MemCtxValue<EndpointContext>> {
         const { assert!(size_of::<SlotContext>() == size_of::<EndpointContext>()) };
         MemCtxValue::new(
-            slot_addr
-                .offset::<SlotContext>(1)
-                .offset::<EndpointContext>(endpoint_id.checked_sub(1)? as usize),
+            slot_addr.offset::<SlotContext>(1).offset::<EndpointContext>(
+                u8::from(endpoint_id).checked_sub(1)? as usize,
+            ),
             memctx,
         )
     }
@@ -413,7 +439,7 @@ impl DeviceSlotTable {
         let device_slot = self.slot_mut(slot_id).unwrap();
 
         // add default control endpoint to scheduling list
-        device_slot.set_endpoint_tr(1, *ep0_ctx);
+        device_slot.set_endpoint_tr(EndpointId::from(1), *ep0_ctx);
 
         Some(TrbCompletionCode::Success)
     }
@@ -462,7 +488,7 @@ impl DeviceSlotTable {
         // the Output Slot Context 'Context Entries' field shall be set to 1.
         let input_ctx = if deconfigure {
             let mut in_ctx = InputControlContext::new_zeroed();
-            for i in 2..=31 {
+            for i in (2..=31).map(EndpointId::from) {
                 in_ctx.set_add_context_bit(i, false);
                 in_ctx.set_drop_context_bit(i, true);
             }
@@ -478,7 +504,7 @@ impl DeviceSlotTable {
         if deconfigure {
             if out_slot_ctx.slot_state() == SlotState::Configured {
                 // for each endpoint context not in disabled state:
-                for i in 1..=31 {
+                for i in (1..=31).map(EndpointId::from) {
                     let mut out_ep_ctx =
                         Self::endpoint_context(out_slot_addr, i, memctx)?;
                     if out_ep_ctx.endpoint_state() != EndpointState::Disabled {
@@ -502,7 +528,7 @@ impl DeviceSlotTable {
                 input_context_ptr.offset::<InputControlContext>(1);
 
             // for each endpoint context designated by a Drop Context flag = 2
-            for i in 2..=31 {
+            for i in (2..=31).map(EndpointId::from) {
                 // unwrap: only None when index not in 2..=31
                 if input_ctx.drop_context_bit(i).unwrap() {
                     let mut out_ep_ctx =
@@ -517,7 +543,7 @@ impl DeviceSlotTable {
             }
 
             // if all input endpoint contexts with Add Context = 1 are valid
-            for i in 1..=31 {
+            for i in (1..=31).map(EndpointId::from) {
                 if input_ctx.add_context_bit(i).unwrap() {
                     let in_ep_ctx =
                         Self::endpoint_context(in_slot_addr, i, memctx)?;
@@ -530,21 +556,16 @@ impl DeviceSlotTable {
 
             let mut any_endpoint_enabled = false;
             // for each endpoint context designated by an Add Context flag = 1
-            for i in 1..=31 {
+            for i in (1..=31).map(EndpointId::from) {
                 let mut out_ep_ctx =
                     Self::endpoint_context(out_slot_addr, i, memctx)?;
 
                 // unwrap: only None when index > 31
                 if input_ctx.add_context_bit(i).unwrap() {
-                    eprintln!("configure endpoint: add context {i}");
                     // copy all fields of input ep context to output ep context;
                     // set output EP state field to running.
                     let in_ep_ctx =
                         Self::endpoint_context(in_slot_addr, i, memctx)?;
-                    eprintln!(
-                        "configure endpoint: interval {} sec",
-                        in_ep_ctx.interval_as_duration().as_secs_f64()
-                    );
                     self.usbdev_for_slot(slot_id)
                         .unwrap()
                         .configure_endpoint(slot_id, i, &in_ep_ctx);
@@ -622,7 +643,7 @@ impl DeviceSlotTable {
                 // (limited to context indeces 0 and 1, per xHCI 1.2 sect 6.2.3.3)
 
                 // xHCI 1.2 sect 6.2.2.3: interrupter target & max exit latency
-                if input_ctx.add_context_bit(0).unwrap() {
+                if input_ctx.add_context_bit(EndpointId(0)).unwrap() {
                     let in_slot_ctx =
                         memctx.read::<SlotContext>(in_slot_addr)?;
                     out_slot_ctx.mutate(|ctx| {
@@ -641,7 +662,8 @@ impl DeviceSlotTable {
                     );
                 }
                 // xHCI 1.2 sect 6.2.3.3: pay attention to max packet size
-                if input_ctx.add_context_bit(1).unwrap() {
+                const EP_1: EndpointId = EndpointId(1);
+                if input_ctx.add_context_bit(EP_1).unwrap() {
                     let in_ep0_addr = input_context_ptr
                         .offset::<InputControlContext>(1)
                         .offset::<SlotContext>(1);
@@ -651,7 +673,7 @@ impl DeviceSlotTable {
                         memctx.read::<EndpointContext>(in_ep0_addr)?;
 
                     let mut out_ep0_ctx =
-                        Self::endpoint_context(out_slot_addr, 1, memctx)?;
+                        Self::endpoint_context(out_slot_addr, EP_1, memctx)?;
                     out_ep0_ctx.mutate(|ctx| {
                         ctx.set_max_packet_size(in_ep0_ctx.max_packet_size())
                     });
@@ -686,7 +708,7 @@ impl DeviceSlotTable {
     pub fn reset_endpoint(
         &self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         transfer_state_preserve: bool,
         memctx: &MemCtx,
     ) -> Option<TrbCompletionCode> {
@@ -720,7 +742,7 @@ impl DeviceSlotTable {
     pub fn stop_endpoint(
         &mut self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         _suspend: bool,
         memctx: &MemCtx,
     ) -> Option<TrbCompletionCode> {
@@ -800,7 +822,7 @@ impl DeviceSlotTable {
         &mut self,
         new_tr_dequeue_ptr: GuestAddr,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         dequeue_cycle_state: bool,
         memctx: &MemCtx,
     ) -> Option<TrbCompletionCode> {
@@ -836,10 +858,10 @@ impl DeviceSlotTable {
                                         dequeue_cycle_state,
                                     )
                                 {
-                                    slog::error!(self.log, "Error setting Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}, endpoint {endpoint_id}: {e}");
+                                    slog::error!(self.log, "Error setting Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}, {endpoint_id:?}: {e}");
                                 }
                             } else {
-                                slog::error!(self.log, "can't set Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}'s nonexistent endpoint {endpoint_id}");
+                                slog::error!(self.log, "can't set Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}'s nonexistent {endpoint_id:?}");
                             }
 
                             TrbCompletionCode::Success
@@ -878,7 +900,7 @@ impl DeviceSlotTable {
 
                 // for each endpoint context (except the default control endpoint)
                 let last_endpoint = output_slot_ctx.context_entries();
-                for endpoint_id in 1..=last_endpoint {
+                for endpoint_id in (1..=last_endpoint).map(EndpointId::from) {
                     let mut ep_ctx =
                         Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
                     // set ep state to disabled
@@ -896,7 +918,7 @@ impl DeviceSlotTable {
     pub fn transfer_ring(
         &mut self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
     ) -> Option<&mut TransferRing> {
         let log = self.log.clone();
 
@@ -904,7 +926,7 @@ impl DeviceSlotTable {
             Ok(slot) => {
                 let Some(endpoint) = slot.endpoints.get_mut(&endpoint_id)
                 else {
-                    slog::error!(log, "rang Doorbell for {slot_id:?}'s endpoint {endpoint_id}, which was absent");
+                    slog::error!(log, "rang Doorbell for {slot_id:?}'s {endpoint_id:?}, which was absent");
                     return None;
                 };
                 Some(endpoint)
@@ -1007,6 +1029,8 @@ pub mod migrate {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
+    use super::EndpointId;
+
     #[derive(Serialize, Deserialize)]
     pub struct DeviceSlotV1 {
         pub endpoints: HashMap<u8, ConsumerRingV1>,
@@ -1022,7 +1046,10 @@ pub mod migrate {
                 endpoints: endpoints
                     .into_iter()
                     .map(|(ep_id, ring)| {
-                        Ok((ep_id, TransferRing::try_from(&ring)?))
+                        Ok((
+                            EndpointId::from(ep_id),
+                            TransferRing::try_from(&ring)?,
+                        ))
                     })
                     .collect::<Result<Vec<_>, Self::Error>>()?
                     .into_iter()

@@ -4,7 +4,7 @@
 
 use crate::common::{GuestAddr, GuestData};
 use crate::hw::usb::xhci::bits::ring_data::*;
-use crate::hw::usb::xhci::device_slots::SlotId;
+use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
 use crate::hw::usb::xhci::port::PortId;
 use crate::vmm::MemCtx;
 
@@ -232,7 +232,7 @@ pub enum EventInfo {
         completion_code: TrbCompletionCode,
         trb_transfer_length: u32,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         event_data: bool,
     },
     CommandCompletion {

@@ -18,7 +18,7 @@ use crate::{
         usb::xhci::{
             bits::device_context::EndpointContext,
             controller::XhciPortWakeHandle,
-            device_slots::SlotId,
+            device_slots::{EndpointId, SlotId},
             rings::{
                 consumer::transfer::{
                     PointerOrImmediate, TransferEventParams, TransferTrb,
@@ -356,8 +356,12 @@ impl HIDTabletDevice {
 }
 
 impl UsbDevice for HIDTabletDevice {
-    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()> {
-        if endpoint_id != 1 {
+    fn setup_stage(
+        &mut self,
+        endpoint_id: EndpointId,
+        setup: SetupData,
+    ) -> Result<()> {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         if let Some(req) = self.control_endpoint.setup_stage(setup)? {
@@ -370,12 +374,12 @@ impl UsbDevice for HIDTabletDevice {
 
     fn data_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         xfer_trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<Vec<TransferEventParams>> {
-        if endpoint_id != 1 {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         self.control_endpoint.data_stage(xfer_trbs, data_direction, memctx)
@@ -384,10 +388,10 @@ impl UsbDevice for HIDTabletDevice {
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     ) {
-        if endpoint_id == 3 {
+        if u8::from(endpoint_id) == 3 {
             let interrupt_in_endpoint = InterruptInEndpoint::new(
                 ep_ctx.interval_as_duration(),
                 Arc::downgrade(&self.port_wake_hdl),
@@ -407,11 +411,11 @@ impl UsbDevice for HIDTabletDevice {
 
     fn normal(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         xfer_trbs: &[TransferTrb],
     ) -> Result<Vec<TransferEventParams>> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
-        if endpoint_id == 3 {
+        if u8::from(endpoint_id) == 3 {
             if let Some(ep) = &self.interrupt_endpoint {
                 ep.normal(xfer_trbs);
             }
@@ -423,10 +427,10 @@ impl UsbDevice for HIDTabletDevice {
 
     fn status_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if endpoint_id != 1 {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         match self.control_endpoint.status_stage(status_direction)? {

@@ -15,6 +15,9 @@ use crate::hw::usb::xhci::rings::producer::event::{
 use crate::hw::usb::xhci::{RegRWOpValue, NUM_INTRS};
 use crate::vmm::{time, MemCtx, VmmHdl};
 
+use super::device_slots::{EndpointId, SlotId};
+use super::rings::consumer::transfer::TransferEventParams;
+
 #[usdt::provider(provider = "propolis")]
 mod probes {
     fn xhci_interrupter_pending(intr_num: u16) {}
@@ -82,9 +85,13 @@ impl XhciInterrupter {
         ));
         let pair = Arc::downgrade(&interrupts);
         let vmm_hdl_loop = Arc::clone(&vmm_hdl);
-        let imod_loop = Some(std::thread::spawn(move || {
-            InterruptRegulation::imod_wait_loop(pair, vmm_hdl_loop)
-        }));
+        let imod_loop = Some(
+            std::thread::Builder::new()
+                .name(format!("xhci interrupter {number} imod regulation"))
+                .spawn(move || {
+                    InterruptRegulation::imod_wait_loop(pair, vmm_hdl_loop)
+                }),
+        );
         Self {
             number,
             evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
@@ -300,6 +307,57 @@ impl XhciInterrupter {
     pub fn set_usbcmd_inte(&self, usbcmd_inte: bool) {
         self.interrupts.0.lock().unwrap().usbcmd_inte = usbcmd_inte;
         self.interrupts.1.notify_one();
+    }
+}
+
+struct EventSender {
+    slot_id: SlotId,
+    endpoint_id: EndpointId,
+    tx: std::sync::mpsc::Sender<TransferEventParams>,
+}
+
+impl EventSender {
+    fn send_completion_events_for_trb(
+        &self,
+        trb: &TransferTrb,
+        completion_code: TrbCompletionCode,
+        bytes_transferred: usize,
+    ) {
+        let slot_id = self.slot_id;
+        let endpoint_id = self.endpoint_id;
+        let interrupter = trb.interrupter_target();
+        for evt in trb
+            .interrupt_on_completion()
+            .then_some(TransferEventParams {
+                evt_info: EventInfo::Transfer {
+                    trb_pointer: trb.trb_pointer(),
+                    completion_code,
+                    trb_transfer_length: bytes_transferred as u32,
+                    slot_id,
+                    endpoint_id,
+                    event_data: false,
+                },
+                interrupter,
+                block_event_interrupt: trb.block_event_interrupt(),
+            })
+            .into_iter()
+            .chain(trb.event_data().and_then(|edtrb| {
+                edtrb.interrupt_on_completion().then_some(TransferEventParams {
+                    evt_info: EventInfo::Transfer {
+                        trb_pointer: GuestAddr(edtrb.event_data()),
+                        completion_code,
+                        trb_transfer_length: (),
+                        slot_id,
+                        endpoint_id,
+                        event_data: true,
+                    },
+                    interrupter,
+                    block_event_interrupt: edtrb.block_event_interrupt(),
+                })
+            }))
+        {
+            self.tx.send(evt);
+        }
     }
 }
 

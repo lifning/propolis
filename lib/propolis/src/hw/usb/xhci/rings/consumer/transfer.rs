@@ -368,7 +368,7 @@ impl TransferInfo {
     pub fn run(
         self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         evt_data_xfer_len_accum: &mut u32,
         usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
@@ -406,7 +406,7 @@ impl TransferInfo {
     fn run_inner(
         self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         evt_data_xfer_len_accum: &mut u32,
         usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
@@ -414,11 +414,16 @@ impl TransferInfo {
     ) -> Vec<TransferEventParams> {
         if let TransferInfo::EventData(ed) = &self {
             if ed.interrupt_on_completion() {
+                // xHCI 1.2 sect 4.11.5.2:
+                // EDTLA set to 0 prior to executing the first Transfer TRB of a TD
+                let trb_transfer_length = *evt_data_xfer_len_accum;
+                *evt_data_xfer_len_accum = 0;
+
                 return vec![TransferEventParams {
                     evt_info: EventInfo::Transfer {
                         trb_pointer: GuestAddr(ed.event_data()),
                         completion_code: TrbCompletionCode::Success,
-                        trb_transfer_length: *evt_data_xfer_len_accum,
+                        trb_transfer_length,
                         slot_id,
                         endpoint_id,
                         event_data: true,

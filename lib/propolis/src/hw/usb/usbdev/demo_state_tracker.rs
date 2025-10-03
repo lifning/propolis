@@ -4,7 +4,7 @@
 
 use crate::{
     hw::usb::xhci::{
-        device_slots::SlotId,
+        device_slots::{EndpointId, SlotId},
         rings::{
             consumer::transfer::{PointerOrImmediate, TransferTrb},
             producer::event::EventInfo,
@@ -30,7 +30,11 @@ pub struct NullUsbDevice {
 }
 
 impl UsbDevice for NullUsbDevice {
-    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()> {
+    fn setup_stage(
+        &mut self,
+        endpoint_id: EndpointId,
+        setup: SetupData,
+    ) -> Result<()> {
         if endpoint_id != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
@@ -43,7 +47,7 @@ impl UsbDevice for NullUsbDevice {
 
     fn data_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         data_buffer: PointerOrImmediate,
         data_direction: RequestDirection,
         memctx: &MemCtx,
@@ -56,7 +60,7 @@ impl UsbDevice for NullUsbDevice {
 
     fn status_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()> {
         if endpoint_id != 1 {
@@ -111,14 +115,14 @@ impl UsbDevice for NullUsbDevice {
     fn configure_endpoint(
         &mut self,
         _slot_id: SlotId,
-        _endpoint_id: u8,
+        _endpoint_id: EndpointId,
         _ep_ctx: &crate::hw::usb::xhci::bits::device_context::EndpointContext,
     ) {
     }
 
     fn normal(
         &mut self,
-        _endpoint_id: u8,
+        _endpoint_id: EndpointId,
         _normal_td: &[TransferTrb],
     ) -> Result<Option<EventInfo>> {
         Ok(None)

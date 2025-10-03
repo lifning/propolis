@@ -963,45 +963,53 @@ impl PciXhci {
                 .acc_mem
                 .child(Some("MFINDEX Wrap Event thread".to_string()));
 
-            state.mfindex_wrap_thread = Some(std::thread::spawn(move || {
-                use rings::producer::event::EventInfo;
-                let mut wraps = 0;
-                loop {
-                    const WRAP_INTERVAL: Duration = bits::MINIMUM_INTERVAL_TIME
-                        .checked_mul(bits::MFINDEX_WRAP_POINT)
-                        .unwrap();
-                    if let Some(deadline) =
-                        first_wrap_time.checked_add(WRAP_INTERVAL * wraps)
-                    {
-                        wraps += 1;
-                        let now = time::VmGuestInstant::now(&hdl).unwrap();
-                        if let Some(delay) =
-                            deadline.checked_duration_since(now)
-                        {
-                            std::thread::sleep(delay);
+            state.mfindex_wrap_thread = Some(
+                std::thread::Builder::new()
+                    .name(format!("xhci mfindex wrap thread"))
+                    .spawn(move || {
+                        use rings::producer::event::EventInfo;
+                        let mut wraps = 0;
+                        loop {
+                            const WRAP_INTERVAL: Duration =
+                                bits::MINIMUM_INTERVAL_TIME
+                                    .checked_mul(bits::MFINDEX_WRAP_POINT)
+                                    .unwrap();
+                            if let Some(deadline) = first_wrap_time
+                                .checked_add(WRAP_INTERVAL * wraps)
+                            {
+                                wraps += 1;
+                                let now =
+                                    time::VmGuestInstant::now(&hdl).unwrap();
+                                if let Some(delay) =
+                                    deadline.checked_duration_since(now)
+                                {
+                                    std::thread::sleep(delay);
+                                }
+                            }
+                            // enqueue event
+                            let Some(state_arc) = state_weak.upgrade() else {
+                                break;
+                            };
+                            let Ok(mut state) = state_arc.lock() else {
+                                break;
+                            };
+                            if state.mfindex_wrap_thread_generation
+                                == generation
+                            {
+                                let memctx = acc_mem.access().unwrap();
+                                state.interrupters[0]
+                                    .enqueue_event(
+                                        EventInfo::MfIndexWrap,
+                                        &memctx,
+                                        false,
+                                    )
+                                    .ok(); // shall be dropped by the xHC if Event Ring full
+                            } else {
+                                break;
+                            }
                         }
-                    }
-                    // enqueue event
-                    let Some(state_arc) = state_weak.upgrade() else {
-                        break;
-                    };
-                    let Ok(mut state) = state_arc.lock() else {
-                        break;
-                    };
-                    if state.mfindex_wrap_thread_generation == generation {
-                        let memctx = acc_mem.access().unwrap();
-                        state.interrupters[0]
-                            .enqueue_event(
-                                EventInfo::MfIndexWrap,
-                                &memctx,
-                                false,
-                            )
-                            .ok(); // shall be dropped by the xHC if Event Ring full
-                    } else {
-                        break;
-                    }
-                }
-            }));
+                    }),
+            );
         }
     }
 

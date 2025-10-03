@@ -10,7 +10,10 @@ use zerocopy::{FromBytes, Immutable};
 
 use crate::{
     common::GuestAddr,
-    hw::usb::xhci::{device_slots::SlotId, port::PortId},
+    hw::usb::xhci::{
+        device_slots::{EndpointId, SlotId},
+        port::PortId,
+    },
 };
 
 /// See xHCI 1.2 sect 4.5.3 & table 6-7
@@ -496,7 +499,8 @@ impl DerefMut for InputControlContext {
 
 impl InputControlContext {
     /// xHCI 1.2 table 6-15
-    pub fn drop_context_bit(&self, index: u8) -> Option<bool> {
+    pub fn drop_context_bit(&self, endpoint_id: EndpointId) -> Option<bool> {
+        let index = u8::from(endpoint_id);
         if index < 2 || index > 31 {
             None
         } else {
@@ -504,7 +508,12 @@ impl InputControlContext {
         }
     }
     /// xHCI 1.2 table 6-15
-    pub fn set_drop_context_bit(&mut self, index: u8, value: bool) {
+    pub fn set_drop_context_bit(
+        &mut self,
+        endpoint_id: EndpointId,
+        value: bool,
+    ) {
+        let index = u8::from(endpoint_id);
         // lower two bits reserved
         if index > 2 && index <= 31 {
             let mask = 1 << index;
@@ -518,7 +527,8 @@ impl InputControlContext {
     /// Returns whether the context corresponding to the given index
     /// should be added in an Evaluate Context command.
     /// See xHCI 1.2 table 6-16
-    pub fn add_context_bit(&self, index: u8) -> Option<bool> {
+    pub fn add_context_bit(&self, endpoint_id: EndpointId) -> Option<bool> {
+        let index = u8::from(endpoint_id);
         if index > 31 {
             None
         } else {
@@ -526,7 +536,12 @@ impl InputControlContext {
         }
     }
     /// xHCI 1.2 table 6-16
-    pub fn set_add_context_bit(&mut self, index: u8, value: bool) {
+    pub fn set_add_context_bit(
+        &mut self,
+        endpoint_id: EndpointId,
+        value: bool,
+    ) {
+        let index = u8::from(endpoint_id);
         if index <= 31 {
             let mask = 1 << index;
             if value {

@@ -76,10 +76,14 @@ impl UsbDeviceType {
 }
 
 pub trait UsbDevice: Send + Sync + 'static {
-    fn setup_stage(&mut self, endpoint_id: u8, setup: SetupData) -> Result<()>;
+    fn setup_stage(
+        &mut self,
+        endpoint_id: EndpointId,
+        setup: SetupData,
+    ) -> Result<()>;
     fn data_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         data_buffer: PointerOrImmediate,
         data_direction: RequestDirection,
         memctx: &MemCtx,
@@ -87,17 +91,17 @@ pub trait UsbDevice: Send + Sync + 'static {
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     );
     fn normal(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         normal_td: &[TransferTrb],
     ) -> Result<Option<EventInfo>>; // TODO: eventinfo construction in xhci module
     fn status_stage(
         &mut self,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()>;
     fn set_address(&self, slot_id: SlotId, _port_id: PortId) {}
@@ -149,8 +153,10 @@ pub enum Error {
     InvalidSetupParamsForRequest(u8, RequestType, u16, u16),
     #[error("got a class-specific USB request on endpoint with unspecified class: {0:?}")]
     ClassRequestOnNonClassEndpoint(SetupData),
-    #[error("received packet on endpoint not present on this USB device: {0}")]
-    InvalidEndpoint(u8),
+    #[error(
+        "received packet on endpoint not present on this USB device: {0:?}"
+    )]
+    InvalidEndpoint(EndpointId),
     #[error("received Normal TD on interrupt endpoint with IOC unset")]
     NoInterruptOnCompletionOnInterruptTransfer,
 }

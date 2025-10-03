@@ -44,7 +44,7 @@ pub fn command_ring_stop(
 pub fn process_transfer_ring(
     state: &mut XhciState,
     slot_id: SlotId,
-    endpoint_id: u8,
+    endpoint_id: EndpointId,
     memctx: &MemCtx,
     log: &slog::Logger,
 ) {

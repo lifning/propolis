@@ -67,7 +67,7 @@ fn completion_events_for_trb(
             evt_info: EventInfo::Transfer {
                 trb_pointer: trb.trb_pointer(),
                 completion_code,
-                trb_transfer_length: bytes_transfered as u32,
+                trb_transfer_length: bytes_transferred as u32,
                 slot_id,
                 endpoint_id,
                 event_data: false,

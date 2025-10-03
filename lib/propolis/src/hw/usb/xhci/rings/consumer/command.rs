@@ -4,7 +4,7 @@
 
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::bits::ring_data::{Trb, TrbCompletionCode, TrbType};
-use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, SlotId};
+use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, EndpointId, SlotId};
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::hw::usb::xhci::NUM_USB2_PORTS;
 use crate::vmm::MemCtx;
@@ -220,19 +220,19 @@ pub enum CommandInfo {
     },
     ResetEndpoint {
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         transfer_state_preserve: bool,
     },
     StopEndpoint {
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         suspend: bool,
     },
     SetTRDequeuePointer {
         new_tr_dequeue_ptr: GuestAddr,
         dequeue_cycle_state: bool,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
     },
     ResetDevice {
         slot_id: SlotId,
@@ -258,7 +258,7 @@ pub enum CommandInfo {
         extended_property_ctx_ptr: GuestAddr,
         extended_capability_id: u16,
         command_subtype: u8,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         slot_id: SlotId,
     },
     #[allow(unused)]
@@ -266,7 +266,7 @@ pub enum CommandInfo {
         extended_capability_id: u16,
         capability_parameter: u8,
         command_subtype: u8,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
         slot_id: SlotId,
     },
 }

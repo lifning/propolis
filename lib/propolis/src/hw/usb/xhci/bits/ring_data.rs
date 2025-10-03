@@ -2,7 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::{common::GuestAddr, hw::usb::xhci::device_slots::SlotId};
+use crate::{
+    common::GuestAddr,
+    hw::usb::xhci::device_slots::{EndpointId, SlotId},
+};
 use bitstruct::bitstruct;
 use strum::FromRepr;
 use zerocopy::{FromBytes, Immutable};
@@ -314,7 +317,7 @@ bitstruct! {
         /// ID of the Endpoint that generated the event. Used as an index in
         /// the Device Context to select the Endpoint Context associated with
         /// this Event.
-        pub endpoint_id: u8 = 16..21;
+        pub endpoint_id: EndpointId = 16..21;
 
         reserved2: u16 = 21..24;
 
@@ -372,7 +375,7 @@ bitstruct! {
 
         /// The Device Context Index (xHCI 1.2 section 4.8.1) of the EP Context.
         /// Valid values are 1..=31.
-        pub endpoint_id: u8 = 16..21;
+        pub endpoint_id: EndpointId = 16..21;
 
         reserved2: u8 = 21..23;
 
@@ -433,7 +436,7 @@ bitstruct! {
 
         /// ID of the Endpoint whose extended properties we're interested in.
         /// If nonzero, `slot_id` shall be valid.
-        pub endpoint_id: u8 = 19..24;
+        pub endpoint_id: EndpointId = 19..24;
 
         /// ID of the Device Slot whose extended properties we're interested in.
         pub slot_id: SlotId = 24..32;
