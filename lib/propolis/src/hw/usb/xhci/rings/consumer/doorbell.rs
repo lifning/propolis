@@ -4,7 +4,7 @@
 
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::controller::XhciState;
-use crate::hw::usb::xhci::device_slots::SlotId;
+use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
 use crate::hw::usb::xhci::rings::consumer;
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::vmm::MemCtx;
@@ -32,9 +32,7 @@ pub fn command_ring_stop(
         cmd_trb_addr,
     };
     // xHCI 1.2 table 5-24
-    if let Err(e) =
-        state.interrupters[0].enqueue_event(event_info, &memctx, false)
-    {
+    if let Err(e) = state.event_sender.enqueue_event(event_info, false) {
         slog::error!(log, "couldn't inform xHCD of stopped Control Ring: {e}");
     } else {
         slog::debug!(log, "stopped Command Ring with {completion_code:?}");
@@ -71,6 +69,7 @@ pub fn process_transfer_ring(
                         break;
                     }
                 };
+                // WIP: move the event-enqueueing to the USB device's transfer handling
                 for TransferEventParams {
                     evt_info,
                     interrupter,
@@ -104,7 +103,7 @@ pub fn process_transfer_ring(
                 }
             }
             Err(consumer::Error::EmptyTransferDescriptor) => {
-                slog::debug!(log, "Transfer Ring empty");
+                slog::trace!(log, "Transfer Ring empty");
                 break;
             }
             Err(e) => {
@@ -158,8 +157,8 @@ pub fn process_command_ring(
                     let event_info =
                         cmd.run(cmd_trb_addr, &mut state.dev_slots, memctx);
                     slog::debug!(log, "Command result: {event_info:?}");
-                    if let Err(e) = state.interrupters[0]
-                        .enqueue_event(event_info, &memctx, false)
+                    if let Err(e) =
+                        state.event_sender.enqueue_event(event_info, false)
                     {
                         slog::error!(
                             log,

@@ -24,7 +24,9 @@ use crate::hw::usb::xhci::rings::consumer::doorbell;
 use crate::migrate::{MigrateMulti, Migrator};
 use crate::vmm::{time, VmmHdl};
 
-use super::device_slots::DeviceSlotTable;
+use super::device_slots::{DeviceSlotTable, EndpointId};
+use super::interrupter::EventSender;
+use super::port::XhciUsbPort;
 use super::rings::consumer::command::CommandRing;
 use super::rings::producer::event::EventInfo;
 use super::{bits::values::*, registers::*, *};
@@ -60,6 +62,10 @@ pub struct XhciState {
 
     /// Interrupters, including registers and the Event Ring
     pub(super) interrupters: [interrupter::XhciInterrupter; NUM_INTRS as usize],
+
+    /// Sends Event TRBs to the default Event Ring on behalf of *the controller itself*
+    /// (not a specific device)
+    pub(super) event_sender: EventSender,
 
     /// EINT in USBSTS is set when any interrupters IP changes from 0 to 1.
     /// we give a weak reference to this to our interrupters, and set the flag
@@ -104,9 +110,25 @@ impl XhciState {
             0,
             pci_intr,
             vmm_hdl.clone(),
+            &pci_state.acc_mem,
             Arc::downgrade(&any_interrupt_pending_raised),
             log.clone(),
         )];
+
+        let event_sender = interrupters[0].sender();
+
+        let port_regs: [Box<dyn XhciUsbPort>; MAX_PORTS as usize] = [
+            // NUM_USB2_PORTS = 4
+            Box::new(port::Usb2Port::new(interrupters[0].sender())),
+            Box::new(port::Usb2Port::new(interrupters[0].sender())),
+            Box::new(port::Usb2Port::new(interrupters[0].sender())),
+            Box::new(port::Usb2Port::new(interrupters[0].sender())),
+            // NUM_USB3_PORTS = 4
+            Box::new(port::Usb3Port::new(interrupters[0].sender())),
+            Box::new(port::Usb3Port::new(interrupters[0].sender())),
+            Box::new(port::Usb3Port::new(interrupters[0].sender())),
+            Box::new(port::Usb3Port::new(interrupters[0].sender())),
+        ];
 
         Self {
             vmm_hdl,
@@ -120,21 +142,11 @@ impl XhciState {
             mfindex_wrap_thread: None,
             mfindex_wrap_thread_generation: 0,
             interrupters,
+            event_sender,
             any_interrupt_pending_raised,
             command_ring: None,
             crcr: bits::CommandRingControl(0),
-            port_regs: [
-                // NUM_USB2_PORTS = 4
-                Box::new(port::Usb2Port::default()),
-                Box::new(port::Usb2Port::default()),
-                Box::new(port::Usb2Port::default()),
-                Box::new(port::Usb2Port::default()),
-                // NUM_USB3_PORTS = 4
-                Box::new(port::Usb3Port::default()),
-                Box::new(port::Usb3Port::default()),
-                Box::new(port::Usb3Port::default()),
-                Box::new(port::Usb3Port::default()),
-            ],
+            port_regs,
             evt_data_xfer_len_accum: 0,
             queued_device_connections: vec![],
         }
@@ -177,12 +189,12 @@ impl XhciPortWakeHandleCollection {
             .entry(port_id)
             .or_insert_with(|| {
                 Arc::new(XhciPortWakeHandle {
-                    intr_num: 0,
-                    port_id,
                     acc_mem: self
                         .acc_mem
                         .child(Some("xHCI interrupter handle".to_string())),
                     state_weak: self.state_weak.clone(),
+                    event_sender: todo!(),
+                    port_id,
                     log: self.log.clone(),
                 })
             })
@@ -191,41 +203,30 @@ impl XhciPortWakeHandleCollection {
 }
 
 pub struct XhciPortWakeHandle {
-    intr_num: usize,
     acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
+    event_sender: EventSender,
     port_id: PortId,
     log: slog::Logger,
 }
+
 impl XhciPortWakeHandle {
     /// Wake a port if it is in suspend, generating an Event TRB.
-    pub fn wake_up(&self) -> Result<(), String> {
+    pub fn wake_up(&self) {
         if let Some(state) = self.state_weak.upgrade() {
-            if let Some(memctx) = self.acc_mem.access() {
-                let mut state = state.lock().unwrap();
-                if let Some(evt) = state.port_regs[self.port_id.as_index()]
-                    .xhc_update_portsc(
-                        &|portsc_mut| {
-                            if portsc_mut.port_link_state()
-                                == bits::PortLinkState::U3Suspended
-                            {
-                                portsc_mut.set_port_link_state(
-                                    bits::PortLinkState::Resume,
-                                );
-                            }
-                        },
-                        self.port_id,
-                    )
-                {
-                    state.interrupters[self.intr_num]
-                        .enqueue_event(evt, &memctx, false)
-                        .map_err(|e| e.to_string())?;
-                }
-                return Ok(());
-            }
-            return Err("No memory access".to_string());
+            let mut state = state.lock().unwrap();
+            state.port_regs[self.port_id.as_index()].xhc_update_portsc(
+                &|portsc_mut| {
+                    if portsc_mut.port_link_state()
+                        == bits::PortLinkState::U3Suspended
+                    {
+                        portsc_mut
+                            .set_port_link_state(bits::PortLinkState::Resume);
+                    }
+                },
+                self.port_id,
+            );
         }
-        return Err("xHC absent".to_string());
     }
 
     /// Complete a transaction and post the given Event TRBs to the Event Ring
@@ -235,19 +236,14 @@ impl XhciPortWakeHandle {
         region: GuestRegion,
         evts: impl IntoIterator<Item = EventInfo>,
     ) {
-        if let Some(state) = self.state_weak.upgrade() {
-            let memctx = self.acc_mem.access().unwrap();
-            let mut state = state.lock().unwrap();
-            memctx.write_many(region.0, data);
-            for evt in evts.into_iter() {
-                if let Err(e) = state.interrupters[self.intr_num]
-                    .enqueue_event(evt, &memctx, false)
-                {
-                    slog::error!(
-                        self.log,
-                        "xHC: failed to enqueue transfer event: {e}"
-                    );
-                }
+        let memctx = self.acc_mem.access().unwrap();
+        memctx.write_many(region.0, data);
+        for evt in evts.into_iter() {
+            if let Err(e) = self.event_sender.enqueue_event(evt, false) {
+                slog::error!(
+                    self.log,
+                    "xHC: failed to enqueue transfer event: {e}"
+                );
             }
         }
     }
@@ -542,26 +538,18 @@ impl PciXhci {
                     );
                     for (port_id, usb_dev) in queued_conns {
                         let memctx = self.pci_state.acc_mem.access().unwrap();
-                        if let Some(evt) = state.port_regs[port_id.as_index()]
-                            .xhc_update_portsc(
-                                &|portsc| {
-                                    *portsc = portsc
-                                        .with_current_connect_status(true)
-                                        .with_port_enabled_disabled(false)
-                                        .with_port_reset(false)
-                                        .with_port_link_state(
-                                            bits::PortLinkState::Polling,
-                                        );
-                                },
-                                port_id,
-                            )
-                        {
-                            if let Err(e) = state.interrupters[0]
-                                .enqueue_event(evt, &memctx, false)
-                            {
-                                slog::error!(&self.log, "unable to signal Port Status Change for device attach: {e}");
-                            }
-                        }
+                        state.port_regs[port_id.as_index()].xhc_update_portsc(
+                            &|portsc| {
+                                *portsc = portsc
+                                    .with_current_connect_status(true)
+                                    .with_port_enabled_disabled(false)
+                                    .with_port_reset(false)
+                                    .with_port_link_state(
+                                        bits::PortLinkState::Polling,
+                                    );
+                            },
+                            port_id,
+                        );
                         state.usbsts.set_port_change_detect(true);
                         if let Err(_) = state
                             .dev_slots
@@ -839,7 +827,7 @@ impl PciXhci {
                         // to fail the bus reset sequence.
 
                         let memctx = self.pci_state.acc_mem.access().unwrap();
-                        if let Some(evt) = port.xhc_update_portsc(
+                        port.xhc_update_portsc(
                             &|portsc| {
                                 *portsc = portsc
                                     .with_port_link_state(
@@ -851,13 +839,7 @@ impl PciXhci {
                                     .with_port_speed(0);
                             },
                             port_id,
-                        ) {
-                            if let Err(e) = state.interrupters[0]
-                                .enqueue_event(evt, &memctx, false)
-                            {
-                                slog::error!(&self.log, "unable to signal Port Status Change for bus reset: {e}");
-                            }
-                        }
+                        );
                     }
                     _ => {}
                 }
@@ -965,7 +947,7 @@ impl PciXhci {
 
             state.mfindex_wrap_thread = Some(
                 std::thread::Builder::new()
-                    .name(format!("xhci mfindex wrap thread"))
+                    .name(format!("xHCI mfindex wrap thread"))
                     .spawn(move || {
                         use rings::producer::event::EventInfo;
                         let mut wraps = 0;
@@ -997,10 +979,10 @@ impl PciXhci {
                                 == generation
                             {
                                 let memctx = acc_mem.access().unwrap();
-                                state.interrupters[0]
+                                state
+                                    .event_sender
                                     .enqueue_event(
                                         EventInfo::MfIndexWrap,
-                                        &memctx,
                                         false,
                                     )
                                     .ok(); // shall be dropped by the xHC if Event Ring full
@@ -1082,6 +1064,7 @@ impl MigrateMulti for PciXhci {
             mfindex_wrap_thread,
             mfindex_wrap_thread_generation,
             interrupters,
+            event_sender: _,
             any_interrupt_pending_raised: _,
             command_ring,
             crcr,

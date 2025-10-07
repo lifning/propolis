@@ -11,6 +11,8 @@ use crate::hw::usb::xhci::{
     RegRWOpValue, MAX_PORTS,
 };
 
+use super::interrupter::EventSender;
+
 #[must_use]
 pub enum PortWrite {
     NoAction,
@@ -41,24 +43,36 @@ impl PortId {
     }
 }
 
-#[derive(Copy, Clone, Default)]
 pub struct Usb2Port {
     portsc: bits::PortStatusControl,
     portpmsc: bits::PortPowerManagementStatusControlUsb2,
     portli: bits::PortLinkInfoUsb2,
     porthlpmc: bits::PortHardwareLpmControlUsb2,
+    event_sender: EventSender,
 }
 
-#[derive(Copy, Clone)]
 pub struct Usb3Port {
     portsc: bits::PortStatusControl,
     portpmsc: bits::PortPowerManagementStatusControlUsb3,
     portli: bits::PortLinkInfoUsb3,
     porthlpmc: bits::PortHardwareLpmControlUsb3,
+    event_sender: EventSender,
 }
 
-impl Default for Usb3Port {
-    fn default() -> Self {
+impl Usb2Port {
+    pub fn new(event_sender: EventSender) -> Self {
+        Self {
+            portsc: PortStatusControl::default(),
+            portpmsc: Default::default(),
+            portli: Default::default(),
+            porthlpmc: Default::default(),
+            event_sender,
+        }
+    }
+}
+
+impl Usb3Port {
+    pub fn new(event_sender: EventSender) -> Self {
         Self {
             // xHCI 1.2 sect 4.19.1.2, figure 4-27:
             // the initial state is Disconnected (RxDetect, PP=1)
@@ -68,6 +82,7 @@ impl Default for Usb3Port {
             portpmsc: Default::default(),
             portli: Default::default(),
             porthlpmc: Default::default(),
+            event_sender,
         }
     }
 }
@@ -263,7 +278,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         &mut self,
         update: &dyn Fn(&mut bits::PortStatusControl),
         port_id: PortId,
-    ) -> Option<EventInfo> {
+    ) {
         let is_usb3 = self.is_usb3();
         let portsc_before = *self.portsc_ref();
 
@@ -313,12 +328,15 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         let psceg_before = portsc_before.port_status_change_event_generation();
         let psceg_after = portsc.port_status_change_event_generation();
         if psceg_after && !psceg_before {
-            Some(EventInfo::PortStatusChange {
-                port_id,
-                completion_code: TrbCompletionCode::Success,
-            })
-        } else {
-            None
+            if let Err(_e) = self.event_sender().enqueue_event(
+                EventInfo::PortStatusChange {
+                    port_id,
+                    completion_code: TrbCompletionCode::Success,
+                },
+                false,
+            ) {
+                // TODO: slog::error!("unable to signal Port Status Change: {e}")
+            }
         }
     }
 
@@ -366,6 +384,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
 
 trait XhciUsbPortPrivate {
     fn is_usb3(&self) -> bool;
+    fn event_sender(&self) -> &EventSender;
 
     fn portsc_ref(&self) -> &bits::PortStatusControl;
     fn portsc_mut(&mut self) -> &mut bits::PortStatusControl;
@@ -380,6 +399,9 @@ trait XhciUsbPortPrivate {
 impl XhciUsbPortPrivate for Usb2Port {
     fn is_usb3(&self) -> bool {
         false
+    }
+    fn event_sender(&self) -> &EventSender {
+        &self.event_sender
     }
 
     fn portsc_ref(&self) -> &bits::PortStatusControl {
@@ -450,6 +472,9 @@ impl XhciUsbPort for Usb2Port {
 impl XhciUsbPortPrivate for Usb3Port {
     fn is_usb3(&self) -> bool {
         true
+    }
+    fn event_sender(&self) -> &EventSender {
+        &self.event_sender
     }
 
     fn portsc_ref(&self) -> &bits::PortStatusControl {

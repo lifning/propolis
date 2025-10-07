@@ -5,7 +5,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::common::WriteOp;
+use crate::accessors::MemAccessor;
+use crate::common::{GuestAddr, WriteOp};
 use crate::hw::pci;
 use crate::hw::usb::xhci::bits;
 use crate::hw::usb::xhci::registers::InterrupterRegisters;
@@ -15,8 +16,9 @@ use crate::hw::usb::xhci::rings::producer::event::{
 use crate::hw::usb::xhci::{RegRWOpValue, NUM_INTRS};
 use crate::vmm::{time, MemCtx, VmmHdl};
 
+use super::bits::ring_data::TrbCompletionCode;
 use super::device_slots::{EndpointId, SlotId};
-use super::rings::consumer::transfer::TransferEventParams;
+use super::rings::consumer::transfer::{TransferEventParams, TransferTrb};
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
@@ -28,10 +30,10 @@ pub struct XhciInterrupter {
     number: u16,
     evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize,
     evt_ring_seg_base_addr: bits::EventRingSegmentTableBaseAddress,
-    evt_ring: Option<EventRing>,
     interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
     imod_loop: Option<std::thread::JoinHandle<()>>,
     vmm_hdl: Arc<VmmHdl>,
+    acc_mem: MemAccessor,
 }
 
 struct InterruptRegulation {
@@ -41,6 +43,8 @@ struct InterruptRegulation {
     number: u16,
     management: bits::InterrupterManagement,
     moderation: bits::InterrupterModeration,
+
+    evt_ring: Option<EventRing>,
 
     // ERDP contains Event Handler Busy
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
@@ -64,6 +68,7 @@ impl XhciInterrupter {
         number: u16,
         pci_intr: XhciPciIntr,
         vmm_hdl: Arc<VmmHdl>,
+        acc_mem: &MemAccessor,
         any_ip_raised: Weak<AtomicBool>,
         log: slog::Logger,
     ) -> Self {
@@ -74,6 +79,7 @@ impl XhciInterrupter {
                 number,
                 management: bits::InterrupterManagement::default(),
                 moderation: bits::InterrupterModeration::default(),
+                evt_ring: None,
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
                 imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
                 intr_pending_enable: false,
@@ -87,20 +93,21 @@ impl XhciInterrupter {
         let vmm_hdl_loop = Arc::clone(&vmm_hdl);
         let imod_loop = Some(
             std::thread::Builder::new()
-                .name(format!("xhci interrupter {number} imod regulation"))
+                .name(format!("xHCI interrupter {number} IMOD regulation"))
                 .spawn(move || {
                     InterruptRegulation::imod_wait_loop(pair, vmm_hdl_loop)
-                }),
+                })
+                .unwrap(),
         );
         Self {
             number,
             evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize(0),
             evt_ring_seg_base_addr:
                 bits::EventRingSegmentTableBaseAddress::default(),
-            evt_ring: None,
             interrupts,
             imod_loop,
             vmm_hdl,
+            acc_mem: acc_mem.child(Some(format!("xHCI interrupter {number}"))),
         }
     }
 
@@ -220,7 +227,7 @@ impl XhciInterrupter {
         let erstsz = self.evt_ring_seg_tbl_size.size() as usize;
         let erdp = regulation.evt_ring_deq_ptr.pointer();
 
-        if let Some(event_ring) = &mut self.evt_ring {
+        if let Some(event_ring) = &mut regulation.evt_ring {
             match intr_regs {
                 InterrupterRegisters::EventRingSegmentTableSize
                 | InterrupterRegisters::EventRingSegmentTableBaseAddress => {
@@ -248,7 +255,7 @@ impl XhciInterrupter {
             match intr_regs {
                 InterrupterRegisters::EventRingSegmentTableBaseAddress => {
                     match EventRing::new(erstba, erstsz, erdp, &memctx) {
-                        Ok(evt_ring) => self.evt_ring = Some(evt_ring),
+                        Ok(evt_ring) => regulation.evt_ring = Some(evt_ring),
                         Err(e) => {
                             slog::error!(
                                 regulation.log,
@@ -264,34 +271,10 @@ impl XhciInterrupter {
         written_value
     }
 
-    // returns Ok when an event was enqueued and an interrupt was fired
-    pub fn enqueue_event(
-        &mut self,
-        event_info: EventInfo,
-        memctx: &MemCtx,
-        block_event_interrupt: bool,
-    ) -> Result<(), TrbRingProducerError> {
-        if let Some(evt_ring) = self.evt_ring.as_mut() {
-            let mut regulation = self.interrupts.0.lock().unwrap();
-
-            if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
-                slog::error!(
-                    regulation.log,
-                    "failed to enqueue Event TRB: {e}"
-                );
-                return Err(e);
-            }
-            // check imod/iman for when to fire pci intr
-            if !block_event_interrupt {
-                regulation.intr_pending_enable = true;
-                self.interrupts.1.notify_one();
-                let intr_num = self.number;
-                probes::xhci_interrupter_pending!(move || (intr_num));
-            }
-
-            Ok(())
-        } else {
-            Err(TrbRingProducerError::Interrupter)
+    pub fn sender(&self) -> EventSender {
+        EventSender {
+            interrupts: Arc::clone(&self.interrupts),
+            acc_mem: self.acc_mem.child(None),
         }
     }
 
@@ -310,53 +293,89 @@ impl XhciInterrupter {
     }
 }
 
-struct EventSender {
-    slot_id: SlotId,
-    endpoint_id: EndpointId,
-    tx: std::sync::mpsc::Sender<TransferEventParams>,
+pub struct EventSender {
+    interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
+    acc_mem: MemAccessor,
 }
 
 impl EventSender {
+    // returns Ok when an event was enqueued and an interrupt was fired
+    pub fn enqueue_event(
+        &self,
+        event_info: EventInfo,
+        block_event_interrupt: bool,
+    ) -> Result<(), TrbRingProducerError> {
+        let mut regulation = self.interrupts.0.lock().unwrap();
+        let memctx = self.acc_mem.access().unwrap();
+        if let Some(evt_ring) = regulation.evt_ring.as_mut() {
+            if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
+                slog::error!(
+                    regulation.log,
+                    "failed to enqueue Event TRB: {e}"
+                );
+                return Err(e);
+            }
+            // check imod/iman for when to fire pci intr
+            if !block_event_interrupt {
+                regulation.intr_pending_enable = true;
+                self.interrupts.1.notify_one();
+                let intr_num = regulation.number;
+                probes::xhci_interrupter_pending!(move || (intr_num));
+            }
+
+            Ok(())
+        } else {
+            Err(TrbRingProducerError::Interrupter)
+        }
+    }
+
     fn send_completion_events_for_trb(
         &self,
         trb: &TransferTrb,
         completion_code: TrbCompletionCode,
         bytes_transferred: usize,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
     ) {
-        let slot_id = self.slot_id;
-        let endpoint_id = self.endpoint_id;
         let interrupter = trb.interrupter_target();
-        for evt in trb
-            .interrupt_on_completion()
-            .then_some(TransferEventParams {
-                evt_info: EventInfo::Transfer {
-                    trb_pointer: trb.trb_pointer(),
-                    completion_code,
-                    trb_transfer_length: bytes_transferred as u32,
-                    slot_id,
-                    endpoint_id,
-                    event_data: false,
-                },
-                interrupter,
-                block_event_interrupt: trb.block_event_interrupt(),
-            })
-            .into_iter()
-            .chain(trb.event_data().and_then(|edtrb| {
-                edtrb.interrupt_on_completion().then_some(TransferEventParams {
+        if interrupter != 0 {
+            // TODO: multiple interrupters unimplemented
+        } else {
+            for evt in trb
+                .interrupt_on_completion()
+                .then_some(TransferEventParams {
                     evt_info: EventInfo::Transfer {
-                        trb_pointer: GuestAddr(edtrb.event_data()),
+                        trb_pointer: trb.trb_pointer(),
                         completion_code,
-                        trb_transfer_length: (),
+                        trb_transfer_length: bytes_transferred as u32,
                         slot_id,
                         endpoint_id,
-                        event_data: true,
+                        event_data: false,
                     },
                     interrupter,
-                    block_event_interrupt: edtrb.block_event_interrupt(),
+                    block_event_interrupt: trb.block_event_interrupt(),
                 })
-            }))
-        {
-            self.tx.send(evt);
+                .into_iter()
+                .chain(trb.event_data().and_then(|edtrb| {
+                    edtrb.interrupt_on_completion().then_some(
+                        TransferEventParams {
+                            evt_info: EventInfo::Transfer {
+                                trb_pointer: GuestAddr(edtrb.event_data()),
+                                completion_code,
+                                trb_transfer_length: (), // TODO double check spec, different rules for shortpacket error code, etc.
+                                slot_id,
+                                endpoint_id,
+                                event_data: true,
+                            },
+                            interrupter,
+                            block_event_interrupt: edtrb
+                                .block_event_interrupt(),
+                        },
+                    )
+                }))
+            {
+                self.enqueue_event(evt.evt_info, evt.block_event_interrupt);
+            }
         }
     }
 }
@@ -556,10 +575,10 @@ impl XhciInterrupter {
             number,
             evt_ring_seg_tbl_size,
             evt_ring_seg_base_addr,
-            evt_ring,
             interrupts,
             imod_loop: _,
             vmm_hdl: _,
+            acc_mem: _,
         } = self;
         let guard = interrupts.0.lock().unwrap();
         let cvar = &interrupts.1;
@@ -568,12 +587,13 @@ impl XhciInterrupter {
             number: *number,
             evt_ring_seg_tbl_size: evt_ring_seg_tbl_size.0,
             evt_ring_seg_base_addr: evt_ring_seg_base_addr.0,
-            evt_ring: evt_ring.as_ref().map(From::from),
+
             interrupts: migrate::InterruptRegulationV1 {
                 usbcmd_inte: guard.usbcmd_inte,
                 number: guard.number,
                 management: guard.management.0,
                 moderation: guard.moderation.0,
+                evt_ring: guard.evt_ring.as_ref().map(From::from),
                 evt_ring_deq_ptr: guard.evt_ring_deq_ptr.0,
                 intr_pending_enable: guard.intr_pending_enable,
                 imod_allow_at: guard.imod_allow_at,
@@ -592,13 +612,13 @@ impl XhciInterrupter {
             number,
             evt_ring_seg_tbl_size,
             evt_ring_seg_base_addr,
-            evt_ring,
             interrupts:
                 migrate::InterruptRegulationV1 {
                     usbcmd_inte,
                     number: _,
                     management,
                     moderation,
+                    evt_ring,
                     evt_ring_deq_ptr,
                     intr_pending_enable,
                     imod_allow_at,
@@ -614,11 +634,11 @@ impl XhciInterrupter {
             bits::EventRingSegmentTableSize(evt_ring_seg_tbl_size);
         self.evt_ring_seg_base_addr =
             bits::EventRingSegmentTableBaseAddress(evt_ring_seg_base_addr);
-        self.evt_ring = evt_ring.as_ref().map(From::from);
         guard.usbcmd_inte = usbcmd_inte;
         guard.number = number;
         guard.management = bits::InterrupterManagement(management);
         guard.moderation = bits::InterrupterModeration(moderation);
+        guard.evt_ring = evt_ring.as_ref().map(From::from);
         guard.evt_ring_deq_ptr =
             bits::EventRingDequeuePointer(evt_ring_deq_ptr);
         guard.intr_pending_enable = intr_pending_enable;
@@ -634,12 +654,13 @@ pub mod migrate {
     use crate::{hw::usb::xhci::rings::producer::event::migrate::*, vmm::time};
     use serde::{Deserialize, Serialize};
 
+    // TODO: merge (struct fields) before merge (git)
+
     #[derive(Deserialize, Serialize)]
     pub struct XhciInterrupterV1 {
         pub number: u16,
         pub evt_ring_seg_tbl_size: u32,
         pub evt_ring_seg_base_addr: u64,
-        pub evt_ring: Option<EventRingV1>,
         pub interrupts: InterruptRegulationV1,
     }
 
@@ -649,6 +670,7 @@ pub mod migrate {
         pub number: u16,
         pub management: u32,
         pub moderation: u32,
+        pub evt_ring: Option<EventRingV1>,
         pub evt_ring_deq_ptr: u64,
         pub intr_pending_enable: bool,
         pub imod_allow_at: time::VmGuestInstant,
