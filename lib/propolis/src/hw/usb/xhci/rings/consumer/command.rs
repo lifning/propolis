@@ -5,7 +5,10 @@
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::bits::ring_data::{Trb, TrbCompletionCode, TrbType};
 use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, EndpointId, SlotId};
-use crate::hw::usb::xhci::rings::producer::event::EventInfo;
+use crate::hw::usb::xhci::interrupter::EventSender;
+use crate::hw::usb::xhci::rings::producer::event::{
+    Error as TrbRingProducerError, EventInfo,
+};
 use crate::hw::usb::xhci::NUM_USB2_PORTS;
 use crate::vmm::MemCtx;
 
@@ -274,13 +277,15 @@ pub enum CommandInfo {
 // TODO: return an iterator of EventInfo's for commands that may produce
 // multiple Event TRB's, such as the Stop Endpoint Command
 impl CommandInfo {
+    /// Returns an Err if enqueuing the Command Completion Event TRB fails.
     pub fn run(
         self,
         cmd_trb_addr: GuestAddr,
         dev_slots: &mut DeviceSlotTable,
         memctx: &MemCtx,
-    ) -> EventInfo {
-        match self {
+        event_sender: &EventSender,
+    ) -> core::result::Result<(), TrbRingProducerError> {
+        let evt = match self {
             // xHCI 1.2 sect 3.3.1, 4.6.2
             CommandInfo::NoOp => EventInfo::CommandCompletion {
                 completion_code: TrbCompletionCode::Success,
@@ -464,6 +469,7 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-        }
+        };
+        event_sender.enqueue_event(evt, false)
     }
 }

@@ -53,16 +53,14 @@ pub fn process_transfer_ring(
             break;
         };
 
-        slog::debug!(log, "Transfer Ring at {:#x}", xfer_ring.start_addr.0);
+        slog::trace!(log, "Transfer Ring at {:#x}", xfer_ring.start_addr.0);
 
         match xfer_ring
             .dequeue_work_item(&memctx)
             .and_then(TransferInfo::try_from)
         {
             Ok(xfer) => {
-                let XhciState { evt_data_xfer_len_accum, dev_slots, .. } =
-                    &mut *state;
-                let usbdev = match dev_slots.usbdev_for_slot(slot_id) {
+                let usbdev = match state.dev_slots.usbdev_for_slot(slot_id) {
                     Ok(dev) => dev,
                     Err(e) => {
                         slog::error!(log, "No USB device in slot: {e}");
@@ -70,37 +68,7 @@ pub fn process_transfer_ring(
                     }
                 };
                 // WIP: move the event-enqueueing to the USB device's transfer handling
-                for TransferEventParams {
-                    evt_info,
-                    interrupter,
-                    block_event_interrupt,
-                } in xfer.run(
-                    slot_id,
-                    endpoint_id,
-                    evt_data_xfer_len_accum,
-                    usbdev,
-                    &memctx,
-                    log,
-                ) {
-                    slog::debug!(log, "Transfer Event: {evt_info:?}");
-
-                    if let Some(intr) =
-                        state.interrupters.get_mut(interrupter as usize)
-                    {
-                        if let Err(e) = intr.enqueue_event(
-                            evt_info,
-                            &memctx,
-                            block_event_interrupt,
-                        ) {
-                            slog::error!(
-                                log,
-                                "enqueueing Event Data Transfer Event failed: {e}"
-                            )
-                        }
-                    } else {
-                        slog::error!(log, "no such interrupter {interrupter}");
-                    }
-                }
+                xfer.run(slot_id, endpoint_id, usbdev, &memctx, log);
             }
             Err(consumer::Error::EmptyTransferDescriptor) => {
                 slog::trace!(log, "Transfer Ring empty");
@@ -125,7 +93,7 @@ pub fn process_command_ring(
         }
 
         let cmd_opt = if let Some(ref mut cmd_ring) = state.command_ring {
-            slog::debug!(
+            slog::trace!(
                 log,
                 "executing Command Ring from {:#x}",
                 cmd_ring.start_addr.0,
@@ -153,13 +121,13 @@ pub fn process_command_ring(
             let cmd_trb_addr = cmd_desc.1;
             match CommandInfo::try_from(cmd_desc) {
                 Ok(cmd) => {
-                    slog::debug!(log, "Command TRB running: {cmd:?}");
-                    let event_info =
-                        cmd.run(cmd_trb_addr, &mut state.dev_slots, memctx);
-                    slog::debug!(log, "Command result: {event_info:?}");
-                    if let Err(e) =
-                        state.event_sender.enqueue_event(event_info, false)
-                    {
+                    slog::trace!(log, "Command TRB running: {cmd:?}");
+                    if let Err(e) = cmd.run(
+                        cmd_trb_addr,
+                        &mut state.dev_slots,
+                        memctx,
+                        &state.event_sender,
+                    ) {
                         slog::error!(
                             log,
                             "couldn't signal Command TRB completion: {e}"

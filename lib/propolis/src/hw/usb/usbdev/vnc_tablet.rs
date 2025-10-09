@@ -356,6 +356,10 @@ impl HIDTabletDevice {
 }
 
 impl UsbDevice for HIDTabletDevice {
+    fn new_transfer_descriptor(&self) {
+        self.port_wake_hdl.event_sender.reset_edtla();
+    }
+
     fn setup_stage(
         &mut self,
         endpoint_id: EndpointId,
@@ -378,7 +382,7 @@ impl UsbDevice for HIDTabletDevice {
         xfer_trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<Vec<TransferEventParams>> {
+    ) -> Result<()> {
         if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }

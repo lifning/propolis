@@ -13,7 +13,8 @@ use crate::vmm::MemCtx;
 use super::xhci::{
     bits::device_context::EndpointContext,
     controller::XhciPortWakeHandle,
-    device_slots::SlotId,
+    device_slots::{EndpointId, SlotId},
+    interrupter::EventSender,
     port::PortId,
     rings::{
         consumer::transfer::{PointerOrImmediate, TransferTrb},
@@ -43,7 +44,7 @@ impl UsbDeviceType {
     ) -> Box<dyn UsbDevice> {
         match self {
             UsbDeviceType::Null => {
-                Box::new(demo_state_tracker::NullUsbDevice::default())
+                Box::new(demo_state_tracker::NullUsbDevice::new(port_wake_hdl))
             }
             UsbDeviceType::HidTablet => {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
@@ -76,6 +77,8 @@ impl UsbDeviceType {
 }
 
 pub trait UsbDevice: Send + Sync + 'static {
+    /// Resets EDTLA (xHCI 1.2 sect 4.11.5.2)
+    fn new_transfer_descriptor(&self);
     fn setup_stage(
         &mut self,
         endpoint_id: EndpointId,
@@ -84,10 +87,10 @@ pub trait UsbDevice: Send + Sync + 'static {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        data_buffer: PointerOrImmediate,
+        trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<usize>;
+    ) -> Result<()>;
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
@@ -97,14 +100,14 @@ pub trait UsbDevice: Send + Sync + 'static {
     fn normal(
         &mut self,
         endpoint_id: EndpointId,
-        normal_td: &[TransferTrb],
-    ) -> Result<Option<EventInfo>>; // TODO: eventinfo construction in xhci module
+        trbs: &[TransferTrb],
+    ) -> Result<()>;
     fn status_stage(
         &mut self,
         endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()>;
-    fn set_address(&self, slot_id: SlotId, _port_id: PortId) {}
+    fn set_address(&self, _slot_id: SlotId, _port_id: PortId) {}
     fn import(
         &mut self,
         payload: &migrate::UsbDeviceV1,

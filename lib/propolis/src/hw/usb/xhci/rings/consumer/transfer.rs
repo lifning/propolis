@@ -10,7 +10,7 @@ use crate::hw::usb::usbdev::UsbDevice;
 use crate::hw::usb::xhci::bits::ring_data::{
     Trb, TrbDirection, TrbTransferType, TrbType,
 };
-use crate::hw::usb::xhci::device_slots::SlotId;
+use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
 use crate::hw::usb::xhci::rings::consumer::TrbCompletionCode;
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::vmm::MemCtx;
@@ -364,58 +364,21 @@ pub struct TransferEventParams {
 }
 
 impl TransferInfo {
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(
+    fn run(
         self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
-        evt_data_xfer_len_accum: &mut u32,
         usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
         log: &slog::Logger,
-    ) -> Vec<TransferEventParams> {
-        let mut event_params = self.run_inner(
-            slot_id,
-            endpoint_id,
-            evt_data_xfer_len_accum,
-            usbdev,
-            memctx,
-            log,
-        );
-        for TransferEventParams { evt_info, .. } in &mut event_params {
-            let EventInfo::Transfer { trb_transfer_length, event_data, .. } =
-                evt_info
-            else {
-                continue;
-            };
-
-            if *event_data {
-                // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
-                // the number of bytes transferred are added to the EDTLA,
-                // wrapping at 24-bit max (16,777,215)
-                *evt_data_xfer_len_accum &= 0xffffff;
-                // xHCI 1.2 table 6-38: if Event Data flag is 1, this field
-                // is set to the value of EDTLA
-                *trb_transfer_length = *evt_data_xfer_len_accum;
-            }
-        }
-        event_params
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run_inner(
-        self,
-        slot_id: SlotId,
-        endpoint_id: EndpointId,
-        evt_data_xfer_len_accum: &mut u32,
-        usbdev: &mut Box<dyn UsbDevice>,
-        memctx: &MemCtx,
-        log: &slog::Logger,
-    ) -> Vec<TransferEventParams> {
+    ) {
         if let TransferInfo::EventData(ed) = &self {
             if ed.interrupt_on_completion() {
                 // xHCI 1.2 sect 4.11.5.2:
                 // EDTLA set to 0 prior to executing the first Transfer TRB of a TD
+
+                /* TODO: is this right for Event Data TD?
+
                 let trb_transfer_length = *evt_data_xfer_len_accum;
                 *evt_data_xfer_len_accum = 0;
 
@@ -431,12 +394,13 @@ impl TransferInfo {
                     interrupter: ed.interrupter_target(),
                     block_event_interrupt: ed.block_event_interrupt(),
                 }];
+                */
             }
         }
 
         // xHCI 1.2 sect 4.11.5.2:
         // EDTLA set to 0 prior to executing the first Transfer TRB of a TD
-        *evt_data_xfer_len_accum = 0;
+        usbdev.new_transfer_descriptor();
 
         match self {
             TransferInfo::Normal(xfer_trbs) => {
@@ -448,11 +412,11 @@ impl TransferInfo {
                         interrupter,
                         block_event_interrupt: false,
                     }],
-                    Ok(None) => Vec::new(),
+                    Ok(None) => (),
                     Err(e) => {
                         slog::error!(log, "USB Normal TD: {e}");
-                        vec![TransferEventParams {
-                            evt_info: EventInfo::Transfer {
+                        usbdev.event_sender().enqueue_event(
+                            EventInfo::Transfer {
                                 trb_pointer,
                                 completion_code:
                                     TrbCompletionCode::UsbTransactionError,
@@ -461,9 +425,8 @@ impl TransferInfo {
                                 endpoint_id,
                                 event_data: false,
                             },
-                            interrupter,
-                            block_event_interrupt: false,
-                        }]
+                            false,
+                        );
                     }
                 }
             }
@@ -520,55 +483,14 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                let (trb_transfer_length, completion_code) = match usbdev
-                    .data_stage(endpoint_id, &transfer_trbs, req_dir, &memctx)
-                {
-                    Ok(x) => (x as u32, TrbCompletionCode::Success),
-                    Err(e) => {
-                        slog::error!(log, "USB Data Stage: {e}");
-                        (0, TrbCompletionCode::UsbTransactionError)
-                    }
+                if let Err(e) = usbdev.data_stage(
+                    endpoint_id,
+                    &transfer_trbs,
+                    req_dir,
+                    &memctx,
+                ) {
+                    slog::error!(log, "USB Data Stage: {e}");
                 };
-                // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
-                // the number of bytes transferred are added to the EDTLA
-                // (we wrap to 24-bits before using the value elsewhere)
-                *evt_data_xfer_len_accum += trb_transfer_length;
-
-                interrupt_target_on_completion
-                    .map(|interrupter| TransferEventParams {
-                        evt_info: EventInfo::Transfer {
-                            trb_pointer,
-                            completion_code,
-                            trb_transfer_length,
-                            slot_id,
-                            endpoint_id,
-                            event_data: false,
-                        },
-                        interrupter,
-                        block_event_interrupt: false,
-                    })
-                    .into_iter()
-                    .chain(event_data.and_then(|ed| {
-                        ed.interrupt_on_completion().then_some(
-                            TransferEventParams {
-                                evt_info: EventInfo::Transfer {
-                                    trb_pointer: GuestAddr(ed.event_data()),
-                                    // xHCI 1.2 sect 4.11.5.2: Event Data
-                                    // inherits the completion code of the
-                                    // previous TRB
-                                    completion_code,
-                                    trb_transfer_length: 0,
-                                    slot_id,
-                                    endpoint_id,
-                                    event_data: true,
-                                },
-                                interrupter: ed.interrupter_target(),
-                                block_event_interrupt: ed
-                                    .block_event_interrupt(),
-                            },
-                        )
-                    }))
-                    .collect()
             }
             TransferInfo::StatusStage {
                 interrupt_target_on_completion,

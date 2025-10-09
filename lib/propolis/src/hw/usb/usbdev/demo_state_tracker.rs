@@ -4,7 +4,9 @@
 
 use crate::{
     hw::usb::xhci::{
+        controller::XhciPortWakeHandle,
         device_slots::{EndpointId, SlotId},
+        interrupter::EventSender,
         rings::{
             consumer::transfer::{PointerOrImmediate, TransferTrb},
             producer::event::EventInfo,
@@ -24,18 +26,22 @@ use super::{
 };
 
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
-#[derive(Default)]
 pub struct NullUsbDevice {
     control_endpoint: ControlEndpoint<NoClassRequestInfo>,
+    port_wake_hdl: XhciPortWakeHandle,
 }
 
 impl UsbDevice for NullUsbDevice {
+    fn new_transfer_descriptor(&self) {
+        self.port_wake_hdl.event_sender.reset_edtla();
+    }
+
     fn setup_stage(
         &mut self,
         endpoint_id: EndpointId,
         setup: SetupData,
     ) -> Result<()> {
-        if endpoint_id != 1 {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         if let Some(req) = self.control_endpoint.setup_stage(setup)? {
@@ -48,14 +54,14 @@ impl UsbDevice for NullUsbDevice {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        data_buffer: PointerOrImmediate,
+        trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<usize> {
-        if endpoint_id != 1 {
+    ) -> Result<()> {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
-        self.control_endpoint.data_stage(data_buffer, data_direction, memctx)
+        self.control_endpoint.data_stage(trbs, data_direction, memctx)
     }
 
     fn status_stage(
@@ -63,7 +69,7 @@ impl UsbDevice for NullUsbDevice {
         endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if endpoint_id != 1 {
+        if u8::from(endpoint_id) != 1 {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         match self.control_endpoint.status_stage(status_direction)? {
@@ -135,6 +141,10 @@ impl NullUsbDevice {
     const SERIAL_INDEX: StringIndex = StringIndex(3);
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
+
+    pub fn new(port_wake_hdl: XhciPortWakeHandle) -> Self {
+        Self { control_endpoint: Default::default(), port_wake_hdl }
+    }
 
     fn device_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {

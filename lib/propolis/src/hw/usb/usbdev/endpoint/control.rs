@@ -6,7 +6,7 @@ use core::fmt::Debug;
 use std::marker::PhantomData;
 
 use crate::{
-    common::{GuestAddr, GuestData, GuestRegion},
+    common::{GuestData, GuestRegion},
     hw::usb::{
         usbdev::{
             descriptor::DescriptorType,
@@ -15,14 +15,8 @@ use crate::{
             },
             Error, Result,
         },
-        xhci::{
-            bits::ring_data::TrbCompletionCode,
-            rings::{
-                consumer::transfer::{
-                    PointerOrImmediate, TransferEventParams, TransferTrb,
-                },
-                producer::event::EventInfo,
-            },
+        xhci::rings::consumer::transfer::{
+            PointerOrImmediate, TransferEventParams, TransferTrb,
         },
     },
     vmm::MemCtx,
@@ -56,43 +50,7 @@ where
     }
 }
 
-fn completion_events_for_trb(
-    trb: &TransferTrb,
-    completion_code: TrbCompletionCode,
-    bytes_transferred: usize,
-) -> Vec<TransferEventParams> {
-    let interrupter = trb.interrupter_target();
-    trb.interrupt_on_completion()
-        .then_some(TransferEventParams {
-            evt_info: EventInfo::Transfer {
-                trb_pointer: trb.trb_pointer(),
-                completion_code,
-                trb_transfer_length: bytes_transferred as u32,
-                slot_id,
-                endpoint_id,
-                event_data: false,
-            },
-            interrupter,
-            block_event_interrupt: trb.block_event_interrupt(),
-        })
-        .into_iter()
-        .chain(trb.event_data().and_then(|edtrb| {
-            edtrb.interrupt_on_completion().then_some(TransferEventParams {
-                evt_info: EventInfo::Transfer {
-                    trb_pointer: GuestAddr(edtrb.event_data()),
-                    completion_code,
-                    trb_transfer_length: (),
-                    slot_id,
-                    endpoint_id,
-                    event_data: true,
-                },
-                interrupter,
-                block_event_interrupt: edtrb.block_event_interrupt(),
-            })
-        }))
-        .collect()
-}
-
+// WIP: common code for control *and* interrupt transfers
 fn transfer_in(
     trb: &TransferTrb,
     payload: &[u8],
@@ -186,7 +144,7 @@ where
                     }
                     RequestDirection::HostToDevice => {
                         let payload = self.payload.get_or_insert_default();
-                        match xfer_trbs {
+                        match trb.data_buffer() {
                             PointerOrImmediate::Pointer(GuestRegion(
                                 ptr,
                                 len,

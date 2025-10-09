@@ -24,7 +24,7 @@ use crate::hw::usb::xhci::rings::consumer::doorbell;
 use crate::migrate::{MigrateMulti, Migrator};
 use crate::vmm::{time, VmmHdl};
 
-use super::device_slots::{DeviceSlotTable, EndpointId};
+use super::device_slots::DeviceSlotTable;
 use super::interrupter::EventSender;
 use super::port::XhciUsbPort;
 use super::rings::consumer::command::CommandRing;
@@ -205,7 +205,7 @@ impl XhciPortWakeHandleCollection {
 pub struct XhciPortWakeHandle {
     acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
-    event_sender: EventSender,
+    pub(crate) event_sender: EventSender,
     port_id: PortId,
     log: slog::Logger,
 }
@@ -230,6 +230,7 @@ impl XhciPortWakeHandle {
     }
 
     /// Complete a transaction and post the given Event TRBs to the Event Ring
+    /// WIP: replacing with EventSender.send_completion_events_for_trb
     pub fn write_data_and_send_events(
         &self,
         data: &[u8],

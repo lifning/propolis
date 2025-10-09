@@ -33,6 +33,8 @@ pub enum Error {
     InvalidEventRingSegmentSize(EventRingSegment),
     #[error("Interrupter error")]
     Interrupter,
+    #[error("Tried to enqueue Event TRB in absent Event Ring")]
+    NoEventRing,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 

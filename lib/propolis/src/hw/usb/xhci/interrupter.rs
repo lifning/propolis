@@ -49,6 +49,9 @@ struct InterruptRegulation {
     // ERDP contains Event Handler Busy
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
 
+    /// Event Data Transfer Length Accumulator (EDTLA).
+    evt_data_transfer_len_accum: u32,
+
     // IMOD pending has special meaning for INTxPin support,
     // but we still need to
     intr_pending_enable: bool,
@@ -325,11 +328,14 @@ impl EventSender {
 
             Ok(())
         } else {
-            Err(TrbRingProducerError::Interrupter)
+            Err(TrbRingProducerError::NoEventRing)
         }
     }
 
-    fn send_completion_events_for_trb(
+    pub fn reset_edtla(&self) {
+        self.interrupts.0.lock().unwrap().evt_data_transfer_len_accum = 0;
+    }
+    pub fn send_completion_events_for_trb(
         &self,
         trb: &TransferTrb,
         completion_code: TrbCompletionCode,
@@ -341,13 +347,23 @@ impl EventSender {
         if interrupter != 0 {
             // TODO: multiple interrupters unimplemented
         } else {
+            // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
+            // the number of bytes transferred are added to the EDTLA,
+            // wrapping at 24-bit max (16,777,215)
+            let edtla = {
+                let mut guard = self.interrupts.0.lock().unwrap();
+                guard.evt_data_transfer_len_accum += bytes_transferred as u32;
+                guard.evt_data_transfer_len_accum &= 0xffffff;
+                guard.evt_data_transfer_len_accum
+            };
+
             for evt in trb
                 .interrupt_on_completion()
                 .then_some(TransferEventParams {
                     evt_info: EventInfo::Transfer {
                         trb_pointer: trb.trb_pointer(),
                         completion_code,
-                        trb_transfer_length: bytes_transferred as u32,
+                        trb_transfer_length: bytes_transferred as u32, // TODO double check spec, different rules for shortpacket error code, etc.
                         slot_id,
                         endpoint_id,
                         event_data: false,
@@ -361,8 +377,13 @@ impl EventSender {
                         TransferEventParams {
                             evt_info: EventInfo::Transfer {
                                 trb_pointer: GuestAddr(edtrb.event_data()),
+                                // xHCI 1.2 sect 4.11.5.2: Event Data
+                                // inherits the completion code of the
+                                // previous TRB
                                 completion_code,
-                                trb_transfer_length: (), // TODO double check spec, different rules for shortpacket error code, etc.
+                                // xHCI 1.2 table 6-38: if Event Data flag is 1, this field
+                                // is set to the value of EDTLA
+                                trb_transfer_length: edtla,
                                 slot_id,
                                 endpoint_id,
                                 event_data: true,
