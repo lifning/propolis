@@ -14,7 +14,7 @@ use crate::{
     hw::usb::xhci::{
         bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
         controller::XhciPortWakeHandle,
-        device_slots::SlotId,
+        device_slots::{EndpointId, SlotId},
         rings::{
             consumer::transfer::{PointerOrImmediate, TransferTrb},
             producer::event::EventInfo,
@@ -59,7 +59,7 @@ struct PeriodicTransferPollThread {
     weak_data: Weak<(Mutex<InterruptInData>, Condvar)>,
     port_hdl: Weak<XhciPortWakeHandle>,
     slot_id: SlotId,
-    endpoint_id: u8,
+    endpoint_id: EndpointId,
 }
 
 impl PeriodicTransferPollThread {
@@ -132,53 +132,22 @@ impl PeriodicTransferPollThread {
         xfer: &TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
     ) {
-        let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
-            unreachable!()
+        if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
+            probes::usb_interrupt_xfer_shortpacket!(|| (
+                u8::from(self.slot_id),
+                u8::from(self.endpoint_id),
+                region.0 .0,
+                region.1,
+                0,
+            ));
         };
-        let completion_code = TrbCompletionCode::ShortPacket;
-        let mut evts = Vec::new();
-        /* XXX: this causes incorrect behavior when uncommented - why?
-        let should_interrupt_xfer = xfer.interrupt_on_short_packet;
-        evts.extend(should_interrupt_xfer.then_some(EventInfo::Transfer {
-            trb_pointer: xfer.trb_pointer,
-            completion_code,
-            // xHCI 1.2 sect 4.10.1, table 6-22:
-            // > The Length field of the Transfer Event shall be set to the residual number
-            // > of bytes *not* written to the Transfer TRBs’ data buffer.
-            //
-            // xHCI 1.2 sect 4.10.1.1.2:
-            // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
-            //
-            // (both emphases mine) So... is this the right thing to do?
-            trb_transfer_length: region.1 as u32,
-            slot_id: self.slot_id,
-            endpoint_id: self.endpoint_id,
-            event_data: false,
-        }));
-        */
-        if let Some(event_data) = &xfer.event_data() {
-            let should_interrupt_ed = event_data.interrupt_on_short_packet();
-            evts.extend(should_interrupt_ed.then_some(EventInfo::Transfer {
-                trb_pointer: GuestAddr(event_data.event_data()),
-                completion_code,
-                // xHCI 1.2 sect 4.10.1.1.1:
-                // > an Event Data Transfer Event shall be generated with the
-                // > Completion Code set to Short Packet and the Length field
-                // > set to the actual number of bytes received by the TD.
-                trb_transfer_length: 0,
-                slot_id: self.slot_id,
-                endpoint_id: self.endpoint_id,
-                event_data: true,
-            }))
-        }
-        probes::usb_interrupt_xfer_shortpacket!(|| (
-            u8::from(self.slot_id),
-            self.endpoint_id,
-            region.0 .0,
-            region.1,
+        port_hdl.event_sender.send_completion_events_for_trb(
+            xfer,
+            TrbCompletionCode::ShortPacket,
             0,
-        ));
-        port_hdl.write_data_and_send_events(&[], region, evts);
+            self.slot_id,
+            self.endpoint_id,
+        );
     }
 
     fn complete_transfer(
@@ -187,49 +156,25 @@ impl PeriodicTransferPollThread {
         xfer: TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
     ) {
-        let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
-            unreachable!()
-        };
-        // TODO: compare ptr.1 with data.len()
-        let completion_code = TrbCompletionCode::Success;
-        let should_interrupt_xfer =
-            xfer.interrupt_on_short_packet() || xfer.interrupt_on_completion();
-        let mut evts = Vec::new();
-        evts.extend(should_interrupt_xfer.then_some(EventInfo::Transfer {
-            trb_pointer: xfer.trb_pointer(),
-            completion_code,
-            // As above, so below.
-            // The wording in the xHCI spec about this field evidently trips up a lot of devices:
-            // https://github.com/torvalds/linux/commit/34b67198244f2d7d8409fa4eb76204c409c0c97e
-            trb_transfer_length: 0,
-            slot_id: self.slot_id,
-            endpoint_id: self.endpoint_id,
-            event_data: false,
-        }));
-        if let Some(event_data) = xfer.event_data() {
-            let should_interrupt_ed = event_data.interrupt_on_short_packet()
-                || event_data.interrupt_on_completion();
-            evts.extend(should_interrupt_ed.then_some(EventInfo::Transfer {
-                trb_pointer: GuestAddr(event_data.event_data()),
-                completion_code,
-                // xHCI 1.2 sect 4.10.1.1.1
-                // > If a Short Packet does not occur, then the last Event Data Transfer TRB shall
-                // > generate an Event Data Transfer Event with its Completion Code = Success
-                // > (assuming no errors) and TRB Transfer Length field equal to the number of bytes
-                // > transferred since the beginning of the TD
-                trb_transfer_length: data.len() as u32,
-                slot_id: self.slot_id,
-                endpoint_id: self.endpoint_id,
-                event_data: true,
-            }))
+        if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
+            let bytes_transferred = data.len().min(region.1);
+            if let Some(memctx) = port_hdl.mem_accessor().access() {
+                memctx.write_many(region.0, &data[..bytes_transferred]);
+                probes::usb_interrupt_xfer_complete!(|| (
+                    u8::from(self.slot_id),
+                    u8::from(self.endpoint_id),
+                    region.0 .0,
+                    region.1,
+                ));
+                port_hdl.event_sender.send_completion_events_for_trb(
+                    &xfer,
+                    TrbCompletionCode::Success,
+                    bytes_transferred,
+                    self.slot_id,
+                    self.endpoint_id,
+                );
+            }
         }
-        probes::usb_interrupt_xfer_complete!(|| (
-            u8::from(self.slot_id),
-            self.endpoint_id,
-            region.0 .0,
-            region.1,
-        ));
-        port_hdl.write_data_and_send_events(&data, region, evts);
     }
 }
 
@@ -243,7 +188,7 @@ impl InterruptInEndpoint {
         period: Duration,
         port_hdl: Weak<XhciPortWakeHandle>,
         slot_id: SlotId,
-        endpoint_id: u8,
+        endpoint_id: EndpointId,
     ) -> Self {
         let data = Arc::new((
             Mutex::new(InterruptInData {
@@ -267,7 +212,8 @@ impl InterruptInEndpoint {
             ))
             .spawn(move || {
                 periodic_poll_thread.main_loop();
-            });
+            })
+            .unwrap();
         Self { data, _jh }
     }
 

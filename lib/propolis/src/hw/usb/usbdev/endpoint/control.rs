@@ -66,7 +66,7 @@ fn transfer_in(
         .map(|region| memctx.write_from(region.0, payload, region.1))
     {
         Some(_) => todo!(),
-        None => completion_events_for_trb(trb),
+        None => send_completion_events_for_trb(trb),
     }
 }
 

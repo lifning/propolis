@@ -167,16 +167,11 @@ pub struct XhciPortWakeHandleCollection {
     acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
     handles: Mutex<HashMap<PortId, Arc<XhciPortWakeHandle>>>,
-    log: slog::Logger,
 }
 
 impl XhciPortWakeHandleCollection {
-    fn new(
-        acc_mem: MemAccessor,
-        state_weak: Weak<Mutex<XhciState>>,
-        log: slog::Logger,
-    ) -> Self {
-        Self { acc_mem, state_weak, handles: Default::default(), log }
+    fn new(acc_mem: MemAccessor, state_weak: Weak<Mutex<XhciState>>) -> Self {
+        Self { acc_mem, state_weak, handles: Default::default() }
     }
 
     pub(super) fn handle_for_port(
@@ -195,7 +190,6 @@ impl XhciPortWakeHandleCollection {
                     state_weak: self.state_weak.clone(),
                     event_sender: todo!(),
                     port_id,
-                    log: self.log.clone(),
                 })
             })
             .clone()
@@ -207,7 +201,6 @@ pub struct XhciPortWakeHandle {
     state_weak: Weak<Mutex<XhciState>>,
     pub(crate) event_sender: EventSender,
     port_id: PortId,
-    log: slog::Logger,
 }
 
 impl XhciPortWakeHandle {
@@ -229,24 +222,9 @@ impl XhciPortWakeHandle {
         }
     }
 
-    /// Complete a transaction and post the given Event TRBs to the Event Ring
-    /// WIP: replacing with EventSender.send_completion_events_for_trb
-    pub fn write_data_and_send_events(
-        &self,
-        data: &[u8],
-        region: GuestRegion,
-        evts: impl IntoIterator<Item = EventInfo>,
-    ) {
-        let memctx = self.acc_mem.access().unwrap();
-        memctx.write_many(region.0, data);
-        for evt in evts.into_iter() {
-            if let Err(e) = self.event_sender.enqueue_event(evt, false) {
-                slog::error!(
-                    self.log,
-                    "xHC: failed to enqueue transfer event: {e}"
-                );
-            }
-        }
+    // HACK
+    pub fn mem_accessor(&self) -> &MemAccessor {
+        &self.acc_mem
     }
 }
 

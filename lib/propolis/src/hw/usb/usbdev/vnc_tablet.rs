@@ -19,12 +19,7 @@ use crate::{
             bits::device_context::EndpointContext,
             controller::XhciPortWakeHandle,
             device_slots::{EndpointId, SlotId},
-            rings::{
-                consumer::transfer::{
-                    PointerOrImmediate, TransferEventParams, TransferTrb,
-                },
-                producer::event::EventInfo,
-            },
+            rings::consumer::transfer::{TransferEventParams, TransferTrb},
         },
     },
     vmm::MemCtx,
@@ -369,7 +364,7 @@ impl UsbDevice for HIDTabletDevice {
             return Err(Error::InvalidEndpoint(endpoint_id));
         }
         if let Some(req) = self.control_endpoint.setup_stage(setup)? {
-            eprintln!("in {endpoint_id}: {req:?}");
+            eprintln!("in {endpoint_id:?}: {req:?}");
             let payload = self.payload_for(req)?;
             self.control_endpoint.set_payload(payload)?;
         }
