@@ -2,15 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::sync::Arc;
+
 use crate::{
     hw::usb::xhci::{
         controller::XhciPortWakeHandle,
         device_slots::{EndpointId, SlotId},
-        interrupter::EventSender,
-        rings::{
-            consumer::transfer::{PointerOrImmediate, TransferTrb},
-            producer::event::EventInfo,
-        },
+        rings::consumer::transfer::TransferTrb,
     },
     vmm::MemCtx,
 };
@@ -27,8 +25,8 @@ use super::{
 
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 pub struct NullUsbDevice {
-    control_endpoint: ControlEndpoint<NoClassRequestInfo>,
-    port_wake_hdl: XhciPortWakeHandle,
+    control_endpoint: Option<ControlEndpoint<NoClassRequestInfo>>,
+    port_wake_hdl: Arc<XhciPortWakeHandle>,
 }
 
 impl UsbDevice for NullUsbDevice {
@@ -41,12 +39,11 @@ impl UsbDevice for NullUsbDevice {
         endpoint_id: EndpointId,
         setup: SetupData,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+        if let Some(req) =
+            self.control_ep_mut(endpoint_id)?.setup_stage(setup)?
+        {
             let payload = self.payload_for(req)?;
-            self.control_endpoint.set_payload(payload)?;
+            self.control_endpoint.as_mut().unwrap().set_payload(payload)?;
         }
         Ok(())
     }
@@ -58,10 +55,11 @@ impl UsbDevice for NullUsbDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        self.control_endpoint.data_stage(trbs, data_direction, memctx)
+        self.control_ep_mut(endpoint_id)?.data_stage(
+            trbs,
+            data_direction,
+            memctx,
+        )
     }
 
     fn status_stage(
@@ -69,10 +67,10 @@ impl UsbDevice for NullUsbDevice {
         endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        match self.control_endpoint.status_stage(status_direction)? {
+        match self
+            .control_ep_mut(endpoint_id)?
+            .status_stage(status_direction)?
+        {
             Some((req, _payload)) => match req {
                 ControlRequestInfo::SetConfiguration { configuration: _ } => {
                     // TODO: check config value
@@ -120,18 +118,25 @@ impl UsbDevice for NullUsbDevice {
 
     fn configure_endpoint(
         &mut self,
-        _slot_id: SlotId,
-        _endpoint_id: EndpointId,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
         _ep_ctx: &crate::hw::usb::xhci::bits::device_context::EndpointContext,
     ) {
+        if u8::from(endpoint_id) == 1 {
+            self.control_endpoint = Some(ControlEndpoint::new(
+                slot_id,
+                endpoint_id,
+                Arc::clone(&self.port_wake_hdl),
+            ));
+        }
     }
 
     fn normal(
         &mut self,
         _endpoint_id: EndpointId,
         _normal_td: &[TransferTrb],
-    ) -> Result<Option<EventInfo>> {
-        Ok(None)
+    ) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -142,8 +147,20 @@ impl NullUsbDevice {
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
-    pub fn new(port_wake_hdl: XhciPortWakeHandle) -> Self {
-        Self { control_endpoint: Default::default(), port_wake_hdl }
+    pub fn new(port_wake_hdl: Arc<XhciPortWakeHandle>) -> Self {
+        Self { control_endpoint: None, port_wake_hdl }
+    }
+
+    fn control_ep_mut(
+        &mut self,
+        endpoint_id: EndpointId,
+    ) -> Result<&mut ControlEndpoint<NoClassRequestInfo>> {
+        if u8::from(endpoint_id) != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        self.control_endpoint
+            .as_mut()
+            .ok_or(Error::EndpointNotConfigured(endpoint_id))
     }
 
     fn device_descriptor() -> DeviceDescriptor {

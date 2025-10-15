@@ -156,10 +156,10 @@ pub enum Error {
     InvalidSetupParamsForRequest(u8, RequestType, u16, u16),
     #[error("got a class-specific USB request on endpoint with unspecified class: {0:?}")]
     ClassRequestOnNonClassEndpoint(SetupData),
-    #[error(
-        "received packet on endpoint not present on this USB device: {0:?}"
-    )]
+    #[error("received packet on {0:?} not present on this USB device")]
     InvalidEndpoint(EndpointId),
+    #[error("received packet on {0:?} not yet configured on this USB device")]
+    EndpointNotConfigured(EndpointId),
     #[error("received Normal TD on interrupt endpoint with IOC unset")]
     NoInterruptOnCompletionOnInterruptTransfer,
 }

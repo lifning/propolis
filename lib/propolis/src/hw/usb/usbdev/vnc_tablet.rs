@@ -108,7 +108,7 @@ impl HIDTabletReport {
 }
 
 pub struct HIDTabletDevice {
-    control_endpoint: ControlEndpoint<HIDRequestInfo>,
+    control_endpoint: Option<ControlEndpoint<HIDRequestInfo>>,
     interrupt_endpoint: Option<InterruptInEndpoint>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
@@ -127,12 +127,36 @@ impl HIDTabletDevice {
         port_wake_hdl: Arc<XhciPortWakeHandle>,
     ) -> Self {
         Self {
-            control_endpoint: Default::default(),
+            control_endpoint: None,
             interrupt_endpoint: None,
             idle_duration_4ms: 0,
             report,
             port_wake_hdl,
         }
+    }
+
+    fn control_ep_mut(
+        &mut self,
+        endpoint_id: EndpointId,
+    ) -> Result<&mut ControlEndpoint<HIDRequestInfo>> {
+        if u8::from(endpoint_id) != 1 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        self.control_endpoint
+            .as_mut()
+            .ok_or(Error::EndpointNotConfigured(endpoint_id))
+    }
+
+    fn interrupt_ep_mut(
+        &mut self,
+        endpoint_id: EndpointId,
+    ) -> Result<&mut InterruptInEndpoint> {
+        if u8::from(endpoint_id) != 3 {
+            return Err(Error::InvalidEndpoint(endpoint_id));
+        }
+        self.interrupt_endpoint
+            .as_mut()
+            .ok_or(Error::EndpointNotConfigured(endpoint_id))
     }
 
     fn device_descriptor() -> DeviceDescriptor {
@@ -360,13 +384,12 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
         setup: SetupData,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        if let Some(req) = self.control_endpoint.setup_stage(setup)? {
+        if let Some(req) =
+            self.control_ep_mut(endpoint_id)?.setup_stage(setup)?
+        {
             eprintln!("in {endpoint_id:?}: {req:?}");
             let payload = self.payload_for(req)?;
-            self.control_endpoint.set_payload(payload)?;
+            self.control_endpoint.as_mut().unwrap().set_payload(payload)?;
         }
         Ok(())
     }
@@ -378,10 +401,11 @@ impl UsbDevice for HIDTabletDevice {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        self.control_endpoint.data_stage(xfer_trbs, data_direction, memctx)
+        self.control_ep_mut(endpoint_id)?.data_stage(
+            xfer_trbs,
+            data_direction,
+            memctx,
+        )
     }
 
     fn configure_endpoint(
@@ -390,21 +414,29 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     ) {
-        if u8::from(endpoint_id) == 3 {
-            let interrupt_in_endpoint = InterruptInEndpoint::new(
-                ep_ctx.interval_as_duration(),
-                Arc::downgrade(&self.port_wake_hdl),
-                slot_id,
-                endpoint_id,
-            );
-            // XXX ugly
-            self.report
-                .lock()
-                .unwrap()
-                .set_ep_data(interrupt_in_endpoint.data_ref());
-            self.interrupt_endpoint = Some(interrupt_in_endpoint);
-        } else {
-            eprintln!("wat");
+        match u8::from(endpoint_id) {
+            1 => {
+                self.control_endpoint = Some(ControlEndpoint::new(
+                    slot_id,
+                    endpoint_id,
+                    Arc::clone(&self.port_wake_hdl),
+                ));
+            }
+            3 => {
+                let interrupt_in_endpoint = InterruptInEndpoint::new(
+                    ep_ctx.interval_as_duration(),
+                    Arc::downgrade(&self.port_wake_hdl),
+                    slot_id,
+                    endpoint_id,
+                );
+                // XXX ugly
+                self.report
+                    .lock()
+                    .unwrap()
+                    .set_ep_data(interrupt_in_endpoint.data_ref());
+                self.interrupt_endpoint = Some(interrupt_in_endpoint);
+            }
+            _ => {}
         }
     }
 
@@ -412,16 +444,10 @@ impl UsbDevice for HIDTabletDevice {
         &mut self,
         endpoint_id: EndpointId,
         xfer_trbs: &[TransferTrb],
-    ) -> Result<Vec<TransferEventParams>> {
+    ) -> Result<()> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
-        if u8::from(endpoint_id) == 3 {
-            if let Some(ep) = &self.interrupt_endpoint {
-                ep.normal(xfer_trbs);
-            }
-            Ok(vec![])
-        } else {
-            Err(todo!())
-        }
+        self.interrupt_ep_mut(endpoint_id)?.normal(xfer_trbs);
+        Ok(())
     }
 
     fn status_stage(
@@ -429,12 +455,12 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
         status_direction: RequestDirection,
     ) -> Result<()> {
-        if u8::from(endpoint_id) != 1 {
-            return Err(Error::InvalidEndpoint(endpoint_id));
-        }
-        match self.control_endpoint.status_stage(status_direction)? {
+        match self
+            .control_ep_mut(endpoint_id)?
+            .status_stage(status_direction)?
+        {
             Some((req, _payload)) => {
-                eprintln!("out {endpoint_id}: {req:?}");
+                eprintln!("out {endpoint_id:?}: {req:?}");
                 match req {
                     ControlRequestInfo::SetConfiguration {
                         configuration: _,

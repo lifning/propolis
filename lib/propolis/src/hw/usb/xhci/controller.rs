@@ -268,7 +268,6 @@ impl PciXhci {
         let port_wake_handles = XhciPortWakeHandleCollection::new(
             pci_state.acc_mem.child(None),
             Arc::downgrade(&state),
-            log.clone(),
         );
 
         Arc::new(Self { pci_state, state, port_wake_handles, log })

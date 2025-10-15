@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use core::fmt::Debug;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
     common::{GuestData, GuestRegion},
@@ -15,8 +15,12 @@ use crate::{
             },
             Error, Result,
         },
-        xhci::rings::consumer::transfer::{
-            PointerOrImmediate, TransferEventParams, TransferTrb,
+        xhci::{
+            controller::XhciPortWakeHandle,
+            device_slots::{EndpointId, SlotId},
+            rings::consumer::transfer::{
+                PointerOrImmediate, TransferEventParams, TransferTrb,
+            },
         },
     },
     vmm::MemCtx,
@@ -31,23 +35,10 @@ where
     current_setup: Option<SetupData>,
     payload: Option<Vec<u8>>,
     bytes_transferred: usize,
+    slot_id: SlotId,
+    endpoint_id: EndpointId,
+    port_wake_hdl: Arc<XhciPortWakeHandle>,
     _spooky: PhantomData<C>,
-}
-
-// #[derive(Default)] would want T: Default, even as PhantomData
-impl<C> Default for ControlEndpoint<C>
-where
-    ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
-    C: TryFrom<SetupData, Error = Error> + Debug,
-{
-    fn default() -> Self {
-        Self {
-            current_setup: None,
-            payload: None,
-            bytes_transferred: 0,
-            _spooky: PhantomData,
-        }
-    }
 }
 
 // WIP: common code for control *and* interrupt transfers
@@ -75,6 +66,22 @@ where
     ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
     C: TryFrom<SetupData, Error = Error> + Debug,
 {
+    pub fn new(
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
+        port_wake_hdl: Arc<XhciPortWakeHandle>,
+    ) -> Self {
+        Self {
+            current_setup: None,
+            payload: None,
+            bytes_transferred: 0,
+            slot_id,
+            endpoint_id,
+            port_wake_hdl,
+            _spooky: PhantomData,
+        }
+    }
+
     pub fn set_payload(&mut self, payload: Vec<u8>) -> Result<()> {
         if let Some(setup) = &self.current_setup {
             if setup.direction() == RequestDirection::HostToDevice {
@@ -110,7 +117,7 @@ where
         xfer_trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
-    ) -> Result<Vec<TransferEventParams>> {
+    ) -> Result<()> {
         if let Some(setup_data) = self.current_setup.as_ref() {
             if data_direction != setup_data.direction() {
                 return Err(Error::SetupVsDataDirectionMismatch(
@@ -169,6 +176,13 @@ where
                         }
                     }
                 };
+                self.port_wake_hdl.event_sender.send_completion_events_for_trb(
+                    trb,
+                    completion_code,
+                    count,
+                    self.slot_id,
+                    self.endpoint_id,
+                );
                 self.bytes_transferred += count;
             }
             Ok(todo!())

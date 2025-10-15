@@ -9,17 +9,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    common::GuestAddr,
-    hw::usb::xhci::{
-        bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
-        controller::XhciPortWakeHandle,
-        device_slots::{EndpointId, SlotId},
-        rings::{
-            consumer::transfer::{PointerOrImmediate, TransferTrb},
-            producer::event::EventInfo,
-        },
-    },
+use crate::hw::usb::xhci::{
+    bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
+    controller::XhciPortWakeHandle,
+    device_slots::{EndpointId, SlotId},
+    rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
 };
 
 #[usdt::provider(provider = "propolis")]
