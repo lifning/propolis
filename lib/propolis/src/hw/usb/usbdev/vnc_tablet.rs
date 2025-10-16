@@ -16,10 +16,10 @@ use crate::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
         // XXX: some of this is abstraction leakage while figuring things out
         usb::xhci::{
-            bits::device_context::EndpointContext,
+            bits::{device_context::EndpointContext, MINIMUM_INTERVAL_TIME},
             controller::XhciPortWakeHandle,
             device_slots::{EndpointId, SlotId},
-            rings::consumer::transfer::{TransferEventParams, TransferTrb},
+            rings::consumer::transfer::TransferTrb,
         },
     },
     vmm::MemCtx,
@@ -501,25 +501,47 @@ impl UsbDevice for HIDTabletDevice {
         self.idle_duration_4ms = tablet_data.idle_duration_4ms;
         self.report.lock().unwrap() = tablet_data.report;
 
-        if let Some(ep) = endpoints.get(&1) {
-            self.control_endpoint.import(ep)?;
+        if let Some(ep_payload) = endpoints.get(&1) {
+            let super::endpoint::migrate::EndpointV1::Control(ctrl_ep_payload) =
+                ep_payload
+            else {
+                return Err(crate::migrate::MigrateStateError::ImportFailed(
+                    format!(
+                        "wrong endpoint type for USB Default Control Endpoint"
+                    ),
+                ));
+            };
+            if let Some(ctrl_ep) = self.control_endpoint.as_mut() {
+                ctrl_ep.import(ctrl_ep_payload);
+            } else {
+                self.control_endpoint = Some(ControlEndpoint::new_migrated(
+                    ctrl_ep_payload,
+                    Arc::clone(&self.port_wake_hdl),
+                ));
+            }
         } else {
-            return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB endpoint 0 missing"),
-            ));
+            self.control_endpoint = None;
         }
-        if let Some(ep) = endpoints.get(&3) {
-            let interrupt_ep_data = todo!("{ep:?}");
-            let interrupt_ep =
-                self.interrupt_endpoint.get_or_insert_with(|| {
-                    InterruptInEndpoint::new(
-                        period,
+        if let Some(ep_payload) = endpoints.get(&3) {
+            let super::endpoint::migrate::EndpointV1::InterruptIn(
+                intr_in_ep_payload,
+            ) = ep_payload
+            else {
+                return Err(crate::migrate::MigrateStateError::ImportFailed(
+                    format!(
+                        "wrong endpoint type for USB Interrupt IN Endpoint"
+                    ),
+                ));
+            };
+            if let Some(intr_ep) = self.interrupt_endpoint.as_mut() {
+                intr_ep.import(intr_in_ep_payload)?;
+            } else {
+                self.interrupt_endpoint =
+                    Some(InterruptInEndpoint::new_migrated(
+                        intr_in_ep_payload,
                         Arc::downgrade(&self.port_wake_hdl),
-                        slot_id,
-                        endpoint_id,
-                    )
-                });
-            interrupt_ep.import(ep)?;
+                    ));
+            }
         } else {
             self.interrupt_endpoint = None; // drop() terminates transfer thread
 
@@ -536,8 +558,12 @@ impl UsbDevice for HIDTabletDevice {
         super::migrate::UsbDeviceV1,
         crate::migrate::MigrateStateError,
     > {
-        let mut endpoints: BTreeMap<_, _> =
-            [(1, self.control_endpoint.export())].into_iter().collect();
+        let mut endpoints: BTreeMap<_, _> = self
+            .control_endpoint
+            .as_ref()
+            .map(|ctrl_ep| (1, ctrl_ep.export()))
+            .into_iter()
+            .collect();
         if let Some(interrupt_ep) = &self.interrupt_endpoint {
             endpoints.insert(3, interrupt_ep.export()?);
         }
@@ -552,7 +578,10 @@ pub mod migrate {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Debug)]
-    pub struct TabletDeviceV1 {}
+    pub struct TabletDeviceV1 {
+        pub report: (), // TODO
+        pub idle_duration_4ms: u8,
+    }
 }
 
 #[cfg(test)]

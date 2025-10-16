@@ -92,11 +92,16 @@ impl UsbDevice for NullUsbDevice {
                 format!("USB device type mismatch {device_type:?} != Null"),
             ));
         };
-        if let Some(ep) = endpoints.get(&0) {
-            self.control_endpoint.import(ep)?;
+        if let Some(super::endpoint::migrate::EndpointV1::Control(ep)) =
+            endpoints.get(&0)
+        {
+            self.control_endpoint = Some(ControlEndpoint::new_migrated(
+                ep,
+                Arc::clone(&self.port_wake_hdl),
+            ));
         } else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB endpoint 0 missing"),
+                format!("USB Default Control Endpoint missing from payload"),
             ));
         }
         Ok(())

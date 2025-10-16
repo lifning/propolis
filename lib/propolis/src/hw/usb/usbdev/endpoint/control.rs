@@ -31,7 +31,6 @@ where
     ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
     C: TryFrom<SetupData, Error = Error> + Debug,
 {
-    // TODO: slot and endpoint ID in constructor
     current_setup: Option<SetupData>,
     payload: Option<Vec<u8>>,
     bytes_transferred: usize,
@@ -39,26 +38,6 @@ where
     endpoint_id: EndpointId,
     port_wake_hdl: Arc<XhciPortWakeHandle>,
     _spooky: PhantomData<C>,
-}
-
-// WIP: common code for control *and* interrupt transfers
-fn transfer_in(
-    trb: &TransferTrb,
-    payload: &[u8],
-    memctx: &MemCtx,
-) -> Vec<TransferEventParams> {
-    let region_opt =
-        if let PointerOrImmediate::Pointer(region) = trb.data_buffer() {
-            Some(region)
-        } else {
-            None
-        };
-    match region_opt
-        .map(|region| memctx.write_from(region.0, payload, region.1))
-    {
-        Some(_) => todo!(),
-        None => send_completion_events_for_trb(trb),
-    }
 }
 
 impl<C> ControlEndpoint<C>
@@ -80,6 +59,19 @@ where
             port_wake_hdl,
             _spooky: PhantomData,
         }
+    }
+
+    pub fn new_migrated(
+        value: &migrate::ControlEndpointV1,
+        port_wake_hdl: Arc<XhciPortWakeHandle>,
+    ) -> Self {
+        let mut new = Self::new(
+            SlotId::from(value.slot_id),
+            EndpointId::from(value.endpoint_id),
+            port_wake_hdl,
+        );
+        new.import(&value);
+        new
     }
 
     pub fn set_payload(&mut self, payload: Vec<u8>) -> Result<()> {
@@ -218,30 +210,37 @@ where
         }
     }
 
-    pub fn import(
-        &mut self,
-        value: &super::migrate::EndpointV1,
-    ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
-        let super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {
+    pub fn import(&mut self, value: &migrate::ControlEndpointV1) {
+        let migrate::ControlEndpointV1 {
             current_setup,
             payload,
             bytes_transferred,
-        }) = value
-        else {
-            return Err(todo!());
-        };
+            slot_id,
+            endpoint_id,
+        } = value;
         self.current_setup = current_setup.map(|x| SetupData(x));
         self.payload = payload.to_owned();
         self.bytes_transferred = *bytes_transferred;
-        Ok(())
+        self.slot_id = SlotId::from(*slot_id);
+        self.endpoint_id = EndpointId::from(*endpoint_id);
     }
 
     pub fn export(&self) -> super::migrate::EndpointV1 {
-        let Self { current_setup, payload, bytes_transferred, _spooky } = self;
+        let Self {
+            current_setup,
+            payload,
+            bytes_transferred,
+            slot_id,
+            endpoint_id,
+            _spooky,
+            port_wake_hdl: _,
+        } = self;
         super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {
             current_setup: current_setup.as_ref().map(|x| x.0),
             payload: payload.to_owned(),
             bytes_transferred: *bytes_transferred,
+            slot_id: u8::from(slot_id),
+            endpoint_id: u8::from(endpoint_id),
         })
     }
 }
@@ -322,6 +321,8 @@ impl TryFrom<SetupData> for NoClassRequestInfo {
 }
 
 pub mod migrate {
+    use super::ControlRequestInfo;
+    use crate::hw::usb::usbdev::requests::SetupData;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -329,5 +330,7 @@ pub mod migrate {
         pub current_setup: Option<u64>,
         pub payload: Option<Vec<u8>>,
         pub bytes_transferred: usize,
+        pub slot_id: u8,
+        pub endpoint_id: u8,
     }
 }

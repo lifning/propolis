@@ -57,6 +57,28 @@ struct PeriodicTransferPollThread {
 }
 
 impl PeriodicTransferPollThread {
+    fn spawn(
+        port_hdl: Weak<XhciPortWakeHandle>,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
+        data: &Arc<(Mutex<InterruptInData>, Condvar)>,
+    ) -> JoinHandle<()> {
+        let periodic_poll_thread = PeriodicTransferPollThread {
+            weak_data: Arc::downgrade(data),
+            port_hdl,
+            slot_id,
+            endpoint_id,
+        };
+        std::thread::Builder::new()
+            .name(format!(
+                "xhci interrupt in endpoint {slot_id:?} {endpoint_id:?}"
+            ))
+            .spawn(move || {
+                periodic_poll_thread.main_loop();
+            })
+            .unwrap()
+    }
+
     fn main_loop(self) {
         while let Some(pair) = self.weak_data.upgrade() {
             let (mtx, cvar) = &*pair;
@@ -174,6 +196,8 @@ impl PeriodicTransferPollThread {
 
 pub struct InterruptInEndpoint {
     data: Arc<(Mutex<InterruptInData>, Condvar)>,
+    slot_id: SlotId,
+    endpoint_id: EndpointId,
     _jh: JoinHandle<()>,
 }
 
@@ -194,21 +218,45 @@ impl InterruptInEndpoint {
             }),
             Condvar::new(),
         ));
-        let periodic_poll_thread = PeriodicTransferPollThread {
-            weak_data: Arc::downgrade(&data),
+        let _jh = PeriodicTransferPollThread::spawn(
             port_hdl,
             slot_id,
             endpoint_id,
-        };
-        let _jh = std::thread::Builder::new()
-            .name(format!(
-                "xhci interrupt in endpoint {slot_id:?} {endpoint_id:?}"
-            ))
-            .spawn(move || {
-                periodic_poll_thread.main_loop();
-            })
-            .unwrap();
-        Self { data, _jh }
+            &data,
+        );
+        Self { data, slot_id, endpoint_id, _jh }
+    }
+
+    pub fn new_migrated(
+        value: &migrate::InterruptInEndpointV1,
+        port_hdl: Weak<XhciPortWakeHandle>,
+    ) -> Self {
+        let migrate::InterruptInEndpointV1 {
+            transfers,
+            payload,
+            period_ticks,
+            slot_id,
+            endpoint_id,
+        } = value;
+        let slot_id = SlotId::from(*slot_id);
+        let endpoint_id = EndpointId::from(*endpoint_id);
+        let data = Arc::new((
+            Mutex::new(InterruptInData {
+                transfers: transfers.into_iter().map(From::from).collect(),
+                payload: payload.to_owned(),
+                period: MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks),
+                terminate: false,
+                block_migration: false,
+            }),
+            Condvar::new(),
+        ));
+        let _jh = PeriodicTransferPollThread::spawn(
+            port_hdl,
+            slot_id,
+            endpoint_id,
+            &data,
+        );
+        Self { data, slot_id, endpoint_id, _jh }
     }
 
     pub fn normal(&self, xfer_trbs: &[TransferTrb]) {
@@ -223,12 +271,11 @@ impl InterruptInEndpoint {
 
     pub fn import(
         &mut self,
-        ep: &super::migrate::EndpointV1,
+        ep: &migrate::InterruptInEndpointV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         // TODO: can we unify the way this is represented for periodic / bulk / control
-        let super::migrate::EndpointV1::InterruptIn(
-            migrate::InterruptInEndpointV1 { transfers, payload, period_ticks },
-        ) = ep
+        let migrate::InterruptInEndpointV1 { transfers, payload, period_ticks } =
+            ep
         else {
             return Err(todo!());
         };
@@ -260,7 +307,7 @@ impl InterruptInEndpoint {
             block_migration: _,
         } = &*guard;
         if *terminate {
-            return Err(todo!()); // loop bailed from missing handle
+            return Err(crate::migrate::MigrateStateError::NotReadyForExport); // loop bailed from missing handle
         }
         let period_ticks =
             period.as_secs_f64() / MINIMUM_INTERVAL_TIME.as_secs_f64();
@@ -269,10 +316,13 @@ impl InterruptInEndpoint {
                 transfers: transfers.iter().map(From::from).collect(),
                 payload: payload.to_owned(),
                 period_ticks,
+                slot_id: u8::from(self.slot_id),
+                endpoint_id: u8::from(self.endpoint_id),
             },
         ))
     }
 }
+
 impl Drop for InterruptInEndpoint {
     fn drop(&mut self) {
         self.data.0.lock().unwrap().terminate = true;
@@ -290,5 +340,7 @@ pub mod migrate {
         pub transfers: Vec<TransferTrbV1>, // maybe?
         pub payload: Option<Vec<u8>>,
         pub period_ticks: f64,
+        pub slot_id: u8,
+        pub endpoint_id: u8,
     }
 }
