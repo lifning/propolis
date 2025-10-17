@@ -404,31 +404,7 @@ impl TransferInfo {
 
         match self {
             TransferInfo::Normal(xfer_trbs) => {
-                let interrupter = xfer_trbs.interrupter_target();
-                let trb_pointer = xfer_trbs.trb_pointer();
-                match usbdev.normal(endpoint_id, &xfer_trbs) {
-                    Ok(Some(evt_info)) => vec![TransferEventParams {
-                        evt_info,
-                        interrupter,
-                        block_event_interrupt: false,
-                    }],
-                    Ok(None) => (),
-                    Err(e) => {
-                        slog::error!(log, "USB Normal TD: {e}");
-                        usbdev.event_sender().enqueue_event(
-                            EventInfo::Transfer {
-                                trb_pointer,
-                                completion_code:
-                                    TrbCompletionCode::UsbTransactionError,
-                                trb_transfer_length: 0,
-                                slot_id,
-                                endpoint_id,
-                                event_data: false,
-                            },
-                            false,
-                        );
-                    }
-                }
+                usbdev.normal(endpoint_id, &xfer_trbs);
             }
             TransferInfo::SetupStage {
                 data,
@@ -475,7 +451,7 @@ impl TransferInfo {
                         block_event_interrupt: false,
                     })
                     .into_iter()
-                    .collect()
+                    .collect();
             }
             TransferInfo::DataStage { direction, transfer_trbs } => {
                 let req_dir = match direction {
@@ -543,22 +519,20 @@ impl TransferInfo {
                             },
                         )
                     }))
-                    .collect()
+                    .collect();
             }
 
             TransferInfo::Isoch {} => {
                 // unimplemented on purpose
                 slog::warn!(log, "Isochronous TD unimplemented");
-                Vec::new()
             }
             TransferInfo::EventData(tdevent_data) => {
                 slog::warn!(
                     log,
                     "Event Data TD unimplemented ({tdevent_data:?})"
                 );
-                Vec::new()
             }
-            TransferInfo::NoOp => Vec::new(),
+            TransferInfo::NoOp => {}
         }
     }
 }

@@ -16,11 +16,10 @@ use crate::{
             Error, Result,
         },
         xhci::{
+            bits::ring_data::TrbCompletionCode,
             controller::XhciPortWakeHandle,
             device_slots::{EndpointId, SlotId},
-            rings::consumer::transfer::{
-                PointerOrImmediate, TransferEventParams, TransferTrb,
-            },
+            rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
         },
     },
     vmm::MemCtx,
@@ -170,14 +169,14 @@ where
                 };
                 self.port_wake_hdl.event_sender.send_completion_events_for_trb(
                     trb,
-                    completion_code,
+                    TrbCompletionCode::Success,
                     count,
                     self.slot_id,
                     self.endpoint_id,
                 );
                 self.bytes_transferred += count;
             }
-            Ok(todo!())
+            Ok(())
         } else {
             Err(Error::NoSetupStageBefore("Data Stage"))
         }
@@ -239,8 +238,8 @@ where
             current_setup: current_setup.as_ref().map(|x| x.0),
             payload: payload.to_owned(),
             bytes_transferred: *bytes_transferred,
-            slot_id: u8::from(slot_id),
-            endpoint_id: u8::from(endpoint_id),
+            slot_id: u8::from(*slot_id),
+            endpoint_id: u8::from(*endpoint_id),
         })
     }
 }
@@ -321,8 +320,6 @@ impl TryFrom<SetupData> for NoClassRequestInfo {
 }
 
 pub mod migrate {
-    use super::ControlRequestInfo;
-    use crate::hw::usb::usbdev::requests::SetupData;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]

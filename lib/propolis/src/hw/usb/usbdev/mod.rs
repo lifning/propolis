@@ -14,12 +14,8 @@ use super::xhci::{
     bits::device_context::EndpointContext,
     controller::XhciPortWakeHandle,
     device_slots::{EndpointId, SlotId},
-    interrupter::EventSender,
     port::PortId,
-    rings::{
-        consumer::transfer::{PointerOrImmediate, TransferTrb},
-        producer::event::EventInfo,
-    },
+    rings::consumer::transfer::TransferTrb,
 };
 
 pub mod descriptor;
@@ -97,11 +93,7 @@ pub trait UsbDevice: Send + Sync + 'static {
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     );
-    fn normal(
-        &mut self,
-        endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
-    ) -> Result<()>;
+    fn normal(&mut self, endpoint_id: EndpointId, trbs: &[TransferTrb]);
     fn status_stage(
         &mut self,
         endpoint_id: EndpointId,

@@ -10,7 +10,7 @@ use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::vmm::MemCtx;
 
 use super::command::CommandInfo;
-use super::transfer::{TransferEventParams, TransferInfo};
+use super::transfer::TransferInfo;
 use super::TrbCompletionCode;
 
 pub fn command_ring_stop(

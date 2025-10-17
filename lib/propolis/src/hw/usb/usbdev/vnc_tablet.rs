@@ -8,18 +8,24 @@ use std::{
 };
 
 use bitstruct::bitstruct;
+use migrate::TabletDeviceV1;
 use rfb::proto::{MouseButtons, PointerEvent};
 use rgb_frame::Spec;
 
 use crate::{
+    common::GuestAddr,
     hw::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
         // XXX: some of this is abstraction leakage while figuring things out
         usb::xhci::{
-            bits::{device_context::EndpointContext, MINIMUM_INTERVAL_TIME},
+            bits::{
+                device_context::EndpointContext, ring_data::TrbCompletionCode,
+            },
             controller::XhciPortWakeHandle,
             device_slots::{EndpointId, SlotId},
-            rings::consumer::transfer::TransferTrb,
+            rings::{
+                consumer::transfer::TransferTrb, producer::event::EventInfo,
+            },
         },
     },
     vmm::MemCtx,
@@ -387,7 +393,7 @@ impl UsbDevice for HIDTabletDevice {
         if let Some(req) =
             self.control_ep_mut(endpoint_id)?.setup_stage(setup)?
         {
-            eprintln!("in {endpoint_id:?}: {req:?}");
+            // eprintln!("in {endpoint_id:?}: {req:?}");
             let payload = self.payload_for(req)?;
             self.control_endpoint.as_mut().unwrap().set_payload(payload)?;
         }
@@ -440,14 +446,31 @@ impl UsbDevice for HIDTabletDevice {
         }
     }
 
-    fn normal(
-        &mut self,
-        endpoint_id: EndpointId,
-        xfer_trbs: &[TransferTrb],
-    ) -> Result<()> {
+    fn normal(&mut self, endpoint_id: EndpointId, xfer_trbs: &[TransferTrb]) {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
-        self.interrupt_ep_mut(endpoint_id)?.normal(xfer_trbs);
-        Ok(())
+        match self.interrupt_ep_mut(endpoint_id) {
+            Ok(ep) => {
+                ep.normal(xfer_trbs);
+            }
+            Err(e) => {
+                let _: core::result::Result<_, _> =
+                    self.port_wake_hdl.event_sender.enqueue_event(
+                        EventInfo::Transfer {
+                            trb_pointer: xfer_trbs
+                                .first()
+                                .map(|trb| trb.trb_pointer())
+                                .unwrap_or(GuestAddr(0)),
+                            completion_code:
+                                TrbCompletionCode::EndpointNotEnabledError,
+                            trb_transfer_length: (),
+                            slot_id: self.slot_id.unwrap_or(SlotId::from(0)),
+                            endpoint_id,
+                            event_data: false,
+                        },
+                        false,
+                    );
+            }
+        }
     }
 
     fn status_stage(
@@ -460,7 +483,7 @@ impl UsbDevice for HIDTabletDevice {
             .status_stage(status_direction)?
         {
             Some((req, _payload)) => {
-                eprintln!("out {endpoint_id:?}: {req:?}");
+                // eprintln!("out {endpoint_id:?}: {req:?}");
                 match req {
                     ControlRequestInfo::SetConfiguration {
                         configuration: _,
@@ -499,7 +522,7 @@ impl UsbDevice for HIDTabletDevice {
         };
 
         self.idle_duration_4ms = tablet_data.idle_duration_4ms;
-        self.report.lock().unwrap() = tablet_data.report;
+        self.report.lock().unwrap().last_data = tablet_data.report_data;
 
         if let Some(ep_payload) = endpoints.get(&1) {
             let super::endpoint::migrate::EndpointV1::Control(ctrl_ep_payload) =
@@ -536,11 +559,15 @@ impl UsbDevice for HIDTabletDevice {
             if let Some(intr_ep) = self.interrupt_endpoint.as_mut() {
                 intr_ep.import(intr_in_ep_payload)?;
             } else {
-                self.interrupt_endpoint =
-                    Some(InterruptInEndpoint::new_migrated(
-                        intr_in_ep_payload,
-                        Arc::downgrade(&self.port_wake_hdl),
-                    ));
+                let interrupt_in_endpoint = InterruptInEndpoint::new_migrated(
+                    intr_in_ep_payload,
+                    Arc::downgrade(&self.port_wake_hdl),
+                );
+                self.report
+                    .lock()
+                    .unwrap()
+                    .set_ep_data(interrupt_in_endpoint.data_ref());
+                self.interrupt_endpoint = Some(interrupt_in_endpoint);
             }
         } else {
             self.interrupt_endpoint = None; // drop() terminates transfer thread
@@ -568,18 +595,24 @@ impl UsbDevice for HIDTabletDevice {
             endpoints.insert(3, interrupt_ep.export()?);
         }
         Ok(super::migrate::UsbDeviceV1 {
-            device_type: super::migrate::UsbDeviceTypeV1::Null,
+            device_type: super::migrate::UsbDeviceTypeV1::Tablet(
+                TabletDeviceV1 {
+                    report_data: self.report.lock().unwrap().last_data,
+                    idle_duration_4ms: self.idle_duration_4ms,
+                },
+            ),
             endpoints,
         })
     }
 }
 
 pub mod migrate {
+    use super::REPORT_SIZE;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Debug)]
     pub struct TabletDeviceV1 {
-        pub report: (), // TODO
+        pub report_data: [u8; REPORT_SIZE],
         pub idle_duration_4ms: u8,
     }
 }

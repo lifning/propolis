@@ -13,12 +13,13 @@ use bitvec::field::BitField;
 use device_slots::SlotId;
 
 use crate::accessors::MemAccessor;
-use crate::common::{GuestAddr, GuestRegion, Lifecycle, RWOp, ReadOp, WriteOp};
+use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
 use crate::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
 use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
 use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
+use crate::hw::usb::xhci::device_slots::EndpointId;
 use crate::hw::usb::xhci::port::PortId;
 use crate::hw::usb::xhci::rings::consumer::doorbell;
 use crate::migrate::{MigrateMulti, Migrator};
@@ -28,7 +29,6 @@ use super::device_slots::DeviceSlotTable;
 use super::interrupter::EventSender;
 use super::port::XhciUsbPort;
 use super::rings::consumer::command::CommandRing;
-use super::rings::producer::event::EventInfo;
 use super::{bits::values::*, registers::*, *};
 
 #[usdt::provider(provider = "propolis")]
@@ -166,12 +166,26 @@ impl XhciState {
 pub struct XhciPortWakeHandleCollection {
     acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
+    event_sender: Mutex<EventSender>,
     handles: Mutex<HashMap<PortId, Arc<XhciPortWakeHandle>>>,
 }
 
 impl XhciPortWakeHandleCollection {
-    fn new(acc_mem: MemAccessor, state_weak: Weak<Mutex<XhciState>>) -> Self {
-        Self { acc_mem, state_weak, handles: Default::default() }
+    fn new(
+        acc_mem: MemAccessor,
+        event_sender: EventSender,
+        state_weak: Weak<Mutex<XhciState>>,
+    ) -> Self {
+        Self {
+            acc_mem,
+            state_weak,
+            event_sender: Mutex::new(event_sender),
+            handles: Default::default(),
+        }
+    }
+
+    fn host_controller_reset(&self, event_sender: EventSender) {
+        *self.event_sender.lock().unwrap() = event_sender
     }
 
     pub(super) fn handle_for_port(
@@ -188,7 +202,7 @@ impl XhciPortWakeHandleCollection {
                         .acc_mem
                         .child(Some("xHCI interrupter handle".to_string())),
                     state_weak: self.state_weak.clone(),
-                    event_sender: todo!(),
+                    event_sender: self.event_sender.lock().unwrap().clone(),
                     port_id,
                 })
             })
@@ -265,8 +279,11 @@ impl PciXhci {
         let state =
             Arc::new(Mutex::new(XhciState::new(&pci_state, hdl, log.clone())));
 
+        let event_sender = state.lock().unwrap().event_sender.clone();
+
         let port_wake_handles = XhciPortWakeHandleCollection::new(
             pci_state.acc_mem.child(None),
+            event_sender,
             Arc::downgrade(&state),
         );
 
@@ -515,7 +532,6 @@ impl PciXhci {
                         &mut state.queued_device_connections,
                     );
                     for (port_id, usb_dev) in queued_conns {
-                        let memctx = self.pci_state.acc_mem.access().unwrap();
                         state.port_regs[port_id.as_index()].xhc_update_portsc(
                             &|portsc| {
                                 *portsc = portsc
@@ -593,8 +609,12 @@ impl PciXhci {
                     );
                     state.queued_device_connections = devices;
 
+                    // HACK
+                    self.port_wake_handles
+                        .host_controller_reset(state.event_sender.clone());
+
                     state.usbsts.set_controller_not_ready(false);
-                    slog::debug!(self.log, "xHC reset");
+                    slog::trace!(self.log, "xHC reset");
                     probes::xhci_reset!(|| ());
                     return;
                 }
@@ -604,7 +624,7 @@ impl PciXhci {
                     for interrupter in &mut state.interrupters {
                         interrupter.set_usbcmd_inte(usbcmd_inte);
                     }
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "Interrupter Enabled: {usbcmd_inte}",
                     );
@@ -804,7 +824,6 @@ impl PciXhci {
                         // USB2 ports are specified as being unable
                         // to fail the bus reset sequence.
 
-                        let memctx = self.pci_state.acc_mem.access().unwrap();
                         port.xhc_update_portsc(
                             &|portsc| {
                                 *portsc = portsc
@@ -867,7 +886,7 @@ impl PciXhci {
                     &mut state,
                     // safe: only valid slot ids in reg map
                     SlotId::from(slot_id),
-                    endpoint_id,
+                    EndpointId::from(endpoint_id),
                     &memctx,
                     &self.log,
                 );
@@ -918,10 +937,6 @@ impl PciXhci {
             state.mfindex_wrap_thread_generation = generation;
 
             let state_weak = Arc::downgrade(&self.state);
-            let acc_mem = self
-                .pci_state
-                .acc_mem
-                .child(Some("MFINDEX Wrap Event thread".to_string()));
 
             state.mfindex_wrap_thread = Some(
                 std::thread::Builder::new()
@@ -950,13 +965,12 @@ impl PciXhci {
                             let Some(state_arc) = state_weak.upgrade() else {
                                 break;
                             };
-                            let Ok(mut state) = state_arc.lock() else {
+                            let Ok(state) = state_arc.lock() else {
                                 break;
                             };
                             if state.mfindex_wrap_thread_generation
                                 == generation
                             {
-                                let memctx = acc_mem.access().unwrap();
                                 state
                                     .event_sender
                                     .enqueue_event(
@@ -968,7 +982,8 @@ impl PciXhci {
                                 break;
                             }
                         }
-                    }),
+                    })
+                    .unwrap(),
             );
         }
     }

@@ -84,6 +84,7 @@ impl XhciInterrupter {
                 moderation: bits::InterrupterModeration::default(),
                 evt_ring: None,
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
+                evt_data_transfer_len_accum: 0,
                 imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
                 intr_pending_enable: false,
                 pci_intr,
@@ -299,6 +300,15 @@ impl XhciInterrupter {
 pub struct EventSender {
     interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
     acc_mem: MemAccessor,
+}
+
+impl Clone for EventSender {
+    fn clone(&self) -> Self {
+        Self {
+            interrupts: Arc::clone(&self.interrupts),
+            acc_mem: self.acc_mem.child(None),
+        }
+    }
 }
 
 impl EventSender {

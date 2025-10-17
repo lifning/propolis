@@ -136,12 +136,7 @@ impl UsbDevice for NullUsbDevice {
         }
     }
 
-    fn normal(
-        &mut self,
-        _endpoint_id: EndpointId,
-        _normal_td: &[TransferTrb],
-    ) -> Result<()> {
-        Ok(())
+    fn normal(&mut self, _endpoint_id: EndpointId, _normal_td: &[TransferTrb]) {
     }
 }
 
