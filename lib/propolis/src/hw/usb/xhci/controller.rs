@@ -632,7 +632,7 @@ impl PciXhci {
 
                 // xHCI 1.2 Section 4.10.2.6
                 if cmd.host_system_error_enable() {
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "USBCMD HSEE unused (USBSTS HSE unimplemented)"
                     );

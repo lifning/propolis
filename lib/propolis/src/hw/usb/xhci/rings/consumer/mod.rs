@@ -5,6 +5,7 @@
 use std::marker::PhantomData;
 
 use crate::common::GuestAddr;
+use crate::hw::usb::usbdev;
 use crate::hw::usb::xhci::bits::ring_data::*;
 use crate::vmm::MemCtx;
 
@@ -29,7 +30,7 @@ mod probes {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("I/O error in xHC Ring: {0:?}")]
+    #[error("I/O error in xHC Ring: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Tried to construct Command Descriptor from multiple TRBs")]
     CommandDescriptorSize,
@@ -59,6 +60,10 @@ pub enum Error {
     CompleteCircuitOfMatchingCycleBits,
     #[error("Apparent corrupt Link TRB pointer (lower 4 bits nonzero): *{0:x?} = {1:#x}")]
     LinkTRBAlignment(GuestAddr, u64),
+    #[error("Attempted to issue SET_ADDRESS request through Transfer Ring at {0:x?}")]
+    SetAddressViaTRB(GuestAddr),
+    #[error("Error from USB device while executing TRB: {0}")]
+    USBErrorRunningTRB(#[from] usbdev::Error),
 }
 pub type Result<T> = core::result::Result<T, Error>;
 

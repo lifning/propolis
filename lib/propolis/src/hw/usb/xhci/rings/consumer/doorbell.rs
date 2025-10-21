@@ -67,8 +67,25 @@ pub fn process_transfer_ring(
                         break;
                     }
                 };
-                // WIP: move the event-enqueueing to the USB device's transfer handling
-                xfer.run(slot_id, endpoint_id, usbdev, &memctx, log);
+                let trb_ptr_opt = xfer.first_trb_pointer();
+                if let Err(e) =
+                    xfer.run(slot_id, endpoint_id, usbdev, &memctx, log)
+                {
+                    slog::error!(log, "Error executing Transfer Ring TRB: {e}");
+                    if let Some(trb_pointer) = trb_ptr_opt {
+                        // TODO: do we send an error for Event Data TRBs that were part of the TD too?
+                        let evt_info = EventInfo::Transfer {
+                            trb_pointer,
+                            completion_code:
+                                TrbCompletionCode::UsbTransactionError,
+                            trb_transfer_length: 0,
+                            slot_id,
+                            endpoint_id,
+                            event_data: false,
+                        };
+                        state.event_sender.enqueue_event(evt_info, false);
+                    }
+                }
             }
             Err(consumer::Error::EmptyTransferDescriptor) => {
                 slog::trace!(log, "Transfer Ring empty");

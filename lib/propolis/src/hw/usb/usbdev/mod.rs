@@ -93,7 +93,11 @@ pub trait UsbDevice: Send + Sync + 'static {
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     );
-    fn normal(&mut self, endpoint_id: EndpointId, trbs: &[TransferTrb]);
+    fn normal(
+        &mut self,
+        endpoint_id: EndpointId,
+        trbs: &[TransferTrb],
+    ) -> Result<()>;
     fn status_stage(
         &mut self,
         endpoint_id: EndpointId,

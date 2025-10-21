@@ -116,6 +116,7 @@ impl HIDTabletReport {
 pub struct HIDTabletDevice {
     control_endpoint: Option<ControlEndpoint<HIDRequestInfo>>,
     interrupt_endpoint: Option<InterruptInEndpoint>,
+    slot_id: Option<SlotId>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
     port_wake_hdl: Arc<XhciPortWakeHandle>,
@@ -135,6 +136,7 @@ impl HIDTabletDevice {
         Self {
             control_endpoint: None,
             interrupt_endpoint: None,
+            slot_id: None,
             idle_duration_4ms: 0,
             report,
             port_wake_hdl,
@@ -403,12 +405,12 @@ impl UsbDevice for HIDTabletDevice {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        xfer_trbs: &[TransferTrb],
+        trbs: &[TransferTrb],
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()> {
         self.control_ep_mut(endpoint_id)?.data_stage(
-            xfer_trbs,
+            trbs,
             data_direction,
             memctx,
         )
@@ -420,6 +422,7 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     ) {
+        self.slot_id = Some(slot_id);
         match u8::from(endpoint_id) {
             1 => {
                 self.control_endpoint = Some(ControlEndpoint::new(
@@ -446,7 +449,11 @@ impl UsbDevice for HIDTabletDevice {
         }
     }
 
-    fn normal(&mut self, endpoint_id: EndpointId, xfer_trbs: &[TransferTrb]) {
+    fn normal(
+        &mut self,
+        endpoint_id: EndpointId,
+        xfer_trbs: &[TransferTrb],
+    ) -> Result<()> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         match self.interrupt_ep_mut(endpoint_id) {
             Ok(ep) => {
@@ -462,7 +469,7 @@ impl UsbDevice for HIDTabletDevice {
                                 .unwrap_or(GuestAddr(0)),
                             completion_code:
                                 TrbCompletionCode::EndpointNotEnabledError,
-                            trb_transfer_length: (),
+                            trb_transfer_length: 0,
                             slot_id: self.slot_id.unwrap_or(SlotId::from(0)),
                             endpoint_id,
                             event_data: false,
@@ -471,6 +478,7 @@ impl UsbDevice for HIDTabletDevice {
                     );
             }
         }
+        Ok(())
     }
 
     fn status_stage(

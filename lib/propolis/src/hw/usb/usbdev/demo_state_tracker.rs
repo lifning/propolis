@@ -115,7 +115,10 @@ impl UsbDevice for NullUsbDevice {
     > {
         Ok(super::migrate::UsbDeviceV1 {
             device_type: super::migrate::UsbDeviceTypeV1::Null,
-            endpoints: [(0, self.control_endpoint.export())]
+            endpoints: self
+                .control_endpoint
+                .as_ref()
+                .map(|ep| (0, ep.export()))
                 .into_iter()
                 .collect(),
         })
@@ -136,7 +139,12 @@ impl UsbDevice for NullUsbDevice {
         }
     }
 
-    fn normal(&mut self, _endpoint_id: EndpointId, _normal_td: &[TransferTrb]) {
+    fn normal(
+        &mut self,
+        _endpoint_id: EndpointId,
+        _normal_td: &[TransferTrb],
+    ) -> Result<()> {
+        Ok(())
     }
 }
 

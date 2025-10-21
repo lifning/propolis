@@ -265,6 +265,20 @@ pub enum TransferInfo {
     NoOp,
 }
 
+impl TransferInfo {
+    pub fn first_trb_pointer(&self) -> Option<GuestAddr> {
+        match self {
+            Self::Normal(transfer_trbs)
+            | Self::DataStage { transfer_trbs, .. } => {
+                transfer_trbs.first().map(|trb| trb.trb_pointer())
+            }
+            Self::SetupStage { trb_pointer, .. }
+            | Self::StatusStage { trb_pointer, .. } => Some(*trb_pointer),
+            _ => None,
+        }
+    }
+}
+
 impl TryFrom<TransferDescriptor> for TransferInfo {
     type Error = Error;
 
@@ -364,14 +378,14 @@ pub struct TransferEventParams {
 }
 
 impl TransferInfo {
-    fn run(
+    pub fn run(
         self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
         log: &slog::Logger,
-    ) {
+    ) -> Result<()> {
         if let TransferInfo::EventData(ed) = &self {
             if ed.interrupt_on_completion() {
                 // xHCI 1.2 sect 4.11.5.2:
@@ -404,7 +418,7 @@ impl TransferInfo {
 
         match self {
             TransferInfo::Normal(xfer_trbs) => {
-                usbdev.normal(endpoint_id, &xfer_trbs);
+                usbdev.normal(endpoint_id, &xfer_trbs)?;.as_ref()
             }
             TransferInfo::SetupStage {
                 data,
@@ -419,39 +433,19 @@ impl TransferInfo {
                     );
                 }
                 // xHCI 1.2 sect 4.6.5
-                let completion_code = if matches!(
+                if matches!(
                     (
                         data.request_type(),
                         StandardRequest::from_repr(data.request())
                     ),
                     (RequestType::Standard, Some(StandardRequest::SetAddress))
                 ) {
-                    slog::error!(log, "attempted to issue a SET_ADDRESS request through a Transfer Ring");
-                    TrbCompletionCode::UsbTransactionError
-                } else {
-                    match usbdev.setup_stage(endpoint_id, data) {
-                        Ok(()) => TrbCompletionCode::Success,
-                        Err(e) => {
-                            slog::error!(log, "USB Setup Stage: {e}");
-                            TrbCompletionCode::UsbTransactionError
-                        }
-                    }
-                };
-                interrupt_target_on_completion
-                    .map(|interrupter| TransferEventParams {
-                        evt_info: EventInfo::Transfer {
-                            trb_pointer,
-                            completion_code,
-                            trb_transfer_length: 0,
-                            slot_id,
-                            endpoint_id,
-                            event_data: false,
-                        },
-                        interrupter,
-                        block_event_interrupt: false,
-                    })
-                    .into_iter()
-                    .collect();
+                    return Err(Error::SetAddressViaTRB(trb_pointer));
+                }
+
+                usbdev.setup_stage(endpoint_id, data)?;
+
+                // TODO send completion event from usbdev
             }
             TransferInfo::DataStage { direction, transfer_trbs } => {
                 let req_dir = match direction {
@@ -459,14 +453,12 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                if let Err(e) = usbdev.data_stage(
+                usbdev.data_stage(
                     endpoint_id,
                     &transfer_trbs,
                     req_dir,
-                    &memctx,
-                ) {
-                    slog::error!(log, "USB Data Stage: {e}");
-                };
+                    memctx,
+                )?;
             }
             TransferInfo::StatusStage {
                 interrupt_target_on_completion,
@@ -479,20 +471,13 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
-                let completion_code =
-                    match usbdev.status_stage(endpoint_id, req_dir) {
-                        Ok(()) => TrbCompletionCode::Success,
-                        Err(e) => {
-                            slog::error!(log, "USB Status Stage: {e}");
-                            TrbCompletionCode::UsbTransactionError
-                        }
-                    };
+                usbdev.status_stage(endpoint_id, req_dir)?;
 
                 interrupt_target_on_completion
                     .map(|interrupter| TransferEventParams {
                         evt_info: EventInfo::Transfer {
                             trb_pointer,
-                            completion_code,
+                            completion_code: TrbCompletionCode::Success,
                             trb_transfer_length: 0,
                             slot_id,
                             endpoint_id,
@@ -507,7 +492,7 @@ impl TransferInfo {
                             TransferEventParams {
                                 evt_info: EventInfo::Transfer {
                                     trb_pointer: GuestAddr(ed.event_data()),
-                                    completion_code,
+                                    completion_code: TrbCompletionCode::Success,
                                     trb_transfer_length: 0,
                                     slot_id,
                                     endpoint_id,
@@ -534,6 +519,7 @@ impl TransferInfo {
             }
             TransferInfo::NoOp => {}
         }
+        Ok(())
     }
 }
 
