@@ -394,7 +394,8 @@ impl DeviceSlotTable {
             if let Some(port_id) =
                 self.slot(slot_id).ok().and_then(|slot| slot.port_address)
             {
-                // TODO: issue 'set address' to USB device itself
+                // issue 'set address' to USB device itself,
+                // which configures its Default Control Endpoint
                 self.usbdev_for_slot(slot_id)
                     .ok()?
                     .set_address(slot_id, port_id);
@@ -421,13 +422,13 @@ impl DeviceSlotTable {
         // copy input ep0 ctx to output ep0 ctx
         memctx.write(out_ep0_addr, &ep0_ctx);
 
-        slog::debug!(
+        slog::trace!(
             self.log,
             "slot_ctx: in@{:#x} out@{:#x} {slot_ctx:?}",
             in_slot_addr.0,
             out_slot_addr.0
         );
-        slog::debug!(
+        slog::trace!(
             self.log,
             "ep0_ctx: in@{:#x} out@{:#x} {ep0_ctx:?}",
             in_ep0_addr.0,

@@ -35,6 +35,10 @@ pub enum Error {
     Interrupter,
     #[error("Tried to enqueue Event TRB in absent Event Ring")]
     NoEventRing,
+    #[error(
+        "Tried to enqueue Event TRB but EventSender's MemAccessor was removed from hierarchy"
+    )]
+    NoMemAccess,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 

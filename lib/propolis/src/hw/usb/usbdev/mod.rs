@@ -107,13 +107,15 @@ pub trait UsbDevice: Send + Sync + 'static {
         endpoint_id: EndpointId,
         trbs: &[TransferTrb],
     ) -> Result<()>;
+    /// Configures the Default Control Endpoint.
+    fn set_address(&mut self, slot_id: SlotId, port_id: PortId);
+    /// Configures other endpoints.
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     );
-    fn set_address(&self, _slot_id: SlotId, _port_id: PortId) {}
     fn import(
         &mut self,
         payload: &migrate::UsbDeviceV1,

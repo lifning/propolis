@@ -319,7 +319,8 @@ impl EventSender {
         block_event_interrupt: bool,
     ) -> Result<(), TrbRingProducerError> {
         let mut regulation = self.interrupts.0.lock().unwrap();
-        let memctx = self.acc_mem.access().unwrap();
+        let memctx =
+            self.acc_mem.access().ok_or(TrbRingProducerError::NoMemAccess)?;
         if let Some(evt_ring) = regulation.evt_ring.as_mut() {
             if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
                 slog::error!(

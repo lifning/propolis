@@ -416,6 +416,19 @@ impl UsbDevice for HIDTabletDevice {
         )
     }
 
+    fn set_address(
+        &mut self,
+        slot_id: SlotId,
+        _port_id: crate::hw::usb::xhci::port::PortId,
+    ) {
+        self.slot_id = Some(slot_id);
+        self.control_endpoint = Some(ControlEndpoint::new(
+            slot_id,
+            EndpointId::from(1),
+            Arc::clone(&self.port_wake_hdl),
+        ));
+    }
+
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
