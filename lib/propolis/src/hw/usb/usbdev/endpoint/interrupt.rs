@@ -274,18 +274,22 @@ impl InterruptInEndpoint {
         ep: &migrate::InterruptInEndpointV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         // TODO: can we unify the way this is represented for periodic / bulk / control
-        let migrate::InterruptInEndpointV1 { transfers, payload, period_ticks } =
-            ep
-        else {
-            return Err(todo!());
-        };
+        let migrate::InterruptInEndpointV1 {
+            transfers,
+            payload,
+            period_ticks,
+            slot_id,
+            endpoint_id,
+        } = ep;
         let guard = self.data.0.lock().unwrap();
         let mut guard =
             self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
         if guard.terminate {
             return Err(todo!()); // loop bailed from missing port handle
         }
-        guard.transfers = transfers.into_iter().map(From::from).collect();
+        self.slot_id = SlotId::from(*slot_id);
+        self.endpoint_id = EndpointId::from(*endpoint_id);
+        guard.transfers = transfers.iter().map(From::from).collect();
         guard.payload = payload.to_owned();
         guard.period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
 

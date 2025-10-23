@@ -103,6 +103,8 @@ where
         })
     }
 
+    /// Unlike [`setup_stage`] and [`status_stage`], this method puts its own
+    /// completion events into the Event Ring for each successful Transfer TRB.
     pub fn data_stage(
         &mut self,
         xfer_trbs: &[TransferTrb],

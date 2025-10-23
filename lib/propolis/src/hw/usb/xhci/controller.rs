@@ -760,20 +760,16 @@ impl PciXhci {
                     // xHCI 1.2 table 5-24
                     if crcr.command_stop() {
                         // wait for command ring idle, generate command completion event
-                        let memctx = self.pci_state.acc_mem.access().unwrap();
                         doorbell::command_ring_stop(
                             &mut state,
                             TrbCompletionCode::CommandRingStopped,
-                            &memctx,
                             &self.log,
                         );
                     } else if crcr.command_abort() {
                         // XXX: this doesn't actually abort ongoing processing
-                        let memctx = self.pci_state.acc_mem.access().unwrap();
                         doorbell::command_ring_stop(
                             &mut state,
                             TrbCompletionCode::CommandAborted,
-                            &memctx,
                             &self.log,
                         );
                     } else {

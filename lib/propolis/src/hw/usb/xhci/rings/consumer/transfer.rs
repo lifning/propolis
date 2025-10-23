@@ -11,8 +11,10 @@ use crate::hw::usb::xhci::bits::ring_data::{
     Trb, TrbDirection, TrbTransferType, TrbType,
 };
 use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
+use crate::hw::usb::xhci::interrupter::EventSender;
 use crate::hw::usb::xhci::rings::consumer::TrbCompletionCode;
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
+use crate::hw::usb::xhci::NUM_INTRS;
 use crate::vmm::MemCtx;
 
 use super::{ConsumerRing, Error, Result, WorkItem};
@@ -378,39 +380,43 @@ pub struct TransferEventParams {
 }
 
 impl TransferInfo {
+    /// This method enqueues completion events for successfully executed TRBs.
+    ///
+    /// *Caller* must put a USB Transaction Error event into the Event Ring
+    /// when Err(_) is returned.
     pub fn run(
         self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         usbdev: &mut Box<dyn UsbDevice>,
         memctx: &MemCtx,
+        event_sender: &EventSender,
         log: &slog::Logger,
     ) -> Result<()> {
-        if let TransferInfo::EventData(ed) = &self {
-            if ed.interrupt_on_completion() {
-                // xHCI 1.2 sect 4.11.5.2:
-                // EDTLA set to 0 prior to executing the first Transfer TRB of a TD
+        // FIXME: EventSender only supports one interrupter, so interrupter fields are ignored
+        const {
+            assert!(NUM_INTRS == 1);
+        }
 
-                /* TODO: is this right for Event Data TD?
-
-                let trb_transfer_length = *evt_data_xfer_len_accum;
-                *evt_data_xfer_len_accum = 0;
-
-                return vec![TransferEventParams {
-                    evt_info: EventInfo::Transfer {
-                        trb_pointer: GuestAddr(ed.event_data()),
+        let enqueue_success =
+            |trb_pointer, event_data, block_event_interrupt| {
+                if let Err(e) = event_sender.enqueue_event(
+                    EventInfo::Transfer {
+                        trb_pointer,
                         completion_code: TrbCompletionCode::Success,
-                        trb_transfer_length,
+                        trb_transfer_length: 0,
                         slot_id,
                         endpoint_id,
-                        event_data: true,
+                        event_data,
                     },
-                    interrupter: ed.interrupter_target(),
-                    block_event_interrupt: ed.block_event_interrupt(),
-                }];
-                */
-            }
-        }
+                    block_event_interrupt,
+                ) {
+                    slog::error!(
+                        log,
+                        "error enqueueing Transfer TRB completion event: {e}"
+                    )
+                }
+            };
 
         // xHCI 1.2 sect 4.11.5.2:
         // EDTLA set to 0 prior to executing the first Transfer TRB of a TD
@@ -418,7 +424,8 @@ impl TransferInfo {
 
         match self {
             TransferInfo::Normal(xfer_trbs) => {
-                usbdev.normal(endpoint_id, &xfer_trbs)?;.as_ref()
+                // responsible for enqueueing its own successful completion events
+                usbdev.normal(endpoint_id, &xfer_trbs)?;
             }
             TransferInfo::SetupStage {
                 data,
@@ -445,7 +452,9 @@ impl TransferInfo {
 
                 usbdev.setup_stage(endpoint_id, data)?;
 
-                // TODO send completion event from usbdev
+                if let Some(_interrupter) = interrupt_target_on_completion {
+                    enqueue_success(trb_pointer, false, false);
+                }
             }
             TransferInfo::DataStage { direction, transfer_trbs } => {
                 let req_dir = match direction {
@@ -453,6 +462,7 @@ impl TransferInfo {
                     TrbDirection::In => RequestDirection::DeviceToHost,
                 };
 
+                // responsible for enqueueing its own successful completion events
                 usbdev.data_stage(
                     endpoint_id,
                     &transfer_trbs,
@@ -473,38 +483,18 @@ impl TransferInfo {
 
                 usbdev.status_stage(endpoint_id, req_dir)?;
 
-                interrupt_target_on_completion
-                    .map(|interrupter| TransferEventParams {
-                        evt_info: EventInfo::Transfer {
-                            trb_pointer,
-                            completion_code: TrbCompletionCode::Success,
-                            trb_transfer_length: 0,
-                            slot_id,
-                            endpoint_id,
-                            event_data: false,
-                        },
-                        interrupter,
-                        block_event_interrupt: false,
-                    })
-                    .into_iter()
-                    .chain(event_data.and_then(|ed| {
-                        ed.interrupt_on_completion().then_some(
-                            TransferEventParams {
-                                evt_info: EventInfo::Transfer {
-                                    trb_pointer: GuestAddr(ed.event_data()),
-                                    completion_code: TrbCompletionCode::Success,
-                                    trb_transfer_length: 0,
-                                    slot_id,
-                                    endpoint_id,
-                                    event_data: true,
-                                },
-                                interrupter: ed.interrupter_target(),
-                                block_event_interrupt: ed
-                                    .block_event_interrupt(),
-                            },
-                        )
-                    }))
-                    .collect();
+                if let Some(_interrupter) = interrupt_target_on_completion {
+                    enqueue_success(trb_pointer, false, false);
+                }
+                if let Some(ed) = event_data {
+                    if ed.interrupt_on_completion() {
+                        enqueue_success(
+                            GuestAddr(ed.event_data()),
+                            true,
+                            ed.block_event_interrupt(),
+                        );
+                    }
+                }
             }
 
             TransferInfo::Isoch {} => {

@@ -75,11 +75,16 @@ impl UsbDeviceType {
 pub trait UsbDevice: Send + Sync + 'static {
     /// Resets EDTLA (xHCI 1.2 sect 4.11.5.2)
     fn new_transfer_descriptor(&self);
+    /// *Caller* must put an appropriate completion event into the Event Ring.
     fn setup_stage(
         &mut self,
         endpoint_id: EndpointId,
         setup: SetupData,
     ) -> Result<()>;
+    /// *Implementor* must insert completion events into the Event Ring for
+    /// each successful Transfer TRB.
+    /// *Caller* must put a USB Transaction Error event into the Event Ring
+    /// when Err(_) is returned.
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
@@ -87,22 +92,27 @@ pub trait UsbDevice: Send + Sync + 'static {
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()>;
+    /// *Caller* must put an appropriate completion event into the Event Ring.
+    fn status_stage(
+        &mut self,
+        endpoint_id: EndpointId,
+        status_direction: RequestDirection,
+    ) -> Result<()>;
+    /// *Implementor* must insert completion events into the Event Ring for
+    /// each successful Transfer TRB.
+    /// *Caller* must put a USB Transaction Error event into the Event Ring
+    /// when Err(_) is returned.
+    fn normal(
+        &mut self,
+        endpoint_id: EndpointId,
+        trbs: &[TransferTrb],
+    ) -> Result<()>;
     fn configure_endpoint(
         &mut self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         ep_ctx: &EndpointContext,
     );
-    fn normal(
-        &mut self,
-        endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
-    ) -> Result<()>;
-    fn status_stage(
-        &mut self,
-        endpoint_id: EndpointId,
-        status_direction: RequestDirection,
-    ) -> Result<()>;
     fn set_address(&self, _slot_id: SlotId, _port_id: PortId) {}
     fn import(
         &mut self,

@@ -16,7 +16,6 @@ use super::TrbCompletionCode;
 pub fn command_ring_stop(
     state: &mut XhciState,
     completion_code: TrbCompletionCode,
-    memctx: &MemCtx,
     log: &slog::Logger,
 ) {
     state.crcr.set_command_ring_running(false);
@@ -68,9 +67,14 @@ pub fn process_transfer_ring(
                     }
                 };
                 let trb_ptr_opt = xfer.first_trb_pointer();
-                if let Err(e) =
-                    xfer.run(slot_id, endpoint_id, usbdev, &memctx, log)
-                {
+                if let Err(e) = xfer.run(
+                    slot_id,
+                    endpoint_id,
+                    usbdev,
+                    &memctx,
+                    &state.event_sender,
+                    log,
+                ) {
                     slog::error!(log, "Error executing Transfer Ring TRB: {e}");
                     if let Some(trb_pointer) = trb_ptr_opt {
                         // TODO: do we send an error for Event Data TRBs that were part of the TD too?
