@@ -139,12 +139,19 @@ impl XhciInterrupter {
             InterrupterRegisters::EventRingSegmentTableSize => {
                 U32(self.evt_ring_seg_tbl_size.0)
             }
-            InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                U64(self.evt_ring_seg_base_addr.address().0)
+            InterrupterRegisters::EventRingSegmentTableBaseAddress1 => {
+                U32(self.evt_ring_seg_base_addr.address().0 as u32)
             }
-            InterrupterRegisters::EventRingDequeuePointer => {
+            InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
+                U32((self.evt_ring_seg_base_addr.address().0 >> 32) as u32)
+            }
+            InterrupterRegisters::EventRingDequeuePointer1 => {
                 let regulation = self.interrupts.0.lock().unwrap();
-                U64(regulation.evt_ring_deq_ptr.0)
+                U32(regulation.evt_ring_deq_ptr.0 as u32)
+            }
+            InterrupterRegisters::EventRingDequeuePointer2 => {
+                let regulation = self.interrupts.0.lock().unwrap();
+                U32((regulation.evt_ring_deq_ptr.0 >> 32) as u32)
             }
         }
     }
@@ -157,6 +164,7 @@ impl XhciInterrupter {
     ) -> RegRWOpValue {
         use RegRWOpValue::*;
 
+        let mut notify = false;
         let written_value = match intr_regs {
             InterrupterRegisters::Management => {
                 let iman = bits::InterrupterManagement(wo.read_u32());
@@ -179,7 +187,7 @@ impl XhciInterrupter {
                 }
                 // RW
                 regulation.management.set_enable(iman.enable());
-                self.interrupts.1.notify_one();
+                notify = true;
                 // remainder of register is reserved
                 U32(iman.0)
             }
@@ -196,7 +204,7 @@ impl XhciInterrupter {
                     )
                 {
                     regulation.imod_allow_at = inst;
-                    self.interrupts.1.notify_one();
+                    notify = true;
                 }
                 U32(regulation.moderation.0)
             }
@@ -205,24 +213,42 @@ impl XhciInterrupter {
                     bits::EventRingSegmentTableSize(wo.read_u32());
                 U32(self.evt_ring_seg_tbl_size.0)
             }
-            InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                self.evt_ring_seg_base_addr =
-                    bits::EventRingSegmentTableBaseAddress(wo.read_u64());
-                U64(self.evt_ring_seg_base_addr.0)
+            // subject to 64-bit split writes when AC64=1 (xHCI 1.2 sect 5.1)
+            InterrupterRegisters::EventRingSegmentTableBaseAddress1 => {
+                self.evt_ring_seg_base_addr.0 &= 0xFFFFFFFF00000000u64;
+                self.evt_ring_seg_base_addr.0 |= wo.read_u32() as u64;
+                U32(self.evt_ring_seg_base_addr.0 as u32)
             }
-            InterrupterRegisters::EventRingDequeuePointer => {
-                let erdp = bits::EventRingDequeuePointer(wo.read_u64());
+            InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
+                let val = wo.read_u32();
+                self.evt_ring_seg_base_addr.0 &= 0xFFFFFFFFu64;
+                self.evt_ring_seg_base_addr.0 |= (val as u64) << 32;
+                U32(val)
+            }
+            // also subject to 64-bit split writes
+            InterrupterRegisters::EventRingDequeuePointer1 => {
+                let erdp_low =
+                    bits::EventRingDequeuePointer(wo.read_u32() as u64);
                 let mut regulation = self.interrupts.0.lock().unwrap();
                 regulation.evt_ring_deq_ptr.set_dequeue_erst_segment_index(
-                    erdp.dequeue_erst_segment_index(),
+                    erdp_low.dequeue_erst_segment_index(),
                 );
-                regulation.evt_ring_deq_ptr.set_pointer(erdp.pointer());
                 // RW1C
-                if erdp.handler_busy() {
+                if erdp_low.handler_busy() {
                     regulation.evt_ring_deq_ptr.set_handler_busy(false);
+                    notify = true;
                 }
-                self.interrupts.1.notify_one();
-                U64(erdp.0)
+                regulation.evt_ring_deq_ptr.set_pointer(erdp_low.pointer());
+                U32(erdp_low.0 as u32)
+            }
+            InterrupterRegisters::EventRingDequeuePointer2 => {
+                let val = wo.read_u32();
+                let erdp_high_bits = (val as u64) << 32;
+                let mut regulation = self.interrupts.0.lock().unwrap();
+                regulation.evt_ring_deq_ptr.0 &= 0xFFFFFFFFu64;
+                regulation.evt_ring_deq_ptr.0 |= erdp_high_bits;
+                notify = true;
+                U32(val)
             }
         };
 
@@ -234,7 +260,7 @@ impl XhciInterrupter {
         if let Some(event_ring) = &mut regulation.evt_ring {
             match intr_regs {
                 InterrupterRegisters::EventRingSegmentTableSize
-                | InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                | InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
                     if let Err(e) =
                         event_ring.update_segment_table(erstba, erstsz, &memctx)
                     {
@@ -244,32 +270,35 @@ impl XhciInterrupter {
                         );
                     }
                 }
-                InterrupterRegisters::EventRingDequeuePointer => {
+                InterrupterRegisters::EventRingDequeuePointer2 => {
                     let empty_before = event_ring.is_empty();
                     event_ring.update_dequeue_pointer(erdp);
                     if !empty_before && event_ring.is_empty() {
                         // IPE should be set to 0 "when the Event Ring transitions to empty"
                         regulation.intr_pending_enable = false;
-                        self.interrupts.1.notify_one();
+                        notify = true;
                     }
                 }
                 _ => (),
             }
         } else {
             match intr_regs {
-                InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
                     match EventRing::new(erstba, erstsz, erdp, &memctx) {
                         Ok(evt_ring) => regulation.evt_ring = Some(evt_ring),
                         Err(e) => {
                             slog::error!(
                                 regulation.log,
-                                "Event Ring Segment Table update failed: {e}"
+                                "Event Ring creation failed: {e}"
                             );
                         }
                     }
                 }
                 _ => (),
             }
+        }
+        if notify {
+            self.interrupts.1.notify_one();
         }
 
         written_value
@@ -550,7 +579,7 @@ impl XhciPciIntr {
         mode: pci::IntrMode,
         pci_state: &pci::DeviceState,
     ) {
-        slog::debug!(self.log, "xHC set interrupt mode to {mode:?}");
+        slog::trace!(self.log, "xHC set interrupt mode to {mode:?}");
         self.pci_intr_mode = mode;
         self.msix_hdl = pci_state.msix_hdl();
         self.pin = pci_state.lintr_pin();

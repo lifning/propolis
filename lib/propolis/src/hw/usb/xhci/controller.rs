@@ -783,8 +783,9 @@ impl PciXhci {
                 }
                 U32(crcr.0 as u32)
             }
-            // xHCI 5.1 - 64-bit registers can be written as {lower dword, upper dword},
-            // and in CRCR's case this matters, because read-modify-write for each half
+            // xHCI 1.2 sect 5.1 - with AC64 true, 64-bit registers can be
+            // written as {lower dword, upper dword} by certain guests, and in
+            // CRCR's case this matters, because read-modify-write for each half
             // doesn't work when reads are defined to return 0.
             Op(CommandRingControlRegister2) => {
                 let mut state = self.state.lock().unwrap();
@@ -796,6 +797,8 @@ impl PciXhci {
                 }
                 U32(val)
             }
+            // as noted above: we may wish to split this into halves if there's
+            // a chance we'd do anything with DCBAAP in between the two writes
             Op(DeviceContextBaseAddressArrayPointerRegister) => {
                 let mut state = self.state.lock().unwrap();
                 let dcbaap = GuestAddr(wo.read_u64());

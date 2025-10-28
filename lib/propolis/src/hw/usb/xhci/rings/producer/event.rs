@@ -23,14 +23,16 @@ mod probes {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Event Ring full when trying to enqueue {0:?}")]
+    #[error("Event Ring full when trying to enqueue {0:x?}")]
     EventRingFull(Trb),
-    #[error("Tried to enqueue {0:?} in Event Ring with empty Segment Table")]
+    #[error("Tried to enqueue {0:x?} in Event Ring with empty Segment Table")]
     EventRingSegmentTableSizeZero(Trb),
-    #[error("Event Ring Segment Table of size {1} cannot be read from address {0:?}")]
+    #[error("Event Ring Segment Table of size {1:x} cannot be read from address {0:x?}")]
     EventRingSegmentTableLocationInvalid(GuestAddr, usize),
-    #[error("Event Ring Segment Table Entry has invalid size: {0:?}")]
-    InvalidEventRingSegmentSize(EventRingSegment),
+    #[error(
+        "Event Ring Segment Table Entry at {0:x?} has invalid size: {1:x?}"
+    )]
+    InvalidEventRingSegmentSize(GuestAddr, EventRingSegment),
     #[error("Interrupter error")]
     Interrupter,
     #[error("Tried to enqueue Event TRB in absent Event Ring")]
@@ -87,6 +89,8 @@ impl EventRing {
     /// size (ERSTSZ) registers are written, or when host controller is resumed.
     /// (Per xHCI 1.2 sect 4.9.4.1: ERST entries themselves are not allowed
     /// to be modified by software when HCHalted = 0)
+    /// If `Err` is returned due to an invalid ERSTBA value or ERSTE, then
+    /// the EventRing is left unmodified.
     pub fn update_segment_table(
         &mut self,
         erstba: GuestAddr,
@@ -97,13 +101,17 @@ impl EventRing {
             Error::EventRingSegmentTableLocationInvalid(erstba, erstsz),
         )?;
         self.segment_table = many
-            .map(|mut erste: GuestData<EventRingSegment>| {
+            .enumerate()
+            .map(|(index, mut erste): (usize, GuestData<EventRingSegment>)| {
                 // lower bits are reserved
                 erste.base_address.0 &= !63;
                 if erste.segment_trb_count < 16
                     || erste.segment_trb_count > 4096
                 {
-                    Err(Error::InvalidEventRingSegmentSize(*erste))
+                    Err(Error::InvalidEventRingSegmentSize(
+                        erstba + index * size_of_val(&*erste),
+                        *erste,
+                    ))
                 } else {
                     Ok(*erste)
                 }
@@ -623,7 +631,7 @@ mod test {
         // and update the ring to use it... wait, they need to be at least 16!
         assert!(matches!(
             ring.update_segment_table(erstba, erstsz + 1, &memctx).unwrap_err(),
-            Error::InvalidEventRingSegmentSize(_)
+            Error::InvalidEventRingSegmentSize(..)
         ));
 
         // alright, let's try that again

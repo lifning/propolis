@@ -110,8 +110,10 @@ pub enum InterrupterRegisters {
     Management,
     Moderation,
     EventRingSegmentTableSize,
-    EventRingSegmentTableBaseAddress,
-    EventRingDequeuePointer,
+    EventRingSegmentTableBaseAddress1,
+    EventRingSegmentTableBaseAddress2,
+    EventRingDequeuePointer1,
+    EventRingDequeuePointer2,
 }
 
 /// eXtensible Host Controller Runtime Registers
@@ -218,8 +220,10 @@ lazy_static! {
                 (Runtime(Interrupter(i, Moderation)), 4),
                 (Runtime(Interrupter(i, EventRingSegmentTableSize)), 4),
                 (Reserved, 4),
-                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress)), 8),
-                (Runtime(Interrupter(i, EventRingDequeuePointer)), 8),
+                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress1)), 4),
+                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress2)), 4),
+                (Runtime(Interrupter(i, EventRingDequeuePointer1)), 4),
+                (Runtime(Interrupter(i, EventRingDequeuePointer2)), 4),
             ]
         }));
 
