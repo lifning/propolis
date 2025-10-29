@@ -25,6 +25,20 @@ use crate::{
     vmm::MemCtx,
 };
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn usb_control_xfer_setup(
+        slot_id: u8,
+        endpoint_id: u8,
+        request_type: u8,
+        request: u8,
+        device_to_host: bool,
+    ) {
+    }
+    fn usb_control_xfer_data(slot_id: u8, endpoint_id: u8, trb_pointer: u64) {}
+    fn usb_control_xfer_status(slot_id: u8, endpoint_id: u8, ok: bool) {}
+}
+
 pub struct ControlEndpoint<C>
 where
     ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
@@ -95,12 +109,20 @@ where
         self.bytes_transferred = 0;
         self.current_setup = Some(setup);
         self.payload = None;
-        Ok(match setup.direction() {
+        let control_request_info = match setup.direction() {
             RequestDirection::DeviceToHost => {
                 Some(ControlRequestInfo::try_from(setup)?)
             }
             RequestDirection::HostToDevice => None,
-        })
+        };
+        probes::usb_control_xfer_setup!(|| (
+            u8::from(self.slot_id),
+            u8::from(self.endpoint_id),
+            setup.request_type() as u8,
+            setup.request(),
+            control_request_info.is_some(),
+        ));
+        Ok(control_request_info)
     }
 
     /// Unlike [`setup_stage`] and [`status_stage`], this method puts its own
@@ -169,6 +191,11 @@ where
                         }
                     }
                 };
+                probes::usb_control_xfer_data!(|| (
+                    u8::from(self.slot_id),
+                    u8::from(self.endpoint_id),
+                    trb.trb_pointer().0,
+                ));
                 self.port_wake_hdl.event_sender.send_completion_events_for_trb(
                     trb,
                     TrbCompletionCode::Success,
@@ -204,6 +231,11 @@ where
                 RequestDirection::DeviceToHost => Ok(None),
             };
 
+            probes::usb_control_xfer_status!(|| (
+                u8::from(self.slot_id),
+                u8::from(self.endpoint_id),
+                result.is_ok(),
+            ));
             self.bytes_transferred = 0;
             result.map_err(From::from)
         } else {

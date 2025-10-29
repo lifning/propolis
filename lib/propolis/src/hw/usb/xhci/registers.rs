@@ -315,10 +315,8 @@ impl Registers {
                     UsbStatus => "USBSTS",
                     PageSize => "PAGESIZE",
                     DeviceNotificationControl => "DNCTRL",
-                    CommandRingControlRegister1 => "CRCR",
-                    CommandRingControlRegister2 => {
-                        "(upper DWORD of 64-bit CRCR)"
-                    }
+                    CommandRingControlRegister1 => "CRCR (lower DWORD)",
+                    CommandRingControlRegister2 => "CRCR (upper DWORD)",
                     DeviceContextBaseAddressArrayPointerRegister => "DCBAAP",
                     Configure => "CONFIG",
                     Port(_, port_registers) => {
@@ -342,8 +340,14 @@ impl Registers {
                             Management => "IMAN",
                             Moderation => "IMOD",
                             EventRingSegmentTableSize => "ERSTSZ",
-                            EventRingSegmentTableBaseAddress => "ERSTBA",
-                            EventRingDequeuePointer => "ERDP",
+                            EventRingSegmentTableBaseAddress1 => {
+                                "ERSTBA (lower DWORD)"
+                            }
+                            EventRingSegmentTableBaseAddress2 => {
+                                "ERSTBA (upper DWORD)"
+                            }
+                            EventRingDequeuePointer1 => "ERDP (lower DWORD)",
+                            EventRingDequeuePointer2 => "ERDP (upper DWORD)",
                         }
                     }
                 }
