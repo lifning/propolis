@@ -335,6 +335,7 @@ impl Clone for EventSender {
     fn clone(&self) -> Self {
         Self {
             interrupts: Arc::clone(&self.interrupts),
+            // FIXME: this doesn't work, we must be losing the hierarchy on xHC reset or so..
             acc_mem: self.acc_mem.child(None),
         }
     }
@@ -347,6 +348,7 @@ impl EventSender {
         event_info: EventInfo,
         block_event_interrupt: bool,
     ) -> Result<(), TrbRingProducerError> {
+        self.acc_mem.print(true);
         let mut regulation = self.interrupts.0.lock().unwrap();
         let memctx =
             self.acc_mem.access().ok_or(TrbRingProducerError::NoMemAccess)?;
@@ -427,6 +429,9 @@ impl EventSender {
                 != TrbCompletionCode::ShortPacket
                 && (trb.interrupt_on_short_packet()
                     || trb.interrupt_on_completion());
+            eprintln!(
+                "trb {trb:?} completion event interrupt: {should_interrupt}"
+            );
             for evt in should_interrupt
                 .then_some(TransferEventParams {
                     evt_info: EventInfo::Transfer {
@@ -469,7 +474,9 @@ impl EventSender {
                     })
                 }))
             {
-                self.enqueue_event(evt.evt_info, evt.block_event_interrupt);
+                let x =
+                    self.enqueue_event(evt.evt_info, evt.block_event_interrupt);
+                eprintln!("enqueued: {x:?}");
             }
         }
     }

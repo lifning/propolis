@@ -158,12 +158,12 @@ propolis$target:::xhci_reset /* () */
 
 propolis$target:::usb_interrupt_xfer_complete /* (slot_id, endpoint_id, ptr, bytes) */
 {
-    printf("[%Y] USB Interrupt IN Endpoint transfer complete (slot %d, endpoint %d, at 0x%x,%d bytes)\n", walltimestamp, arg0, arg1, arg2, arg3);
+    printf("[%Y] USB Interrupt IN Endpoint transfer complete (slot %d, endpoint %d, at 0x%x, %d bytes)\n", walltimestamp, arg0, arg1, arg2, arg3);
 }
 
 propolis$target:::usb_interrupt_xfer_shortpacket /* (slot_id, endpoint_id, ptr, bytes_requested, bytes_received) */
 {
-    printf("[%Y] USB Interrupt IN Endpoint transfer short-packet (slot %d, endpoint %d, at 0x%x,%d/%d bytes)\n", walltimestamp, arg0, arg1, arg2, arg4, arg3);
+    printf("[%Y] USB Interrupt IN Endpoint transfer short-packet (slot %d, endpoint %d, at 0x%x, %d/%d bytes)\n", walltimestamp, arg0, arg1, arg2, arg4, arg3);
 }
 
 propolis$target:::usb_control_xfer_setup /* (slot_id, endpoint_id, request_type, request, device_to_host) */

@@ -610,8 +610,12 @@ impl PciXhci {
                     state.queued_device_connections = devices;
 
                     // HACK
+                    eprintln!("---RESET---");
+                    self.port_wake_handles.acc_mem.print(true);
                     self.port_wake_handles
                         .host_controller_reset(state.event_sender.clone());
+                    self.port_wake_handles.acc_mem.print(true);
+                    eprintln!("---RESET---");
 
                     state.usbsts.set_controller_not_ready(false);
                     slog::trace!(self.log, "xHC reset");
