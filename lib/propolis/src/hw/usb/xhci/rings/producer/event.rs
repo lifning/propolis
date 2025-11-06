@@ -38,6 +38,10 @@ pub enum Error {
     #[error("Tried to enqueue Event TRB in absent Event Ring")]
     NoEventRing,
     #[error(
+        "Tried to enqueue Event TRB but EventSender's pci::DeviceState reference was stale"
+    )]
+    NoPciState,
+    #[error(
         "Tried to enqueue Event TRB but EventSender's MemAccessor was removed from hierarchy"
     )]
     NoMemAccess,

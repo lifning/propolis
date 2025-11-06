@@ -5,7 +5,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::accessors::MemAccessor;
 use crate::common::{GuestAddr, WriteOp};
 use crate::hw::pci;
 use crate::hw::usb::xhci::bits;
@@ -33,7 +32,8 @@ pub struct XhciInterrupter {
     interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
     imod_loop: Option<std::thread::JoinHandle<()>>,
     vmm_hdl: Arc<VmmHdl>,
-    acc_mem: MemAccessor,
+    pci_state: Weak<pci::DeviceState>,
+    log: slog::Logger,
 }
 
 struct InterruptRegulation {
@@ -69,9 +69,8 @@ struct InterruptRegulation {
 impl XhciInterrupter {
     pub fn new(
         number: u16,
-        pci_intr: XhciPciIntr,
         vmm_hdl: Arc<VmmHdl>,
-        acc_mem: &MemAccessor,
+        pci_state: &Arc<pci::DeviceState>,
         any_ip_raised: Weak<AtomicBool>,
         log: slog::Logger,
     ) -> Self {
@@ -87,9 +86,14 @@ impl XhciInterrupter {
                 evt_data_transfer_len_accum: 0,
                 imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
                 intr_pending_enable: false,
-                pci_intr,
+                pci_intr: XhciPciIntr {
+                    msix_hdl: pci_state.msix_hdl(),
+                    pin: pci_state.lintr_pin(),
+                    pci_intr_mode: pci_state.get_intr_mode(),
+                    log: log.to_owned(),
+                },
                 terminate: false,
-                log,
+                log: log.to_owned(),
             }),
             Condvar::new(),
         ));
@@ -111,7 +115,8 @@ impl XhciInterrupter {
             interrupts,
             imod_loop,
             vmm_hdl,
-            acc_mem: acc_mem.child(Some(format!("xHCI interrupter {number}"))),
+            pci_state: Arc::downgrade(pci_state),
+            log,
         }
     }
 
@@ -173,7 +178,7 @@ impl XhciInterrupter {
                 if iman.pending() {
                     // deassert pin interrupt on Interrupt Pending clear
                     // (only relevant for INTxPin mode)
-                    regulation.pci_intr.deassert(self.number);
+                    self.pci_deassert(self.number);
                     // simulate IMODC being loaded with IMODI when IP cleared to 0
                     // (xHCI 1.2 sect 5.5.2.2)
                     regulation.imod_allow_at =
@@ -307,7 +312,7 @@ impl XhciInterrupter {
     pub fn sender(&self) -> EventSender {
         EventSender {
             interrupts: Arc::clone(&self.interrupts),
-            acc_mem: self.acc_mem.child(None),
+            pci_state: self.pci_state.clone(),
         }
     }
 
@@ -324,19 +329,104 @@ impl XhciInterrupter {
         self.interrupts.0.lock().unwrap().usbcmd_inte = usbcmd_inte;
         self.interrupts.1.notify_one();
     }
+
+    pub fn pci_deassert(&self, interrupter_num: u16) {
+        // only relevant for INTxPin mode
+        if let Some(pin) =
+            &self.pci_state.upgrade().and_then(|ps| ps.lintr_pin())
+        {
+            if interrupter_num == 0 {
+                pin.deassert();
+            } else {
+                slog::error!(
+                    self.log,
+                    "tried to deassert INTxPin of non-zero interrupter number"
+                );
+            }
+        }
+    }
+}
+
+pub struct XhciPciIntr {
+    msix_hdl: Option<pci::MsixHdl>,
+    pin: Option<Arc<dyn crate::intr_pins::IntrPin>>,
+    pci_intr_mode: pci::IntrMode,
+    log: slog::Logger,
+}
+
+impl XhciPciIntr {
+    pub fn set_mode(
+        &mut self,
+        mode: pci::IntrMode,
+        pci_state: &pci::DeviceState,
+    ) {
+        slog::trace!(self.log, "xHC set interrupt mode to {mode:?}");
+        self.pci_intr_mode = mode;
+        self.msix_hdl = pci_state.msix_hdl();
+        self.pin = pci_state.lintr_pin();
+    }
+
+    // xHCI 1.2 sect 4.17
+    pub fn fire_interrupt(&self, interrupter_num: u16) {
+        match self.pci_intr_mode {
+            pci::IntrMode::Disabled => {
+                slog::error!(
+                    self.log,
+                    "xHC fired PCIe interrupt, but IntrMode was Disabled"
+                );
+            }
+            pci::IntrMode::INTxPin => {
+                // NOTE: Only supports one interrupter, per xHCI 1.2 sect 4.17.
+                // If changing number of interrupters, either remove support for INTxPin here,
+                // or implement disabling all but the first interrupter everywhere else.
+                const _: () = const { assert!(NUM_INTRS <= 1) };
+                if interrupter_num == 0 {
+                    if let Some(pin) = &self.pin {
+                        slog::trace!(self.log, "xHC interrupter asserting");
+                        pin.assert();
+                        probes::xhci_interrupter_fired!(|| interrupter_num);
+                    } else {
+                        slog::error!(
+                            self.log,
+                            "xHC in INTxPin mode with no pin"
+                        );
+                    }
+                } else {
+                    slog::error!(
+                        self.log,
+                        "xHC INTxPin tried to fire for non-zero Interrupter"
+                    );
+                }
+            }
+            pci::IntrMode::Msix => {
+                if let Some(msix_hdl) = self.msix_hdl.as_ref() {
+                    msix_hdl.fire(interrupter_num);
+                    probes::xhci_interrupter_fired!(|| interrupter_num);
+                    slog::trace!(
+                        self.log,
+                        "xHC interrupter firing: {interrupter_num}"
+                    );
+                } else {
+                    slog::error!(
+                        self.log,
+                        "xHC interrupter missing MSI-X handle"
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub struct EventSender {
     interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
-    acc_mem: MemAccessor,
+    pci_state: Weak<pci::DeviceState>,
 }
 
-impl Clone for EventSender {
+impl<'a> Clone for EventSender {
     fn clone(&self) -> Self {
         Self {
             interrupts: Arc::clone(&self.interrupts),
-            // FIXME: this doesn't work, we must be losing the hierarchy on xHC reset or so..
-            acc_mem: self.acc_mem.child(None),
+            pci_state: self.pci_state.clone(),
         }
     }
 }
@@ -348,10 +438,13 @@ impl EventSender {
         event_info: EventInfo,
         block_event_interrupt: bool,
     ) -> Result<(), TrbRingProducerError> {
-        self.acc_mem.print(true);
+        let pci_state =
+            self.pci_state.upgrade().ok_or(TrbRingProducerError::NoPciState)?;
+        let memctx = pci_state
+            .acc_mem
+            .access()
+            .ok_or(TrbRingProducerError::NoMemAccess)?;
         let mut regulation = self.interrupts.0.lock().unwrap();
-        let memctx =
-            self.acc_mem.access().ok_or(TrbRingProducerError::NoMemAccess)?;
         if let Some(evt_ring) = regulation.evt_ring.as_mut() {
             if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
                 slog::error!(
@@ -560,7 +653,9 @@ impl InterruptRegulation {
             ip_raised.store(true, Ordering::Release);
 
             guard.evt_ring_deq_ptr.set_handler_busy(true);
+
             guard.pci_intr.fire_interrupt(guard.number);
+
             // IP flag cleared by the completion of PCI write
             // (xHCI 1.2 fig 4-22 description)
             guard.management.set_pending(false);
@@ -569,99 +664,6 @@ impl InterruptRegulation {
                 .unwrap()
                 .checked_add(guard.moderation.interval_duration())
                 .unwrap();
-        }
-    }
-}
-
-pub struct XhciPciIntr {
-    msix_hdl: Option<pci::MsixHdl>,
-    pin: Option<Arc<dyn crate::intr_pins::IntrPin>>,
-    pci_intr_mode: pci::IntrMode,
-    log: slog::Logger,
-}
-
-impl XhciPciIntr {
-    pub fn set_mode(
-        &mut self,
-        mode: pci::IntrMode,
-        pci_state: &pci::DeviceState,
-    ) {
-        slog::trace!(self.log, "xHC set interrupt mode to {mode:?}");
-        self.pci_intr_mode = mode;
-        self.msix_hdl = pci_state.msix_hdl();
-        self.pin = pci_state.lintr_pin();
-    }
-
-    // xHCI 1.2 sect 4.17
-    pub fn fire_interrupt(&self, interrupter_num: u16) {
-        match self.pci_intr_mode {
-            pci::IntrMode::Disabled => {
-                slog::error!(
-                    self.log,
-                    "xHC fired PCIe interrupt, but IntrMode was Disabled"
-                );
-            }
-            pci::IntrMode::INTxPin => {
-                // NOTE: Only supports one interrupter, per xHCI 1.2 sect 4.17.
-                // If changing number of interrupters, either remove support for INTxPin here,
-                // or implement disabling all but the first interrupter everywhere else.
-                const _: () = const { assert!(NUM_INTRS <= 1) };
-                if interrupter_num == 0 {
-                    if let Some(pin) = &self.pin {
-                        slog::debug!(self.log, "xHC interrupter asserting");
-                        pin.assert();
-                        probes::xhci_interrupter_fired!(|| interrupter_num);
-                    } else {
-                        slog::error!(
-                            self.log,
-                            "xHC in INTxPin mode with no pin"
-                        );
-                    }
-                } else {
-                    slog::error!(
-                        self.log,
-                        "xHC INTxPin tried to fire for non-zero Interrupter"
-                    );
-                }
-            }
-            pci::IntrMode::Msix => {
-                if let Some(msix_hdl) = self.msix_hdl.as_ref() {
-                    msix_hdl.fire(interrupter_num);
-                    probes::xhci_interrupter_fired!(|| interrupter_num);
-                    slog::debug!(
-                        self.log,
-                        "xHC interrupter firing: {interrupter_num}"
-                    );
-                } else {
-                    slog::error!(
-                        self.log,
-                        "xHC interrupter missing MSI-X handle"
-                    );
-                }
-            }
-        }
-    }
-
-    pub fn deassert(&self, interrupter_num: u16) {
-        // only relevant for INTxPin mode
-        if let Some(pin) = &self.pin {
-            if interrupter_num == 0 {
-                pin.deassert();
-            } else {
-                slog::error!(
-                    self.log,
-                    "tried to deassert INTxPin of non-zero interrupter number"
-                );
-            }
-        }
-    }
-
-    pub fn new(pci_state: &pci::DeviceState, log: slog::Logger) -> Self {
-        Self {
-            msix_hdl: pci_state.msix_hdl(),
-            pin: pci_state.lintr_pin(),
-            pci_intr_mode: pci_state.get_intr_mode(),
-            log,
         }
     }
 }
@@ -680,7 +682,8 @@ impl XhciInterrupter {
             interrupts,
             imod_loop: _,
             vmm_hdl: _,
-            acc_mem: _,
+            pci_state: _,
+            log: _,
         } = self;
         let guard = interrupts.0.lock().unwrap();
         let cvar = &interrupts.1;

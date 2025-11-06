@@ -12,7 +12,6 @@ use std::time::Duration;
 use bitvec::field::BitField;
 use device_slots::SlotId;
 
-use crate::accessors::MemAccessor;
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
 use crate::hw::ids::pci::{PROPOLIS_XHCI_DEV_ID, VENDOR_OXIDE};
 use crate::hw::pci::{self, Device};
@@ -94,7 +93,7 @@ pub struct XhciState {
 
 impl XhciState {
     fn new(
-        pci_state: &pci::DeviceState,
+        pci_state: &Arc<pci::DeviceState>,
         vmm_hdl: Arc<VmmHdl>,
         log: slog::Logger,
     ) -> Self {
@@ -105,12 +104,10 @@ impl XhciState {
 
         let any_interrupt_pending_raised = Arc::new(AtomicBool::new(false));
 
-        let pci_intr = interrupter::XhciPciIntr::new(&pci_state, log.clone());
         let interrupters = [interrupter::XhciInterrupter::new(
             0,
-            pci_intr,
             vmm_hdl.clone(),
-            &pci_state.acc_mem,
+            pci_state,
             Arc::downgrade(&any_interrupt_pending_raised),
             log.clone(),
         )];
@@ -164,7 +161,6 @@ impl XhciState {
 }
 
 pub struct XhciPortWakeHandleCollection {
-    acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
     event_sender: Mutex<EventSender>,
     handles: Mutex<HashMap<PortId, Arc<XhciPortWakeHandle>>>,
@@ -172,12 +168,10 @@ pub struct XhciPortWakeHandleCollection {
 
 impl XhciPortWakeHandleCollection {
     fn new(
-        acc_mem: MemAccessor,
         event_sender: EventSender,
         state_weak: Weak<Mutex<XhciState>>,
     ) -> Self {
         Self {
-            acc_mem,
             state_weak,
             event_sender: Mutex::new(event_sender),
             handles: Default::default(),
@@ -198,9 +192,6 @@ impl XhciPortWakeHandleCollection {
             .entry(port_id)
             .or_insert_with(|| {
                 Arc::new(XhciPortWakeHandle {
-                    acc_mem: self
-                        .acc_mem
-                        .child(Some("xHCI interrupter handle".to_string())),
                     state_weak: self.state_weak.clone(),
                     event_sender: self.event_sender.lock().unwrap().clone(),
                     port_id,
@@ -211,7 +202,6 @@ impl XhciPortWakeHandleCollection {
 }
 
 pub struct XhciPortWakeHandle {
-    acc_mem: MemAccessor,
     state_weak: Weak<Mutex<XhciState>>,
     pub(crate) event_sender: EventSender,
     port_id: PortId,
@@ -235,17 +225,12 @@ impl XhciPortWakeHandle {
             );
         }
     }
-
-    // HACK
-    pub fn mem_accessor(&self) -> &MemAccessor {
-        &self.acc_mem
-    }
 }
 
 /// An emulated USB Host Controller attached over PCI
 pub struct PciXhci {
     /// PCI device state
-    pci_state: pci::DeviceState,
+    pci_state: Arc<pci::DeviceState>,
 
     /// Controller state
     state: Arc<Mutex<XhciState>>,
@@ -269,12 +254,17 @@ impl PciXhci {
             ..Default::default()
         });
 
-        let pci_state = pci_builder
-            .add_bar_mmio64(pci::BarN::BAR0, 0x2000)
-            // Place MSI-X in BAR4
-            .add_cap_msix(pci::BarN::BAR4, NUM_INTRS)
-            .add_custom_cfg(bits::USB_PCI_CFG_OFFSET, bits::USB_PCI_CFG_REG_SZ)
-            .finish();
+        let pci_state = Arc::new(
+            pci_builder
+                .add_bar_mmio64(pci::BarN::BAR0, 0x2000)
+                // Place MSI-X in BAR4
+                .add_cap_msix(pci::BarN::BAR4, NUM_INTRS)
+                .add_custom_cfg(
+                    bits::USB_PCI_CFG_OFFSET,
+                    bits::USB_PCI_CFG_REG_SZ,
+                )
+                .finish(),
+        );
 
         let state =
             Arc::new(Mutex::new(XhciState::new(&pci_state, hdl, log.clone())));
@@ -282,7 +272,6 @@ impl PciXhci {
         let event_sender = state.lock().unwrap().event_sender.clone();
 
         let port_wake_handles = XhciPortWakeHandleCollection::new(
-            pci_state.acc_mem.child(None),
             event_sender,
             Arc::downgrade(&state),
         );
@@ -610,12 +599,8 @@ impl PciXhci {
                     state.queued_device_connections = devices;
 
                     // HACK
-                    eprintln!("---RESET---");
-                    self.port_wake_handles.acc_mem.print(true);
                     self.port_wake_handles
                         .host_controller_reset(state.event_sender.clone());
-                    self.port_wake_handles.acc_mem.print(true);
-                    eprintln!("---RESET---");
 
                     state.usbsts.set_controller_not_ready(false);
                     slog::trace!(self.log, "xHC reset");
@@ -1215,7 +1200,7 @@ impl MigrateMulti for PciXhci {
 
         drop(state);
 
-        MigrateMulti::import(&self.pci_state, offer, ctx)?;
+        MigrateMulti::import(self.device_state(), offer, ctx)?;
         self.interrupt_mode_change(self.pci_state.get_intr_mode());
         Ok(())
     }

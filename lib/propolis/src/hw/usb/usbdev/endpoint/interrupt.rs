@@ -174,7 +174,8 @@ impl PeriodicTransferPollThread {
     ) {
         if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
             let bytes_transferred = data.len().min(region.1);
-            if let Some(memctx) = port_hdl.mem_accessor().access() {
+            // TODO: mem accessor via Weak<DeviceState> ?
+            if let Some(memctx) = self.mem_accessor().access() {
                 memctx.write_many(region.0, &data[..bytes_transferred]);
                 probes::usb_interrupt_xfer_complete!(|| (
                     u8::from(self.slot_id),
@@ -189,6 +190,8 @@ impl PeriodicTransferPollThread {
                     self.slot_id,
                     self.endpoint_id,
                 );
+            } else {
+                // TODO: slog::error!
             }
         }
     }
