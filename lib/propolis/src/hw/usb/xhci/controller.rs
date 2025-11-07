@@ -292,6 +292,7 @@ impl PciXhci {
         let dev = device_type.create(
             hid_report,
             self.port_wake_handles.handle_for_port(port_id),
+            &self.pci_state,
         );
 
         state.queued_device_connections.push((port_id, dev));
@@ -1153,7 +1154,12 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
-        state.dev_slots.import(&dev_slots, ctx, &self.port_wake_handles)?; // HACK
+        state.dev_slots.import(
+            &dev_slots,
+            ctx,
+            &self.port_wake_handles,
+            &self.pci_state,
+        )?; // HACK
 
         // FIXME: overwrites and re-creates all pending devices unconditionally
         state.queued_device_connections = queued_device_connections
@@ -1165,6 +1171,7 @@ impl MigrateMulti for PciXhci {
                     &dev_data,
                     ctx.hid_report,
                     self.port_wake_handles.handle_for_port(port_id),
+                    &self.pci_state,
                 )?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })

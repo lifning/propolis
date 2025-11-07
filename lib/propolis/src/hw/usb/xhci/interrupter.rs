@@ -479,99 +479,96 @@ impl EventSender {
         bytes_transferred: usize,
         slot_id: SlotId,
         endpoint_id: EndpointId,
-    ) {
+    ) -> Result<(), TrbRingProducerError> {
         let interrupter = trb.interrupter_target();
         if interrupter != 0 {
             // TODO: multiple interrupters unimplemented
-        } else {
-            // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
-            // the number of bytes transferred are added to the EDTLA,
-            // wrapping at 24-bit max (16,777,215)
-            let edtla = {
-                let mut guard = self.interrupts.0.lock().unwrap();
-                guard.evt_data_transfer_len_accum += bytes_transferred as u32;
-                guard.evt_data_transfer_len_accum &= 0xffffff;
-                guard.evt_data_transfer_len_accum
-            };
+            return Err(todo!("multiple interrupters unimplemented"));
+        }
+        // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
+        // the number of bytes transferred are added to the EDTLA,
+        // wrapping at 24-bit max (16,777,215)
+        let edtla = {
+            let mut guard = self.interrupts.0.lock().unwrap();
+            guard.evt_data_transfer_len_accum += bytes_transferred as u32;
+            guard.evt_data_transfer_len_accum &= 0xffffff;
+            guard.evt_data_transfer_len_accum
+        };
 
-            // The wording in the xHCI spec about this field evidently trips up a lot of devices:
-            // https://github.com/torvalds/linux/commit/34b67198244f2d7d8409fa4eb76204c409c0c97e
-            let trb_transfer_length = match completion_code {
-                // xHCI 1.2 sect 4.10.1.1.2:
-                // > If a Short Packet does not occur, then the last TRB of the TD shall generate a
-                // > Transfer Event with its Completion Code = Success (assuming there was no
-                // > error), its TRB Pointer field pointing to the last Transfer TRB, and the TRB
-                // > Transfer Length field shall equal 0.
-                TrbCompletionCode::Success => 0,
-                // xHCI 1.2 sect 4.10.1, table 6-22:
-                // > The Length field of the Transfer Event shall be set to the residual number
-                // > of bytes *not* written to the Transfer TRBs’ data buffer.
-                //
-                // xHCI 1.2 sect 4.10.1.1.2:
-                // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
-                //
-                // (both emphases mine) So... is this the right thing to do?
-                TrbCompletionCode::ShortPacket => {
-                    trb.data_buffer().len() - bytes_transferred
-                }
-                _ => 0,
-            } as u32;
+        // The wording in the xHCI spec about this field evidently trips up a lot of devices:
+        // https://github.com/torvalds/linux/commit/34b67198244f2d7d8409fa4eb76204c409c0c97e
+        let trb_transfer_length = match completion_code {
+            // xHCI 1.2 sect 4.10.1.1.2:
+            // > If a Short Packet does not occur, then the last TRB of the TD shall generate a
+            // > Transfer Event with its Completion Code = Success (assuming there was no
+            // > error), its TRB Pointer field pointing to the last Transfer TRB, and the TRB
+            // > Transfer Length field shall equal 0.
+            TrbCompletionCode::Success => 0,
+            // xHCI 1.2 sect 4.10.1, table 6-22:
+            // > The Length field of the Transfer Event shall be set to the residual number
+            // > of bytes *not* written to the Transfer TRBs’ data buffer.
+            //
+            // xHCI 1.2 sect 4.10.1.1.2:
+            // > TRB Transfer Length field shall indicate the residue bytes *in* the buffer.
+            //
+            // (both emphases mine) So... is this the right thing to do?
+            TrbCompletionCode::ShortPacket => {
+                trb.data_buffer().len() - bytes_transferred
+            }
+            _ => 0,
+        } as u32;
 
-            // FIXME: interrupting for ShortPacket causes incorrect behavior - why?
-            let should_interrupt = completion_code
-                != TrbCompletionCode::ShortPacket
-                && (trb.interrupt_on_short_packet()
-                    || trb.interrupt_on_completion());
-            eprintln!(
-                "trb {trb:?} completion event interrupt: {should_interrupt}"
-            );
-            for evt in should_interrupt
-                .then_some(TransferEventParams {
+        // FIXME: interrupting for ShortPacket causes incorrect behavior - why?
+        let should_interrupt = completion_code
+            != TrbCompletionCode::ShortPacket
+            && (trb.interrupt_on_short_packet()
+                || trb.interrupt_on_completion());
+        eprintln!("trb {trb:?} completion event interrupt: {should_interrupt}");
+        for evt in should_interrupt
+            .then_some(TransferEventParams {
+                evt_info: EventInfo::Transfer {
+                    trb_pointer: trb.trb_pointer(),
+                    completion_code,
+                    trb_transfer_length,
+                    slot_id,
+                    endpoint_id,
+                    event_data: false,
+                },
+                interrupter,
+                block_event_interrupt: trb.block_event_interrupt(),
+            })
+            .into_iter()
+            .chain(trb.event_data().and_then(|edtrb| {
+                // XXX: subtly different on purpose, even with the above FIXME in mind
+                let should_interrupt = edtrb.interrupt_on_short_packet()
+                    || (completion_code != TrbCompletionCode::ShortPacket
+                        && edtrb.interrupt_on_completion());
+                should_interrupt.then_some(TransferEventParams {
                     evt_info: EventInfo::Transfer {
-                        trb_pointer: trb.trb_pointer(),
+                        trb_pointer: GuestAddr(edtrb.event_data()),
+                        // xHCI 1.2 sect 4.11.5.2: Event Data
+                        // inherits the completion code of the
+                        // previous TRB
                         completion_code,
-                        trb_transfer_length,
+                        // xHCI 1.2 table 6-38: if Event Data flag is 1, this field
+                        // is set to the value of EDTLA.
+                        // xHCI 1.2 sect 4.10.1.1.1:
+                        // > an Event Data Transfer Event shall be generated with the
+                        // > Completion Code set to Short Packet and the Length field
+                        // > set to the actual number of bytes received by the TD.
+                        trb_transfer_length: edtla,
                         slot_id,
                         endpoint_id,
-                        event_data: false,
+                        event_data: true,
                     },
                     interrupter,
-                    block_event_interrupt: trb.block_event_interrupt(),
+                    block_event_interrupt: edtrb.block_event_interrupt(),
                 })
-                .into_iter()
-                .chain(trb.event_data().and_then(|edtrb| {
-                    // XXX: subtly different on purpose, even with the above FIXME in mind
-                    let should_interrupt = edtrb.interrupt_on_short_packet()
-                        || (completion_code != TrbCompletionCode::ShortPacket
-                            && edtrb.interrupt_on_completion());
-                    should_interrupt.then_some(TransferEventParams {
-                        evt_info: EventInfo::Transfer {
-                            trb_pointer: GuestAddr(edtrb.event_data()),
-                            // xHCI 1.2 sect 4.11.5.2: Event Data
-                            // inherits the completion code of the
-                            // previous TRB
-                            completion_code,
-                            // xHCI 1.2 table 6-38: if Event Data flag is 1, this field
-                            // is set to the value of EDTLA.
-                            // xHCI 1.2 sect 4.10.1.1.1:
-                            // > an Event Data Transfer Event shall be generated with the
-                            // > Completion Code set to Short Packet and the Length field
-                            // > set to the actual number of bytes received by the TD.
-                            trb_transfer_length: edtla,
-                            slot_id,
-                            endpoint_id,
-                            event_data: true,
-                        },
-                        interrupter,
-                        block_event_interrupt: edtrb.block_event_interrupt(),
-                    })
-                }))
-            {
-                let x =
-                    self.enqueue_event(evt.evt_info, evt.block_event_interrupt);
-                eprintln!("enqueued: {x:?}");
-            }
+            }))
+        {
+            self.enqueue_event(evt.evt_info, evt.block_event_interrupt)?;
         }
+        Ok(())
     }
 }
 

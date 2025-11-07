@@ -8,7 +8,7 @@ use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 use vnc_tablet::HIDTabletReport;
 
-use crate::vmm::MemCtx;
+use crate::{hw::pci, vmm::MemCtx};
 
 use super::xhci::{
     bits::device_context::EndpointContext,
@@ -37,6 +37,7 @@ impl UsbDeviceType {
         &self,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
     ) -> Box<dyn UsbDevice> {
         match self {
             UsbDeviceType::Null => {
@@ -46,6 +47,7 @@ impl UsbDeviceType {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
                     hid_report.clone(),
                     port_wake_hdl,
+                    pci_state,
                 ))
             }
         }
@@ -55,16 +57,17 @@ impl UsbDeviceType {
         payload: &migrate::UsbDeviceV1,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
     ) -> core::result::Result<
         Box<dyn UsbDevice>,
         crate::migrate::MigrateStateError,
     > {
         let mut dev = match &payload.device_type {
             migrate::UsbDeviceTypeV1::Null => {
-                Self::Null.create(hid_report, port_wake_hdl)
+                Self::Null.create(hid_report, port_wake_hdl, pci_state)
             }
             migrate::UsbDeviceTypeV1::Tablet(tablet_payload) => {
-                Self::HidTablet.create(hid_report, port_wake_hdl)
+                Self::HidTablet.create(hid_report, port_wake_hdl, pci_state)
             }
         };
         dev.import(&payload)?;

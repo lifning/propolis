@@ -9,11 +9,15 @@ use std::{
     time::Duration,
 };
 
-use crate::hw::usb::xhci::{
-    bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
-    controller::XhciPortWakeHandle,
-    device_slots::{EndpointId, SlotId},
-    rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
+use crate::hw::{
+    pci,
+    usb::xhci::{
+        bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
+        controller::XhciPortWakeHandle,
+        device_slots::{EndpointId, SlotId},
+        rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
+        rings::producer::event::Error as EventRingError,
+    },
 };
 
 #[usdt::provider(provider = "propolis")]
@@ -51,6 +55,7 @@ impl InterruptInData {
 
 struct PeriodicTransferPollThread {
     weak_data: Weak<(Mutex<InterruptInData>, Condvar)>,
+    weak_pci_state: Weak<pci::DeviceState>,
     port_hdl: Weak<XhciPortWakeHandle>,
     slot_id: SlotId,
     endpoint_id: EndpointId,
@@ -59,12 +64,14 @@ struct PeriodicTransferPollThread {
 impl PeriodicTransferPollThread {
     fn spawn(
         port_hdl: Weak<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         data: &Arc<(Mutex<InterruptInData>, Condvar)>,
     ) -> JoinHandle<()> {
         let periodic_poll_thread = PeriodicTransferPollThread {
             weak_data: Arc::downgrade(data),
+            weak_pci_state: Arc::downgrade(pci_state),
             port_hdl,
             slot_id,
             endpoint_id,
@@ -147,7 +154,7 @@ impl PeriodicTransferPollThread {
         &self,
         xfer: &TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
-    ) {
+    ) -> Result<(), EventRingError> {
         if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
             probes::usb_interrupt_xfer_shortpacket!(|| (
                 u8::from(self.slot_id),
@@ -163,7 +170,7 @@ impl PeriodicTransferPollThread {
             0,
             self.slot_id,
             self.endpoint_id,
-        );
+        )
     }
 
     fn complete_transfer(
@@ -171,29 +178,32 @@ impl PeriodicTransferPollThread {
         data: Vec<u8>,
         xfer: TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
-    ) {
-        if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
-            let bytes_transferred = data.len().min(region.1);
-            // TODO: mem accessor via Weak<DeviceState> ?
-            if let Some(memctx) = self.mem_accessor().access() {
-                memctx.write_many(region.0, &data[..bytes_transferred]);
-                probes::usb_interrupt_xfer_complete!(|| (
-                    u8::from(self.slot_id),
-                    u8::from(self.endpoint_id),
-                    region.0 .0,
-                    region.1,
-                ));
-                port_hdl.event_sender.send_completion_events_for_trb(
-                    &xfer,
-                    TrbCompletionCode::Success,
-                    bytes_transferred,
-                    self.slot_id,
-                    self.endpoint_id,
-                );
-            } else {
-                // TODO: slog::error!
-            }
-        }
+    ) -> Result<(), EventRingError> {
+        let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
+            return Err(todo!());
+        };
+        let bytes_transferred = data.len().min(region.1);
+        let Some(pci_state) = self.weak_pci_state.upgrade() else {
+            return Err(todo!());
+        };
+        let Some(memctx) = pci_state.acc_mem.access() else {
+            return Err(todo!());
+        };
+        memctx.write_many(region.0, &data[..bytes_transferred]);
+        probes::usb_interrupt_xfer_complete!(|| (
+            u8::from(self.slot_id),
+            u8::from(self.endpoint_id),
+            region.0 .0,
+            region.1,
+        ));
+        port_hdl.event_sender.send_completion_events_for_trb(
+            &xfer,
+            TrbCompletionCode::Success,
+            bytes_transferred,
+            self.slot_id,
+            self.endpoint_id,
+        )?;
+        Ok(())
     }
 }
 
@@ -208,6 +218,7 @@ impl InterruptInEndpoint {
     pub fn new(
         period: Duration,
         port_hdl: Weak<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
     ) -> Self {
@@ -223,6 +234,7 @@ impl InterruptInEndpoint {
         ));
         let _jh = PeriodicTransferPollThread::spawn(
             port_hdl,
+            pci_state,
             slot_id,
             endpoint_id,
             &data,
@@ -233,6 +245,7 @@ impl InterruptInEndpoint {
     pub fn new_migrated(
         value: &migrate::InterruptInEndpointV1,
         port_hdl: Weak<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
     ) -> Self {
         let migrate::InterruptInEndpointV1 {
             transfers,
@@ -255,6 +268,7 @@ impl InterruptInEndpoint {
         ));
         let _jh = PeriodicTransferPollThread::spawn(
             port_hdl,
+            pci_state,
             slot_id,
             endpoint_id,
             &data,

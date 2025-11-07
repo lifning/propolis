@@ -16,7 +16,7 @@ use crate::{
     common::GuestAddr,
     hw::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
-        // XXX: some of this is abstraction leakage while figuring things out
+        pci,
         usb::xhci::{
             bits::{
                 device_context::EndpointContext, ring_data::TrbCompletionCode,
@@ -120,6 +120,7 @@ pub struct HIDTabletDevice {
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
     port_wake_hdl: Arc<XhciPortWakeHandle>,
+    pci_state: Arc<pci::DeviceState>,
 }
 
 impl HIDTabletDevice {
@@ -132,6 +133,7 @@ impl HIDTabletDevice {
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortWakeHandle>,
+        pci_state: &Arc<pci::DeviceState>,
     ) -> Self {
         Self {
             control_endpoint: None,
@@ -140,6 +142,7 @@ impl HIDTabletDevice {
             idle_duration_4ms: 0,
             report,
             port_wake_hdl,
+            pci_state: pci_state.to_owned(),
         }
     }
 
@@ -448,6 +451,7 @@ impl UsbDevice for HIDTabletDevice {
                 let interrupt_in_endpoint = InterruptInEndpoint::new(
                     ep_ctx.interval_as_duration(),
                     Arc::downgrade(&self.port_wake_hdl),
+                    &self.pci_state,
                     slot_id,
                     endpoint_id,
                 );
@@ -583,6 +587,7 @@ impl UsbDevice for HIDTabletDevice {
                 let interrupt_in_endpoint = InterruptInEndpoint::new_migrated(
                     intr_in_ep_payload,
                     Arc::downgrade(&self.port_wake_hdl),
+                    &self.pci_state,
                 );
                 self.report
                     .lock()

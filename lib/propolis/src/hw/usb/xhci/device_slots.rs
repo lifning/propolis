@@ -4,9 +4,11 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
 use zerocopy::{FromBytes, FromZeros};
 
 use crate::common::GuestAddr;
+use crate::hw::pci;
 use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
 use crate::vmm::MemCtx;
 
@@ -967,6 +969,7 @@ impl DeviceSlotTable {
         value: &migrate::DeviceSlotTableV1,
         ctx: &crate::migrate::MigrateCtx,
         wake_handles: &super::controller::XhciPortWakeHandleCollection,
+        pci_state: &Arc<pci::DeviceState>,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
         self.dcbaap = dcbaap.map(GuestAddr);
@@ -997,6 +1000,7 @@ impl DeviceSlotTable {
                         src_dev,
                         ctx.hid_report,
                         wake_handles.handle_for_port(port_id),
+                        pci_state,
                     )?;
                     *dst = Some(dst_dev);
                 }
