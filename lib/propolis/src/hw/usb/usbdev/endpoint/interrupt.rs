@@ -123,7 +123,9 @@ impl PeriodicTransferPollThread {
                 break;
             };
             if timeout_result.timed_out() {
-                self.notify_short_packet(&xfer, &port_hdl);
+                if let Err(e) = self.notify_short_packet(&xfer, &port_hdl) {
+                    eprintln!("asdf {e}");
+                }
 
                 let mut guard = cvar
                     .wait_while(guard, |x| {
@@ -133,14 +135,20 @@ impl PeriodicTransferPollThread {
                     })
                     .unwrap();
                 if let Some(data) = guard.payload.take() {
-                    self.complete_transfer(data, xfer, &port_hdl);
+                    if let Err(e) =
+                        self.complete_transfer(data, xfer, &port_hdl)
+                    {
+                        eprintln!("sdfg {e}");
+                    }
                 }
 
                 guard.block_migration = false;
             } else {
                 // unwrap: if we didn't time out, then payload is some
                 let data = guard.payload.take().unwrap();
-                self.complete_transfer(data, xfer, &port_hdl);
+                if let Err(e) = self.complete_transfer(data, xfer, &port_hdl) {
+                    eprintln!("dfgh {e}");
+                }
 
                 guard.block_migration = false;
             }

@@ -87,7 +87,11 @@ pub fn process_transfer_ring(
                             endpoint_id,
                             event_data: false,
                         };
-                        state.event_sender.enqueue_event(evt_info, false);
+                        if let Err(e) =
+                            state.event_sender.enqueue_event(evt_info, false)
+                        {
+                            slog::error!(log, "Failed to enqueue USB Transaction Error event: {e}");
+                        }
                     }
                 }
             }

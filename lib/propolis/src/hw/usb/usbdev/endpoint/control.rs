@@ -196,13 +196,19 @@ where
                     u8::from(self.endpoint_id),
                     trb.trb_pointer().0,
                 ));
-                self.port_wake_hdl.event_sender.send_completion_events_for_trb(
-                    trb,
-                    TrbCompletionCode::Success,
-                    count,
-                    self.slot_id,
-                    self.endpoint_id,
-                );
+                if let Err(e) = self
+                    .port_wake_hdl
+                    .event_sender
+                    .send_completion_events_for_trb(
+                        trb,
+                        TrbCompletionCode::Success,
+                        count,
+                        self.slot_id,
+                        self.endpoint_id,
+                    )
+                {
+                    eprintln!("fghj {e}");
+                }
                 self.bytes_transferred += count;
             }
             Ok(())

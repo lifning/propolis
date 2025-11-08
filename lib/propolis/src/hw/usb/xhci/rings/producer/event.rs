@@ -42,7 +42,7 @@ pub enum Error {
     )]
     NoPciState,
     #[error(
-        "Tried to enqueue Event TRB but EventSender's MemAccessor was removed from hierarchy"
+        "Tried to enqueue Event TRB but xHC's memory access was removed from hierarchy"
     )]
     NoMemAccess,
 }

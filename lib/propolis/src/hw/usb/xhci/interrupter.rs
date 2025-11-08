@@ -288,6 +288,11 @@ impl XhciInterrupter {
             }
         } else {
             match intr_regs {
+                // FIXME - it's this, it's the split register making there be no evt ring. i have to lie down
+                //
+                // TODO: change so writes don't create the event ring, the first thing that *needs* it
+                // creates it based on the value written.
+                // writes to either half *destroy* the event ring such that it's recreated with the new addr?
                 InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
                     match EventRing::new(erstba, erstsz, erdp, &memctx) {
                         Ok(evt_ring) => regulation.evt_ring = Some(evt_ring),
@@ -523,7 +528,7 @@ impl EventSender {
             != TrbCompletionCode::ShortPacket
             && (trb.interrupt_on_short_packet()
                 || trb.interrupt_on_completion());
-        eprintln!("trb {trb:?} completion event interrupt: {should_interrupt}");
+        // eprintln!("trb {trb:?} completion event interrupt: {should_interrupt}");
         for evt in should_interrupt
             .then_some(TransferEventParams {
                 evt_info: EventInfo::Transfer {

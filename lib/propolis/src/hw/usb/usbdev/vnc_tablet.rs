@@ -477,22 +477,24 @@ impl UsbDevice for HIDTabletDevice {
                 ep.normal(xfer_trbs);
             }
             Err(e) => {
-                let _: core::result::Result<_, _> =
-                    self.port_wake_hdl.event_sender.enqueue_event(
-                        EventInfo::Transfer {
-                            trb_pointer: xfer_trbs
-                                .first()
-                                .map(|trb| trb.trb_pointer())
-                                .unwrap_or(GuestAddr(0)),
-                            completion_code:
-                                TrbCompletionCode::EndpointNotEnabledError,
-                            trb_transfer_length: 0,
-                            slot_id: self.slot_id.unwrap_or(SlotId::from(0)),
-                            endpoint_id,
-                            event_data: false,
-                        },
-                        false,
-                    );
+                eprintln!("no interrupt endpoint {e}");
+                if let Err(e) = self.port_wake_hdl.event_sender.enqueue_event(
+                    EventInfo::Transfer {
+                        trb_pointer: xfer_trbs
+                            .first()
+                            .map(|trb| trb.trb_pointer())
+                            .unwrap_or(GuestAddr(0)),
+                        completion_code:
+                            TrbCompletionCode::EndpointNotEnabledError,
+                        trb_transfer_length: 0,
+                        slot_id: self.slot_id.unwrap_or(SlotId::from(0)),
+                        endpoint_id,
+                        event_data: false,
+                    },
+                    false,
+                ) {
+                    eprintln!("couldn't even tell guest about it {e}");
+                }
             }
         }
         Ok(())
