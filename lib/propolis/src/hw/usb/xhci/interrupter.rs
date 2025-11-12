@@ -46,6 +46,9 @@ struct InterruptRegulation {
 
     evt_ring: Option<EventRing>,
 
+    pending_erstba_erstsz_writes: Option<(GuestAddr, usize)>,
+    pending_erdp_write: Option<GuestAddr>,
+
     // ERDP contains Event Handler Busy
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
 
@@ -57,6 +60,8 @@ struct InterruptRegulation {
     intr_pending_enable: bool,
     /// IPE, xHCI 1.2 sect 4.17.2
     imod_allow_at: time::VmGuestInstant,
+
+    pci_state: Weak<pci::DeviceState>,
 
     /// Used for firing PCI interrupts
     pci_intr: XhciPciIntr,
@@ -82,10 +87,12 @@ impl XhciInterrupter {
                 management: bits::InterrupterManagement::default(),
                 moderation: bits::InterrupterModeration::default(),
                 evt_ring: None,
+                pending_erstba_erstsz_writes: None,
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
                 evt_data_transfer_len_accum: 0,
                 imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
                 intr_pending_enable: false,
+                pci_state: Arc::downgrade(pci_state),
                 pci_intr: XhciPciIntr {
                     msix_hdl: pci_state.msix_hdl(),
                     pin: pci_state.lintr_pin(),
@@ -165,7 +172,6 @@ impl XhciInterrupter {
         &mut self,
         wo: &mut WriteOp,
         intr_regs: InterrupterRegisters,
-        memctx: &MemCtx,
     ) -> RegRWOpValue {
         use RegRWOpValue::*;
 
@@ -231,6 +237,8 @@ impl XhciInterrupter {
                 U32(val)
             }
             // also subject to 64-bit split writes
+            //
+            // TODO: cached value and only pushed below after taking regulation lock in outer scope -- XXX
             InterrupterRegisters::EventRingDequeuePointer1 => {
                 let erdp_low =
                     bits::EventRingDequeuePointer(wo.read_u32() as u64);
@@ -262,51 +270,27 @@ impl XhciInterrupter {
         let erstsz = self.evt_ring_seg_tbl_size.size() as usize;
         let erdp = regulation.evt_ring_deq_ptr.pointer();
 
-        if let Some(event_ring) = &mut regulation.evt_ring {
-            match intr_regs {
-                InterrupterRegisters::EventRingSegmentTableSize
-                | InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
-                    if let Err(e) =
-                        event_ring.update_segment_table(erstba, erstsz, &memctx)
-                    {
-                        slog::error!(
-                            regulation.log,
-                            "Event Ring Segment Table update failed: {e}"
-                        );
-                    }
-                }
-                InterrupterRegisters::EventRingDequeuePointer2 => {
-                    let empty_before = event_ring.is_empty();
-                    event_ring.update_dequeue_pointer(erdp);
-                    if !empty_before && event_ring.is_empty() {
-                        // IPE should be set to 0 "when the Event Ring transitions to empty"
-                        regulation.intr_pending_enable = false;
-                        notify = true;
-                    }
-                }
-                _ => (),
+        // FIXME - it's this, it's the split register making there be no evt ring. i have to lie down
+        //
+        // TODO: change so writes don't create the event ring, the first thing that *needs* it
+        // creates it based on the value written.
+        // writes to either half update the event ring before it's next accessed.
+        match intr_regs {
+            InterrupterRegisters::EventRingSegmentTableSize
+            | InterrupterRegisters::EventRingSegmentTableBaseAddress1
+            | InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
+                regulation.pending_erstba_erstsz_writes =
+                    Some((erstba, erstsz));
+                notify = true;
             }
-        } else {
-            match intr_regs {
-                // FIXME - it's this, it's the split register making there be no evt ring. i have to lie down
-                //
-                // TODO: change so writes don't create the event ring, the first thing that *needs* it
-                // creates it based on the value written.
-                // writes to either half *destroy* the event ring such that it's recreated with the new addr?
-                InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
-                    match EventRing::new(erstba, erstsz, erdp, &memctx) {
-                        Ok(evt_ring) => regulation.evt_ring = Some(evt_ring),
-                        Err(e) => {
-                            slog::error!(
-                                regulation.log,
-                                "Event Ring creation failed: {e}"
-                            );
-                        }
-                    }
-                }
-                _ => (),
+            InterrupterRegisters::EventRingDequeuePointer1
+            | InterrupterRegisters::EventRingDequeuePointer2 => {
+                regulation.pending_erdp_write = Some(erdp);
+                notify = true;
             }
+            _ => (),
         }
+
         if notify {
             self.interrupts.1.notify_one();
         }
@@ -609,6 +593,39 @@ impl Drop for XhciInterrupter {
 // """
 
 impl InterruptRegulation {
+    //
+    // TODO: finish (and appropriate errors instead of Try-Option ofc..)
+    //
+    fn event_ring_mut(&mut self) -> Option<&mut EventRing> {
+        let memctx = self.pci_state.upgrade()?.acc_mem.access()?;
+        if self.evt_ring.is_none() {
+            let (erstba, erstsz) = self.pending_erstba_erstsz_writes.take()?;
+            let erdp = self.evt_ring_deq_ptr.pointer();
+            self.evt_ring = EventRing::new(erstba, erstsz, erdp, &*memctx).ok()
+        }
+        let event_ring = self.evt_ring.as_mut()?;
+        if let Some((erstba, erstsz)) = self.pending_erstba_erstsz_writes.take()
+        {
+            if let Err(e) =
+                event_ring.update_segment_table(erstba, erstsz, &memctx)
+            {
+                slog::error!(
+                    regulation.log,
+                    "Event Ring Segment Table update failed: {e}"
+                );
+            }
+        }
+        if let Some(erdp) = self.pending_erdp_write.take() {
+            let empty_before = event_ring.is_empty();
+            event_ring.update_dequeue_pointer(erdp);
+            if !empty_before && event_ring.is_empty() {
+                // IPE should be set to 0 "when the Event Ring transitions to empty"
+                self.intr_pending_enable = false;
+                notify = true;
+            }
+        }
+    }
+
     // handling IMODI / IMODC / IP / IE.
     // xHCI 1.2 figure 4-22
     fn imod_wait_loop(
