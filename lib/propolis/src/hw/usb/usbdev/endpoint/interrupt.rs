@@ -15,8 +15,8 @@ use crate::hw::{
         bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
         controller::XhciPortWakeHandle,
         device_slots::{EndpointId, SlotId},
+        interrupter::Error as InterrupterError,
         rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
-        rings::producer::event::Error as EventRingError,
     },
 };
 
@@ -162,7 +162,7 @@ impl PeriodicTransferPollThread {
         &self,
         xfer: &TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
-    ) -> Result<(), EventRingError> {
+    ) -> Result<(), InterrupterError> {
         if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
             probes::usb_interrupt_xfer_shortpacket!(|| (
                 u8::from(self.slot_id),
@@ -186,7 +186,7 @@ impl PeriodicTransferPollThread {
         data: Vec<u8>,
         xfer: TransferTrb,
         port_hdl: &Arc<XhciPortWakeHandle>,
-    ) -> Result<(), EventRingError> {
+    ) -> Result<(), InterrupterError> {
         let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
             return Err(todo!());
         };

@@ -33,18 +33,6 @@ pub enum Error {
         "Event Ring Segment Table Entry at {0:x?} has invalid size: {1:x?}"
     )]
     InvalidEventRingSegmentSize(GuestAddr, EventRingSegment),
-    #[error("Interrupter error")]
-    Interrupter,
-    #[error("Tried to enqueue Event TRB in absent Event Ring")]
-    NoEventRing,
-    #[error(
-        "Tried to enqueue Event TRB but EventSender's pci::DeviceState reference was stale"
-    )]
-    NoPciState,
-    #[error(
-        "Tried to enqueue Event TRB but xHC's memory access was removed from hierarchy"
-    )]
-    NoMemAccess,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 

@@ -5,10 +5,10 @@
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::bits::ring_data::{Trb, TrbCompletionCode, TrbType};
 use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, EndpointId, SlotId};
-use crate::hw::usb::xhci::interrupter::EventSender;
-use crate::hw::usb::xhci::rings::producer::event::{
-    Error as TrbRingProducerError, EventInfo,
+use crate::hw::usb::xhci::interrupter::{
+    Error as InterrupterError, EventSender,
 };
+use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::hw::usb::xhci::NUM_USB2_PORTS;
 use crate::vmm::MemCtx;
 
@@ -284,7 +284,7 @@ impl CommandInfo {
         dev_slots: &mut DeviceSlotTable,
         memctx: &MemCtx,
         event_sender: &EventSender,
-    ) -> core::result::Result<(), TrbRingProducerError> {
+    ) -> core::result::Result<(), InterrupterError> {
         let evt = match self {
             // xHCI 1.2 sect 3.3.1, 4.6.2
             CommandInfo::NoOp => EventInfo::CommandCompletion {

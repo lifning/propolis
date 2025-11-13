@@ -25,6 +25,25 @@ mod probes {
     fn xhci_interrupter_fired(intr_num: u16) {}
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Error in Event Ring operation: {0}")]
+    ProducerRing(#[from] TrbRingProducerError),
+    #[error(
+        "Tried to enqueue Event TRB but EventSender's pci::DeviceState reference was stale"
+    )]
+    NoPciState,
+    #[error(
+        "Tried to enqueue Event TRB but xHC's memory access was removed from hierarchy"
+    )]
+    NoMemAccess,
+    #[error("Multiple xHCI interrupters unimplemented")]
+    MultipleInterruptersUnimplemented,
+    #[error("Tried to access Event Ring before its location was defined by writes to ERSTBA/ERSTSZ")]
+    EventRingBeforeRegWrites,
+}
+pub type Result<T> = core::result::Result<T, Error>;
+
 pub struct XhciInterrupter {
     number: u16,
     evt_ring_seg_tbl_size: bits::EventRingSegmentTableSize,
@@ -47,10 +66,10 @@ struct InterruptRegulation {
     evt_ring: Option<EventRing>,
 
     pending_erstba_erstsz_writes: Option<(GuestAddr, usize)>,
-    pending_erdp_write: Option<GuestAddr>,
 
     // ERDP contains Event Handler Busy
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
+    erdp_written: bool,
 
     /// Event Data Transfer Length Accumulator (EDTLA).
     evt_data_transfer_len_accum: u32,
@@ -60,8 +79,6 @@ struct InterruptRegulation {
     intr_pending_enable: bool,
     /// IPE, xHCI 1.2 sect 4.17.2
     imod_allow_at: time::VmGuestInstant,
-
-    pci_state: Weak<pci::DeviceState>,
 
     /// Used for firing PCI interrupts
     pci_intr: XhciPciIntr,
@@ -88,11 +105,11 @@ impl XhciInterrupter {
                 moderation: bits::InterrupterModeration::default(),
                 evt_ring: None,
                 pending_erstba_erstsz_writes: None,
+                erdp_written: false,
                 evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
                 evt_data_transfer_len_accum: 0,
                 imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
                 intr_pending_enable: false,
-                pci_state: Arc::downgrade(pci_state),
                 pci_intr: XhciPciIntr {
                     msix_hdl: pci_state.msix_hdl(),
                     pin: pci_state.lintr_pin(),
@@ -237,8 +254,6 @@ impl XhciInterrupter {
                 U32(val)
             }
             // also subject to 64-bit split writes
-            //
-            // TODO: cached value and only pushed below after taking regulation lock in outer scope -- XXX
             InterrupterRegisters::EventRingDequeuePointer1 => {
                 let erdp_low =
                     bits::EventRingDequeuePointer(wo.read_u32() as u64);
@@ -249,9 +264,10 @@ impl XhciInterrupter {
                 // RW1C
                 if erdp_low.handler_busy() {
                     regulation.evt_ring_deq_ptr.set_handler_busy(false);
-                    notify = true;
                 }
                 regulation.evt_ring_deq_ptr.set_pointer(erdp_low.pointer());
+                regulation.erdp_written = true;
+                notify = true;
                 U32(erdp_low.0 as u32)
             }
             InterrupterRegisters::EventRingDequeuePointer2 => {
@@ -260,32 +276,29 @@ impl XhciInterrupter {
                 let mut regulation = self.interrupts.0.lock().unwrap();
                 regulation.evt_ring_deq_ptr.0 &= 0xFFFFFFFFu64;
                 regulation.evt_ring_deq_ptr.0 |= erdp_high_bits;
+                regulation.erdp_written = true;
                 notify = true;
                 U32(val)
             }
         };
 
-        let mut regulation = self.interrupts.0.lock().unwrap();
-        let erstba = self.evt_ring_seg_base_addr.address();
-        let erstsz = self.evt_ring_seg_tbl_size.size() as usize;
-        let erdp = regulation.evt_ring_deq_ptr.pointer();
-
-        // FIXME - it's this, it's the split register making there be no evt ring. i have to lie down
-        //
-        // TODO: change so writes don't create the event ring, the first thing that *needs* it
-        // creates it based on the value written.
-        // writes to either half update the event ring before it's next accessed.
+        // writes to ERSTBA/ERSTSZ/ERDP themselves don't create the event ring immediately.
+        // the first thing that needs the ring creates it based on the value written,
+        // and further writes to either half of either register update the event ring
+        // the next time it's accessed, via `InterruptRegulation::event_ring_mut`.
         match intr_regs {
             InterrupterRegisters::EventRingSegmentTableSize
             | InterrupterRegisters::EventRingSegmentTableBaseAddress1
             | InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
-                regulation.pending_erstba_erstsz_writes =
-                    Some((erstba, erstsz));
-                notify = true;
-            }
-            InterrupterRegisters::EventRingDequeuePointer1
-            | InterrupterRegisters::EventRingDequeuePointer2 => {
-                regulation.pending_erdp_write = Some(erdp);
+                let erstba = self.evt_ring_seg_base_addr.address();
+                let erstsz = self.evt_ring_seg_tbl_size.size() as usize;
+
+                self.interrupts
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pending_erstba_erstsz_writes = Some((erstba, erstsz));
+
                 notify = true;
             }
             _ => (),
@@ -426,34 +439,26 @@ impl EventSender {
         &self,
         event_info: EventInfo,
         block_event_interrupt: bool,
-    ) -> Result<(), TrbRingProducerError> {
-        let pci_state =
-            self.pci_state.upgrade().ok_or(TrbRingProducerError::NoPciState)?;
-        let memctx = pci_state
-            .acc_mem
-            .access()
-            .ok_or(TrbRingProducerError::NoMemAccess)?;
-        let mut regulation = self.interrupts.0.lock().unwrap();
-        if let Some(evt_ring) = regulation.evt_ring.as_mut() {
-            if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
-                slog::error!(
-                    regulation.log,
-                    "failed to enqueue Event TRB: {e}"
-                );
-                return Err(e);
-            }
-            // check imod/iman for when to fire pci intr
-            if !block_event_interrupt {
-                regulation.intr_pending_enable = true;
-                self.interrupts.1.notify_one();
-                let intr_num = regulation.number;
-                probes::xhci_interrupter_pending!(move || (intr_num));
-            }
+    ) -> Result<()> {
+        let pci_state = self.pci_state.upgrade().ok_or(Error::NoPciState)?;
+        let memctx = pci_state.acc_mem.access().ok_or(Error::NoMemAccess)?;
 
-            Ok(())
-        } else {
-            Err(TrbRingProducerError::NoEventRing)
+        let mut regulation = self.interrupts.0.lock().unwrap();
+
+        let evt_ring = regulation.event_ring_mut(&memctx)?;
+        if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
+            slog::error!(regulation.log, "failed to enqueue Event TRB: {e}");
+            return Err(e.into());
         }
+        // check imod/iman for when to fire pci intr
+        if !block_event_interrupt {
+            regulation.intr_pending_enable = true;
+            self.interrupts.1.notify_one();
+            let intr_num = regulation.number;
+            probes::xhci_interrupter_pending!(move || (intr_num));
+        }
+
+        Ok(())
     }
 
     pub fn reset_edtla(&self) {
@@ -468,11 +473,10 @@ impl EventSender {
         bytes_transferred: usize,
         slot_id: SlotId,
         endpoint_id: EndpointId,
-    ) -> Result<(), TrbRingProducerError> {
+    ) -> Result<()> {
         let interrupter = trb.interrupter_target();
         if interrupter != 0 {
-            // TODO: multiple interrupters unimplemented
-            return Err(todo!("multiple interrupters unimplemented"));
+            return Err(Error::MultipleInterruptersUnimplemented);
         }
         // xHCI 1.2 sect 4.11.5.2: when Transfer TRB completed,
         // the number of bytes transferred are added to the EDTLA,
@@ -594,36 +598,38 @@ impl Drop for XhciInterrupter {
 
 impl InterruptRegulation {
     //
-    // TODO: finish (and appropriate errors instead of Try-Option ofc..)
+    // TODO: finish (appropriate errors instead of Try-Option ofc..)
     //
-    fn event_ring_mut(&mut self) -> Option<&mut EventRing> {
-        let memctx = self.pci_state.upgrade()?.acc_mem.access()?;
+    fn event_ring_mut(&mut self, memctx: &MemCtx) -> Result<&mut EventRing> {
         if self.evt_ring.is_none() {
-            let (erstba, erstsz) = self.pending_erstba_erstsz_writes.take()?;
+            let (erstba, erstsz) = self
+                .pending_erstba_erstsz_writes
+                .ok_or(Error::EventRingBeforeRegWrites)?;
             let erdp = self.evt_ring_deq_ptr.pointer();
-            self.evt_ring = EventRing::new(erstba, erstsz, erdp, &*memctx).ok()
+            self.evt_ring = Some(EventRing::new(erstba, erstsz, erdp, memctx)?);
+            self.pending_erstba_erstsz_writes = None;
         }
-        let event_ring = self.evt_ring.as_mut()?;
+
+        // unwrap: we either set evt_ring to Some() or we returned with ? above
+        let event_ring = self.evt_ring.as_mut().unwrap();
+
         if let Some((erstba, erstsz)) = self.pending_erstba_erstsz_writes.take()
         {
-            if let Err(e) =
-                event_ring.update_segment_table(erstba, erstsz, &memctx)
-            {
-                slog::error!(
-                    regulation.log,
-                    "Event Ring Segment Table update failed: {e}"
-                );
-            }
+            event_ring.update_segment_table(erstba, erstsz, &memctx)?;
         }
-        if let Some(erdp) = self.pending_erdp_write.take() {
+
+        if self.erdp_written {
+            let erdp = self.evt_ring_deq_ptr.pointer();
+            self.erdp_written = false;
             let empty_before = event_ring.is_empty();
             event_ring.update_dequeue_pointer(erdp);
             if !empty_before && event_ring.is_empty() {
                 // IPE should be set to 0 "when the Event Ring transitions to empty"
                 self.intr_pending_enable = false;
-                notify = true;
             }
         }
+
+        Ok(event_ring)
     }
 
     // handling IMODI / IMODC / IP / IE.
@@ -692,8 +698,10 @@ impl InterruptRegulation {
 impl XhciInterrupter {
     pub fn export(
         &self,
-    ) -> Result<migrate::XhciInterrupterV1, crate::migrate::MigrateStateError>
-    {
+    ) -> core::result::Result<
+        migrate::XhciInterrupterV1,
+        crate::migrate::MigrateStateError,
+    > {
         let XhciInterrupter {
             number,
             evt_ring_seg_tbl_size,
@@ -731,7 +739,7 @@ impl XhciInterrupter {
     pub fn import(
         &mut self,
         value: migrate::XhciInterrupterV1,
-    ) -> Result<(), crate::migrate::MigrateStateError> {
+    ) -> core::result::Result<(), crate::migrate::MigrateStateError> {
         let migrate::XhciInterrupterV1 {
             number,
             evt_ring_seg_tbl_size,
