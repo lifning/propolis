@@ -110,10 +110,8 @@ pub enum InterrupterRegisters {
     Management,
     Moderation,
     EventRingSegmentTableSize,
-    EventRingSegmentTableBaseAddress1,
-    EventRingSegmentTableBaseAddress2,
-    EventRingDequeuePointer1,
-    EventRingDequeuePointer2,
+    EventRingSegmentTableBaseAddress,
+    EventRingDequeuePointer,
 }
 
 /// eXtensible Host Controller Runtime Registers
@@ -220,10 +218,8 @@ lazy_static! {
                 (Runtime(Interrupter(i, Moderation)), 4),
                 (Runtime(Interrupter(i, EventRingSegmentTableSize)), 4),
                 (Reserved, 4),
-                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress1)), 4),
-                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress2)), 4),
-                (Runtime(Interrupter(i, EventRingDequeuePointer1)), 4),
-                (Runtime(Interrupter(i, EventRingDequeuePointer2)), 4),
+                (Runtime(Interrupter(i, EventRingSegmentTableBaseAddress)), 8),
+                (Runtime(Interrupter(i, EventRingDequeuePointer)), 8),
             ]
         }));
 
@@ -340,14 +336,8 @@ impl Registers {
                             Management => "IMAN",
                             Moderation => "IMOD",
                             EventRingSegmentTableSize => "ERSTSZ",
-                            EventRingSegmentTableBaseAddress1 => {
-                                "ERSTBA (lower DWORD)"
-                            }
-                            EventRingSegmentTableBaseAddress2 => {
-                                "ERSTBA (upper DWORD)"
-                            }
-                            EventRingDequeuePointer1 => "ERDP (lower DWORD)",
-                            EventRingDequeuePointer2 => "ERDP (upper DWORD)",
+                            EventRingSegmentTableBaseAddress => "ERSTBA",
+                            EventRingDequeuePointer => "ERDP",
                         }
                     }
                 }

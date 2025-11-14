@@ -2,6 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::sync::Arc;
+
 use migrate::PortTypeV1;
 
 use crate::hw::usb::xhci::{
@@ -48,7 +50,7 @@ pub struct Usb2Port {
     portpmsc: bits::PortPowerManagementStatusControlUsb2,
     portli: bits::PortLinkInfoUsb2,
     porthlpmc: bits::PortHardwareLpmControlUsb2,
-    event_sender: EventSender,
+    event_sender: Arc<EventSender>,
 }
 
 pub struct Usb3Port {
@@ -56,11 +58,11 @@ pub struct Usb3Port {
     portpmsc: bits::PortPowerManagementStatusControlUsb3,
     portli: bits::PortLinkInfoUsb3,
     porthlpmc: bits::PortHardwareLpmControlUsb3,
-    event_sender: EventSender,
+    event_sender: Arc<EventSender>,
 }
 
 impl Usb2Port {
-    pub fn new(event_sender: EventSender) -> Self {
+    pub fn new(event_sender: Arc<EventSender>) -> Self {
         Self {
             portsc: PortStatusControl::default(),
             portpmsc: Default::default(),
@@ -72,7 +74,7 @@ impl Usb2Port {
 }
 
 impl Usb3Port {
-    pub fn new(event_sender: EventSender) -> Self {
+    pub fn new(event_sender: Arc<EventSender>) -> Self {
         Self {
             // xHCI 1.2 sect 4.19.1.2, figure 4-27:
             // the initial state is Disconnected (RxDetect, PP=1)

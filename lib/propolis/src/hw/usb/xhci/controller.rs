@@ -178,8 +178,12 @@ impl XhciPortWakeHandleCollection {
         }
     }
 
+    // hack
     fn host_controller_reset(&self, event_sender: EventSender) {
-        *self.event_sender.lock().unwrap() = event_sender
+        *self.event_sender.lock().unwrap() = event_sender.to_owned();
+        for (_port_id, hdl) in self.handles.lock().unwrap().iter_mut() {
+            hdl.event_sender = event_sender.to_owned();
+        }
     }
 
     pub(super) fn handle_for_port(

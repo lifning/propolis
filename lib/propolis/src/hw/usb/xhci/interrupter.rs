@@ -168,19 +168,12 @@ impl XhciInterrupter {
             InterrupterRegisters::EventRingSegmentTableSize => {
                 U32(self.evt_ring_seg_tbl_size.0)
             }
-            InterrupterRegisters::EventRingSegmentTableBaseAddress1 => {
-                U32(self.evt_ring_seg_base_addr.address().0 as u32)
+            InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                U64(self.evt_ring_seg_base_addr.address().0)
             }
-            InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
-                U32((self.evt_ring_seg_base_addr.address().0 >> 32) as u32)
-            }
-            InterrupterRegisters::EventRingDequeuePointer1 => {
+            InterrupterRegisters::EventRingDequeuePointer => {
                 let regulation = self.interrupts.0.lock().unwrap();
-                U32(regulation.evt_ring_deq_ptr.0 as u32)
-            }
-            InterrupterRegisters::EventRingDequeuePointer2 => {
-                let regulation = self.interrupts.0.lock().unwrap();
-                U32((regulation.evt_ring_deq_ptr.0 >> 32) as u32)
+                U64(regulation.evt_ring_deq_ptr.0)
             }
         }
     }
@@ -242,43 +235,25 @@ impl XhciInterrupter {
                 U32(self.evt_ring_seg_tbl_size.0)
             }
             // subject to 64-bit split writes when AC64=1 (xHCI 1.2 sect 5.1)
-            InterrupterRegisters::EventRingSegmentTableBaseAddress1 => {
-                self.evt_ring_seg_base_addr.0 &= 0xFFFFFFFF00000000u64;
-                self.evt_ring_seg_base_addr.0 |= wo.read_u32() as u64;
-                U32(self.evt_ring_seg_base_addr.0 as u32)
-            }
-            InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
-                let val = wo.read_u32();
-                self.evt_ring_seg_base_addr.0 &= 0xFFFFFFFFu64;
-                self.evt_ring_seg_base_addr.0 |= (val as u64) << 32;
-                U32(val)
+            InterrupterRegisters::EventRingSegmentTableBaseAddress => {
+                self.evt_ring_seg_base_addr.0 = wo.read_u64() as u64;
+                U64(self.evt_ring_seg_base_addr.0)
             }
             // also subject to 64-bit split writes
-            InterrupterRegisters::EventRingDequeuePointer1 => {
-                let erdp_low =
-                    bits::EventRingDequeuePointer(wo.read_u32() as u64);
+            InterrupterRegisters::EventRingDequeuePointer => {
+                let erdp = bits::EventRingDequeuePointer(wo.read_u64());
                 let mut regulation = self.interrupts.0.lock().unwrap();
                 regulation.evt_ring_deq_ptr.set_dequeue_erst_segment_index(
-                    erdp_low.dequeue_erst_segment_index(),
+                    erdp.dequeue_erst_segment_index(),
                 );
                 // RW1C
-                if erdp_low.handler_busy() {
+                if erdp.handler_busy() {
                     regulation.evt_ring_deq_ptr.set_handler_busy(false);
                 }
-                regulation.evt_ring_deq_ptr.set_pointer(erdp_low.pointer());
+                regulation.evt_ring_deq_ptr.set_pointer(erdp.pointer());
                 regulation.erdp_written = true;
                 notify = true;
-                U32(erdp_low.0 as u32)
-            }
-            InterrupterRegisters::EventRingDequeuePointer2 => {
-                let val = wo.read_u32();
-                let erdp_high_bits = (val as u64) << 32;
-                let mut regulation = self.interrupts.0.lock().unwrap();
-                regulation.evt_ring_deq_ptr.0 &= 0xFFFFFFFFu64;
-                regulation.evt_ring_deq_ptr.0 |= erdp_high_bits;
-                regulation.erdp_written = true;
-                notify = true;
-                U32(val)
+                U64(erdp.0)
             }
         };
 
@@ -288,8 +263,7 @@ impl XhciInterrupter {
         // the next time it's accessed, via `InterruptRegulation::event_ring_mut`.
         match intr_regs {
             InterrupterRegisters::EventRingSegmentTableSize
-            | InterrupterRegisters::EventRingSegmentTableBaseAddress1
-            | InterrupterRegisters::EventRingSegmentTableBaseAddress2 => {
+            | InterrupterRegisters::EventRingSegmentTableBaseAddress => {
                 let erstba = self.evt_ring_seg_base_addr.address();
                 let erstsz = self.evt_ring_seg_tbl_size.size() as usize;
 
@@ -311,6 +285,9 @@ impl XhciInterrupter {
         written_value
     }
 
+    // TODO: replace this - only want one of these per xhc,
+    // but it needs to be able to get at the Mutex<InterruptRegulation>
+    // even when it's been swapped out in a reset
     pub fn sender(&self) -> EventSender {
         EventSender {
             interrupts: Arc::clone(&self.interrupts),
@@ -420,6 +397,8 @@ impl XhciPciIntr {
 }
 
 pub struct EventSender {
+    // FIXME: stale from before reset.
+    // need a way for this to
     interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
     pci_state: Weak<pci::DeviceState>,
 }
