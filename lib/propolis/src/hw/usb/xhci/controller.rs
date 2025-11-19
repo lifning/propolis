@@ -95,6 +95,7 @@ impl XhciState {
     fn new(
         pci_state: &Arc<pci::DeviceState>,
         vmm_hdl: Arc<VmmHdl>,
+        event_sender: Arc<EventSender>,
         log: slog::Logger,
     ) -> Self {
         // The controller is initially halted and asserts CNR (controller not ready)
@@ -111,8 +112,7 @@ impl XhciState {
             Arc::downgrade(&any_interrupt_pending_raised),
             log.clone(),
         )];
-
-        let event_sender = Arc::new(interrupters[0].create_event_sender());
+        interrupters[0].update_event_sender(&event_sender);
 
         let port_regs: [Box<dyn XhciUsbPort>; MAX_PORTS as usize] = [
             // NUM_USB2_PORTS = 4
@@ -196,7 +196,7 @@ impl XhciPortHandleCollection {
 
 pub struct XhciPortHandle {
     state_weak: Weak<Mutex<XhciState>>,
-    // HACK - unpub
+    // HACK - unpub, currently leaky abstraction for trying out possible plumbing configurations
     pub(crate) event_sender: Arc<EventSender>,
     port_id: PortId,
 }
@@ -260,8 +260,16 @@ impl PciXhci {
                 .finish(),
         );
 
-        let xhci_state = XhciState::new(&pci_state, hdl, log.clone());
-        let event_sender = Arc::clone(&xhci_state.event_sender);
+        let event_sender = Arc::new(EventSender::new(&pci_state));
+
+        let xhci_state = XhciState::new(
+            &pci_state,
+            hdl,
+            Arc::clone(&event_sender),
+            log.clone(),
+        );
+
+        xhci_state.interrupters[0].update_event_sender(&event_sender);
 
         let state = Arc::new(Mutex::new(xhci_state));
 
@@ -584,17 +592,16 @@ impl PciXhci {
                     );
                     devices.extend(state.dev_slots.detach_all_for_reset());
 
+                    // HACK - we reuse this, may as well use the ref from the previous state
+                    let event_sender = Arc::clone(&state.event_sender);
+
                     *state = XhciState::new(
                         &self.pci_state,
                         state.vmm_hdl.clone(),
+                        event_sender,
                         self.log.clone(),
                     );
                     state.queued_device_connections = devices;
-
-                    // XXX - i'm sensing a Mutex<Mutex<Mutex<>>> approaching.
-                    // maybe this is getting silly?
-                    state.interrupters[0]
-                        .update_event_sender(&state.event_sender);
 
                     state.usbsts.set_controller_not_ready(false);
                     slog::trace!(self.log, "xHC reset");

@@ -275,16 +275,10 @@ impl XhciInterrupter {
     // XXX: only call once at PCI dev creation. only want one of these per xhc,
     // but it needs to be able to get at the Mutex<InterruptRegulation>
     // even when it's been swapped out in a reset
-    pub fn create_event_sender(&self) -> EventSender {
-        EventSender {
-            interrupts: Mutex::new(Arc::downgrade(&self.interrupts)),
-            pci_state: self.pci_state.clone(),
-        }
-    }
-
     pub fn update_event_sender(&self, sender: &EventSender) {
         eprintln!("replacing interrupt-reg handle");
-        *sender.interrupts.lock().unwrap() = Arc::downgrade(&self.interrupts);
+        *sender.interrupts.lock().unwrap() =
+            Some(Arc::downgrade(&self.interrupts));
     }
 
     pub fn set_pci_intr_mode(
@@ -389,12 +383,20 @@ impl XhciPciIntr {
 }
 
 pub struct EventSender {
+    // this is a ridiculous type.
     // must be replaced with the new Arc<(Mutex<>, Condvar)> on device reset
-    interrupts: Mutex<Weak<(Mutex<InterruptRegulation>, Condvar)>>,
+    interrupts: Mutex<Option<Weak<(Mutex<InterruptRegulation>, Condvar)>>>,
     pci_state: Weak<pci::DeviceState>,
 }
 
 impl EventSender {
+    pub fn new(pci_state: &Arc<pci::DeviceState>) -> Self {
+        Self {
+            interrupts: Mutex::new(None),
+            pci_state: Arc::downgrade(pci_state),
+        }
+    }
+
     // returns Ok when an event was enqueued and an interrupt was fired
     pub fn enqueue_event(
         &self,
@@ -404,12 +406,7 @@ impl EventSender {
         let pci_state = self.pci_state.upgrade().ok_or(Error::NoPciState)?;
         let memctx = pci_state.acc_mem.access().ok_or(Error::NoMemAccess)?;
 
-        let interrupts = self
-            .interrupts
-            .lock()
-            .unwrap()
-            .upgrade()
-            .ok_or(Error::StaleInterrupterReference)?;
+        let interrupts = self.interrupts()?;
 
         let mut regulation = interrupts.0.lock().unwrap();
 
@@ -430,7 +427,7 @@ impl EventSender {
     }
 
     pub fn reset_edtla(&self) {
-        if let Some(interrupts) = self.interrupts.lock().unwrap().upgrade() {
+        if let Ok(interrupts) = self.interrupts() {
             interrupts.0.lock().unwrap().evt_data_transfer_len_accum = 0;
         }
     }
@@ -452,12 +449,7 @@ impl EventSender {
         // the number of bytes transferred are added to the EDTLA,
         // wrapping at 24-bit max (16,777,215)
         let edtla = {
-            let interrupts = self
-                .interrupts
-                .lock()
-                .unwrap()
-                .upgrade()
-                .ok_or(Error::StaleInterrupterReference)?;
+            let interrupts = self.interrupts()?;
             let mut guard = interrupts.0.lock().unwrap();
             guard.evt_data_transfer_len_accum += bytes_transferred as u32;
             guard.evt_data_transfer_len_accum &= 0xffffff;
@@ -538,6 +530,15 @@ impl EventSender {
             self.enqueue_event(evt.evt_info, evt.block_event_interrupt)?;
         }
         Ok(())
+    }
+
+    fn interrupts(&self) -> Result<Arc<(Mutex<InterruptRegulation>, Condvar)>> {
+        self.interrupts
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(Error::StaleInterrupterReference)
     }
 }
 
