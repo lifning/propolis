@@ -12,7 +12,7 @@ use crate::{hw::pci, vmm::MemCtx};
 
 use super::xhci::{
     bits::device_context::EndpointContext,
-    controller::XhciPortWakeHandle,
+    controller::XhciPortHandle,
     device_slots::{EndpointId, SlotId},
     port::PortId,
     rings::consumer::transfer::TransferTrb,
@@ -36,7 +36,7 @@ impl UsbDeviceType {
     pub fn create(
         &self,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortWakeHandle>,
+        port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
     ) -> Box<dyn UsbDevice> {
         match self {
@@ -56,7 +56,7 @@ impl UsbDeviceType {
     pub fn create_from_payload(
         payload: &migrate::UsbDeviceV1,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortWakeHandle>,
+        port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
     ) -> core::result::Result<
         Box<dyn UsbDevice>,

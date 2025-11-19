@@ -17,7 +17,7 @@ use crate::{
         },
         xhci::{
             bits::ring_data::TrbCompletionCode,
-            controller::XhciPortWakeHandle,
+            controller::XhciPortHandle,
             device_slots::{EndpointId, SlotId},
             rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
         },
@@ -49,7 +49,7 @@ where
     bytes_transferred: usize,
     slot_id: SlotId,
     endpoint_id: EndpointId,
-    port_wake_hdl: Arc<XhciPortWakeHandle>,
+    port_wake_hdl: Arc<XhciPortHandle>,
     _spooky: PhantomData<C>,
 }
 
@@ -61,7 +61,7 @@ where
     pub fn new(
         slot_id: SlotId,
         endpoint_id: EndpointId,
-        port_wake_hdl: Arc<XhciPortWakeHandle>,
+        port_wake_hdl: Arc<XhciPortHandle>,
     ) -> Self {
         Self {
             current_setup: None,
@@ -76,7 +76,7 @@ where
 
     pub fn new_migrated(
         value: &migrate::ControlEndpointV1,
-        port_wake_hdl: Arc<XhciPortWakeHandle>,
+        port_wake_hdl: Arc<XhciPortHandle>,
     ) -> Self {
         let mut new = Self::new(
             SlotId::from(value.slot_id),

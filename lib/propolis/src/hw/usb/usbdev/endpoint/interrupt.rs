@@ -13,7 +13,7 @@ use crate::hw::{
     pci,
     usb::xhci::{
         bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
-        controller::XhciPortWakeHandle,
+        controller::XhciPortHandle,
         device_slots::{EndpointId, SlotId},
         interrupter::Error as InterrupterError,
         rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
@@ -56,14 +56,14 @@ impl InterruptInData {
 struct PeriodicTransferPollThread {
     weak_data: Weak<(Mutex<InterruptInData>, Condvar)>,
     weak_pci_state: Weak<pci::DeviceState>,
-    port_hdl: Weak<XhciPortWakeHandle>,
+    port_hdl: Weak<XhciPortHandle>,
     slot_id: SlotId,
     endpoint_id: EndpointId,
 }
 
 impl PeriodicTransferPollThread {
     fn spawn(
-        port_hdl: Weak<XhciPortWakeHandle>,
+        port_hdl: Weak<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
@@ -161,7 +161,7 @@ impl PeriodicTransferPollThread {
     fn notify_short_packet(
         &self,
         xfer: &TransferTrb,
-        port_hdl: &Arc<XhciPortWakeHandle>,
+        port_hdl: &Arc<XhciPortHandle>,
     ) -> Result<(), InterrupterError> {
         if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
             probes::usb_interrupt_xfer_shortpacket!(|| (
@@ -185,7 +185,7 @@ impl PeriodicTransferPollThread {
         &self,
         data: Vec<u8>,
         xfer: TransferTrb,
-        port_hdl: &Arc<XhciPortWakeHandle>,
+        port_hdl: &Arc<XhciPortHandle>,
     ) -> Result<(), InterrupterError> {
         let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
             return Err(todo!());
@@ -225,7 +225,7 @@ pub struct InterruptInEndpoint {
 impl InterruptInEndpoint {
     pub fn new(
         period: Duration,
-        port_hdl: Weak<XhciPortWakeHandle>,
+        port_hdl: Weak<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
@@ -252,7 +252,7 @@ impl InterruptInEndpoint {
 
     pub fn new_migrated(
         value: &migrate::InterruptInEndpointV1,
-        port_hdl: Weak<XhciPortWakeHandle>,
+        port_hdl: Weak<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
     ) -> Self {
         let migrate::InterruptInEndpointV1 {

@@ -41,6 +41,8 @@ pub enum Error {
     MultipleInterruptersUnimplemented,
     #[error("Tried to access Event Ring before its location was defined by writes to ERSTBA/ERSTSZ")]
     EventRingBeforeRegWrites,
+    #[error("Sent Event TRB to stale Event Ring reference")]
+    StaleInterrupterReference,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -55,7 +57,7 @@ pub struct XhciInterrupter {
     log: slog::Logger,
 }
 
-struct InterruptRegulation {
+pub struct InterruptRegulation {
     usbcmd_inte: bool,
     any_ip_raised: Weak<AtomicBool>,
 
@@ -97,28 +99,13 @@ impl XhciInterrupter {
         log: slog::Logger,
     ) -> Self {
         let interrupts = Arc::new((
-            Mutex::new(InterruptRegulation {
-                usbcmd_inte: true,
-                any_ip_raised,
+            Mutex::new(InterruptRegulation::new(
                 number,
-                management: bits::InterrupterManagement::default(),
-                moderation: bits::InterrupterModeration::default(),
-                evt_ring: None,
-                pending_erstba_erstsz_writes: None,
-                erdp_written: false,
-                evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
-                evt_data_transfer_len_accum: 0,
-                imod_allow_at: time::VmGuestInstant::now(&vmm_hdl).unwrap(),
-                intr_pending_enable: false,
-                pci_intr: XhciPciIntr {
-                    msix_hdl: pci_state.msix_hdl(),
-                    pin: pci_state.lintr_pin(),
-                    pci_intr_mode: pci_state.get_intr_mode(),
-                    log: log.to_owned(),
-                },
-                terminate: false,
-                log: log.to_owned(),
-            }),
+                &vmm_hdl,
+                pci_state,
+                any_ip_raised,
+                &log,
+            )),
             Condvar::new(),
         ));
         let pair = Arc::downgrade(&interrupts);
@@ -285,14 +272,19 @@ impl XhciInterrupter {
         written_value
     }
 
-    // TODO: replace this - only want one of these per xhc,
+    // XXX: only call once at PCI dev creation. only want one of these per xhc,
     // but it needs to be able to get at the Mutex<InterruptRegulation>
     // even when it's been swapped out in a reset
-    pub fn sender(&self) -> EventSender {
+    pub fn create_event_sender(&self) -> EventSender {
         EventSender {
-            interrupts: Arc::clone(&self.interrupts),
+            interrupts: Mutex::new(Arc::downgrade(&self.interrupts)),
             pci_state: self.pci_state.clone(),
         }
+    }
+
+    pub fn update_event_sender(&self, sender: &EventSender) {
+        eprintln!("replacing interrupt-reg handle");
+        *sender.interrupts.lock().unwrap() = Arc::downgrade(&self.interrupts);
     }
 
     pub fn set_pci_intr_mode(
@@ -397,19 +389,9 @@ impl XhciPciIntr {
 }
 
 pub struct EventSender {
-    // FIXME: stale from before reset.
-    // need a way for this to
-    interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
+    // must be replaced with the new Arc<(Mutex<>, Condvar)> on device reset
+    interrupts: Mutex<Weak<(Mutex<InterruptRegulation>, Condvar)>>,
     pci_state: Weak<pci::DeviceState>,
-}
-
-impl<'a> Clone for EventSender {
-    fn clone(&self) -> Self {
-        Self {
-            interrupts: Arc::clone(&self.interrupts),
-            pci_state: self.pci_state.clone(),
-        }
-    }
 }
 
 impl EventSender {
@@ -422,7 +404,14 @@ impl EventSender {
         let pci_state = self.pci_state.upgrade().ok_or(Error::NoPciState)?;
         let memctx = pci_state.acc_mem.access().ok_or(Error::NoMemAccess)?;
 
-        let mut regulation = self.interrupts.0.lock().unwrap();
+        let interrupts = self
+            .interrupts
+            .lock()
+            .unwrap()
+            .upgrade()
+            .ok_or(Error::StaleInterrupterReference)?;
+
+        let mut regulation = interrupts.0.lock().unwrap();
 
         let evt_ring = regulation.event_ring_mut(&memctx)?;
         if let Err(e) = evt_ring.enqueue(event_info.into(), &memctx) {
@@ -432,7 +421,7 @@ impl EventSender {
         // check imod/iman for when to fire pci intr
         if !block_event_interrupt {
             regulation.intr_pending_enable = true;
-            self.interrupts.1.notify_one();
+            interrupts.1.notify_one();
             let intr_num = regulation.number;
             probes::xhci_interrupter_pending!(move || (intr_num));
         }
@@ -441,7 +430,9 @@ impl EventSender {
     }
 
     pub fn reset_edtla(&self) {
-        self.interrupts.0.lock().unwrap().evt_data_transfer_len_accum = 0;
+        if let Some(interrupts) = self.interrupts.lock().unwrap().upgrade() {
+            interrupts.0.lock().unwrap().evt_data_transfer_len_accum = 0;
+        }
     }
 
     /// After a transfer, post the appropriate Event TRBs to the Event Ring
@@ -461,7 +452,13 @@ impl EventSender {
         // the number of bytes transferred are added to the EDTLA,
         // wrapping at 24-bit max (16,777,215)
         let edtla = {
-            let mut guard = self.interrupts.0.lock().unwrap();
+            let interrupts = self
+                .interrupts
+                .lock()
+                .unwrap()
+                .upgrade()
+                .ok_or(Error::StaleInterrupterReference)?;
+            let mut guard = interrupts.0.lock().unwrap();
             guard.evt_data_transfer_len_accum += bytes_transferred as u32;
             guard.evt_data_transfer_len_accum &= 0xffffff;
             guard.evt_data_transfer_len_accum
@@ -576,9 +573,37 @@ impl Drop for XhciInterrupter {
 // """
 
 impl InterruptRegulation {
-    //
-    // TODO: finish (appropriate errors instead of Try-Option ofc..)
-    //
+    fn new(
+        number: u16,
+        vmm_hdl: &Arc<VmmHdl>,
+        pci_state: &Arc<pci::DeviceState>,
+        any_ip_raised: Weak<AtomicBool>,
+        log: &slog::Logger,
+    ) -> Self {
+        Self {
+            usbcmd_inte: true,
+            any_ip_raised,
+            number,
+            management: bits::InterrupterManagement::default(),
+            moderation: bits::InterrupterModeration::default(),
+            evt_ring: None,
+            pending_erstba_erstsz_writes: None,
+            erdp_written: false,
+            evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
+            evt_data_transfer_len_accum: 0,
+            imod_allow_at: time::VmGuestInstant::now(vmm_hdl).unwrap(),
+            intr_pending_enable: false,
+            pci_intr: XhciPciIntr {
+                msix_hdl: pci_state.msix_hdl(),
+                pin: pci_state.lintr_pin(),
+                pci_intr_mode: pci_state.get_intr_mode(),
+                log: log.to_owned(),
+            },
+            terminate: false,
+            log: log.to_owned(),
+        }
+    }
+
     fn event_ring_mut(&mut self, memctx: &MemCtx) -> Result<&mut EventRing> {
         if self.evt_ring.is_none() {
             let (erstba, erstsz) = self

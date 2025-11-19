@@ -64,7 +64,7 @@ pub struct XhciState {
 
     /// Sends Event TRBs to the default Event Ring on behalf of *the controller itself*
     /// (not a specific device)
-    pub(super) event_sender: EventSender,
+    pub(super) event_sender: Arc<EventSender>,
 
     /// EINT in USBSTS is set when any interrupters IP changes from 0 to 1.
     /// we give a weak reference to this to our interrupters, and set the flag
@@ -112,19 +112,19 @@ impl XhciState {
             log.clone(),
         )];
 
-        let event_sender = interrupters[0].sender();
+        let event_sender = Arc::new(interrupters[0].create_event_sender());
 
         let port_regs: [Box<dyn XhciUsbPort>; MAX_PORTS as usize] = [
             // NUM_USB2_PORTS = 4
-            Box::new(port::Usb2Port::new(interrupters[0].sender())),
-            Box::new(port::Usb2Port::new(interrupters[0].sender())),
-            Box::new(port::Usb2Port::new(interrupters[0].sender())),
-            Box::new(port::Usb2Port::new(interrupters[0].sender())),
+            Box::new(port::Usb2Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb2Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb2Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb2Port::new(Arc::clone(&event_sender))),
             // NUM_USB3_PORTS = 4
-            Box::new(port::Usb3Port::new(interrupters[0].sender())),
-            Box::new(port::Usb3Port::new(interrupters[0].sender())),
-            Box::new(port::Usb3Port::new(interrupters[0].sender())),
-            Box::new(port::Usb3Port::new(interrupters[0].sender())),
+            Box::new(port::Usb3Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb3Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb3Port::new(Arc::clone(&event_sender))),
+            Box::new(port::Usb3Port::new(Arc::clone(&event_sender))),
         ];
 
         Self {
@@ -160,44 +160,33 @@ impl XhciState {
     }
 }
 
-pub struct XhciPortWakeHandleCollection {
+// TODO: better name for this (and PortHandle)?
+pub struct XhciPortHandleCollection {
     state_weak: Weak<Mutex<XhciState>>,
-    event_sender: Mutex<EventSender>,
-    handles: Mutex<HashMap<PortId, Arc<XhciPortWakeHandle>>>,
+    event_sender: Arc<EventSender>,
+    handles: Mutex<HashMap<PortId, Arc<XhciPortHandle>>>,
 }
 
-impl XhciPortWakeHandleCollection {
+impl XhciPortHandleCollection {
     fn new(
-        event_sender: EventSender,
+        event_sender: Arc<EventSender>,
         state_weak: Weak<Mutex<XhciState>>,
     ) -> Self {
-        Self {
-            state_weak,
-            event_sender: Mutex::new(event_sender),
-            handles: Default::default(),
-        }
-    }
-
-    // hack
-    fn host_controller_reset(&self, event_sender: EventSender) {
-        *self.event_sender.lock().unwrap() = event_sender.to_owned();
-        for (_port_id, hdl) in self.handles.lock().unwrap().iter_mut() {
-            hdl.event_sender = event_sender.to_owned();
-        }
+        Self { state_weak, event_sender, handles: Default::default() }
     }
 
     pub(super) fn handle_for_port(
         &self,
         port_id: PortId,
-    ) -> Arc<XhciPortWakeHandle> {
+    ) -> Arc<XhciPortHandle> {
         self.handles
             .lock()
             .unwrap()
             .entry(port_id)
             .or_insert_with(|| {
-                Arc::new(XhciPortWakeHandle {
+                Arc::new(XhciPortHandle {
                     state_weak: self.state_weak.clone(),
-                    event_sender: self.event_sender.lock().unwrap().clone(),
+                    event_sender: Arc::clone(&self.event_sender),
                     port_id,
                 })
             })
@@ -205,13 +194,14 @@ impl XhciPortWakeHandleCollection {
     }
 }
 
-pub struct XhciPortWakeHandle {
+pub struct XhciPortHandle {
     state_weak: Weak<Mutex<XhciState>>,
-    pub(crate) event_sender: EventSender,
+    // HACK - unpub
+    pub(crate) event_sender: Arc<EventSender>,
     port_id: PortId,
 }
 
-impl XhciPortWakeHandle {
+impl XhciPortHandle {
     /// Wake a port if it is in suspend, generating an Event TRB.
     pub fn wake_up(&self) {
         if let Some(state) = self.state_weak.upgrade() {
@@ -239,7 +229,7 @@ pub struct PciXhci {
     /// Controller state
     state: Arc<Mutex<XhciState>>,
 
-    port_wake_handles: XhciPortWakeHandleCollection,
+    port_wake_handles: XhciPortHandleCollection,
 
     log: slog::Logger,
 }
@@ -270,15 +260,13 @@ impl PciXhci {
                 .finish(),
         );
 
-        let state =
-            Arc::new(Mutex::new(XhciState::new(&pci_state, hdl, log.clone())));
+        let xhci_state = XhciState::new(&pci_state, hdl, log.clone());
+        let event_sender = Arc::clone(&xhci_state.event_sender);
 
-        let event_sender = state.lock().unwrap().event_sender.clone();
+        let state = Arc::new(Mutex::new(xhci_state));
 
-        let port_wake_handles = XhciPortWakeHandleCollection::new(
-            event_sender,
-            Arc::downgrade(&state),
-        );
+        let port_wake_handles =
+            XhciPortHandleCollection::new(event_sender, Arc::downgrade(&state));
 
         Arc::new(Self { pci_state, state, port_wake_handles, log })
     }
@@ -603,9 +591,10 @@ impl PciXhci {
                     );
                     state.queued_device_connections = devices;
 
-                    // HACK
-                    self.port_wake_handles
-                        .host_controller_reset(state.event_sender.clone());
+                    // XXX - i'm sensing a Mutex<Mutex<Mutex<>>> approaching.
+                    // maybe this is getting silly?
+                    state.interrupters[0]
+                        .update_event_sender(&state.event_sender);
 
                     state.usbsts.set_controller_not_ready(false);
                     slog::trace!(self.log, "xHC reset");
@@ -1050,7 +1039,7 @@ impl MigrateMulti for PciXhci {
             mfindex_wrap_thread_generation,
             interrupters,
             event_sender: _,
-            any_interrupt_pending_raised: _,
+            any_interrupt_pending_raised,
             command_ring,
             crcr,
             dev_slots,

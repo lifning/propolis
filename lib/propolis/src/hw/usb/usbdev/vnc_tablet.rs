@@ -21,7 +21,7 @@ use crate::{
             bits::{
                 device_context::EndpointContext, ring_data::TrbCompletionCode,
             },
-            controller::XhciPortWakeHandle,
+            controller::XhciPortHandle,
             device_slots::{EndpointId, SlotId},
             rings::{
                 consumer::transfer::TransferTrb, producer::event::EventInfo,
@@ -119,7 +119,7 @@ pub struct HIDTabletDevice {
     slot_id: Option<SlotId>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
-    port_wake_hdl: Arc<XhciPortWakeHandle>,
+    port_wake_hdl: Arc<XhciPortHandle>,
     pci_state: Arc<pci::DeviceState>,
 }
 
@@ -132,7 +132,7 @@ impl HIDTabletDevice {
 
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortWakeHandle>,
+        port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
     ) -> Self {
         Self {

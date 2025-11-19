@@ -968,7 +968,7 @@ impl DeviceSlotTable {
         &mut self,
         value: &migrate::DeviceSlotTableV1,
         ctx: &crate::migrate::MigrateCtx,
-        wake_handles: &super::controller::XhciPortWakeHandleCollection,
+        wake_handles: &super::controller::XhciPortHandleCollection,
         pci_state: &Arc<pci::DeviceState>,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;

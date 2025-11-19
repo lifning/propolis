@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::{
     hw::usb::xhci::{
-        controller::XhciPortWakeHandle,
+        controller::XhciPortHandle,
         device_slots::{EndpointId, SlotId},
         rings::consumer::transfer::TransferTrb,
     },
@@ -26,7 +26,7 @@ use super::{
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 pub struct NullUsbDevice {
     control_endpoint: Option<ControlEndpoint<NoClassRequestInfo>>,
-    port_wake_hdl: Arc<XhciPortWakeHandle>,
+    port_wake_hdl: Arc<XhciPortHandle>,
 }
 
 impl UsbDevice for NullUsbDevice {
@@ -165,7 +165,7 @@ impl NullUsbDevice {
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
-    pub fn new(port_wake_hdl: Arc<XhciPortWakeHandle>) -> Self {
+    pub fn new(port_wake_hdl: Arc<XhciPortHandle>) -> Self {
         Self { control_endpoint: None, port_wake_hdl }
     }
 
