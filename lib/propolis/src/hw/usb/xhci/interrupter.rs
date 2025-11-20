@@ -203,6 +203,11 @@ impl XhciInterrupter {
                 let mut regulation = self.interrupts.0.lock().unwrap();
                 regulation.moderation =
                     bits::InterrupterModeration(wo.read_u32());
+
+                // XXX AAAAAAA yep this fixes it. time to figure out why
+                regulation.moderation = bits::InterrupterModeration(0x4000);
+                // XXX AAAAAAA
+
                 // emulating setting the value of IMODC, which counts down to zero.
                 if let Some(inst) = time::VmGuestInstant::now(&self.vmm_hdl)
                     .unwrap()
