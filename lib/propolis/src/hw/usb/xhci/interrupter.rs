@@ -276,7 +276,6 @@ impl XhciInterrupter {
     // but it needs to be able to get at the Mutex<InterruptRegulation>
     // even when it's been swapped out in a reset
     pub fn update_event_sender(&self, sender: &EventSender) {
-        eprintln!("replacing interrupt-reg handle");
         *sender.interrupts.lock().unwrap() =
             Some(Arc::downgrade(&self.interrupts));
     }
@@ -666,11 +665,17 @@ impl InterruptRegulation {
 
             let mut guard = cvar
                 .wait_while(guard, |ir| {
-                    !(ir.terminate
-                        || (ir.usbcmd_inte
+                    !(ir.terminate // was Interrupter dropped (i.e. xHC reset or shutdown)
+                        || (
+                            // enable system bus interrupt generation (xHCI 1.2 sect 4.2)
+                            ir.usbcmd_inte
+                            // < Interrupt Enable = '1'? >
                             && ir.management.enable()
+                            // < Interrupt Pending Enable? >
                             && ir.intr_pending_enable
-                            && !ir.evt_ring_deq_ptr.handler_busy()))
+                            // < Event Handler Busy? >
+                            && !ir.evt_ring_deq_ptr.handler_busy()
+                        ))
                 })
                 .unwrap();
 
@@ -678,17 +683,25 @@ impl InterruptRegulation {
                 break;
             }
 
-            let Some(ip_raised) = guard.any_ip_raised.upgrade() else { break };
-            guard.management.set_pending(true);
-            ip_raised.store(true, Ordering::Release);
+            if !guard.management.pending() {
+                // when any interrupter's IP changes from 0 to 1, set EINT in USBSTS
+                let Some(ip_raised) = guard.any_ip_raised.upgrade() else {
+                    break;
+                };
+                ip_raised.store(true, Ordering::Release);
+            }
 
+            // [ Interrupt Pending = '1'
+            // Event Handler Busy = '1' ]
+            guard.management.set_pending(true);
             guard.evt_ring_deq_ptr.set_handler_busy(true);
 
-            guard.pci_intr.fire_interrupt(guard.number);
-
-            // IP flag cleared by the completion of PCI write
+            // Assertion of IP flag generates an MSI-X/Pin interrupt.
+            // IP flag cleared by the completion of PCI write.
             // (xHCI 1.2 fig 4-22 description)
+            guard.pci_intr.fire_interrupt(guard.number);
             guard.management.set_pending(false);
+
             // load counter with interval
             guard.imod_allow_at = time::VmGuestInstant::now(&vmm_hdl)
                 .unwrap()

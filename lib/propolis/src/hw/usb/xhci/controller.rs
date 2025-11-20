@@ -66,7 +66,7 @@ pub struct XhciState {
     /// (not a specific device)
     pub(super) event_sender: Arc<EventSender>,
 
-    /// EINT in USBSTS is set when any interrupters IP changes from 0 to 1.
+    /// EINT in USBSTS is set when any interrupter's IP changes from 0 to 1.
     /// we give a weak reference to this to our interrupters, and set the flag
     /// in USBSTS before reading it when it's true.
     any_interrupt_pending_raised: Arc<AtomicBool>,
@@ -99,7 +99,7 @@ impl XhciState {
         log: slog::Logger,
     ) -> Self {
         // The controller is initially halted and asserts CNR (controller not ready)
-        let usb_sts = bits::UsbStatus(0)
+        let usbsts = bits::UsbStatus(0)
             .with_host_controller_halted(true)
             .with_controller_not_ready(true);
 
@@ -130,7 +130,7 @@ impl XhciState {
         Self {
             vmm_hdl,
             usbcmd: bits::UsbCommand(0),
-            usbsts: usb_sts,
+            usbsts,
             dnctrl: bits::DeviceNotificationControl::new([0]),
             dev_slots: DeviceSlotTable::new(log.clone()),
             config: bits::Configure(0),
