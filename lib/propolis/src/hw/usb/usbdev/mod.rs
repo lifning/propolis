@@ -38,16 +38,19 @@ impl UsbDeviceType {
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        log: &slog::Logger,
     ) -> Box<dyn UsbDevice> {
+        let log = log.new(slog::o!("component" => "usbdev", "port_id" => port_wake_hdl.port_id().as_raw_id()));
         match self {
-            UsbDeviceType::Null => {
-                Box::new(demo_state_tracker::NullUsbDevice::new(port_wake_hdl))
-            }
+            UsbDeviceType::Null => Box::new(
+                demo_state_tracker::NullUsbDevice::new(port_wake_hdl, log),
+            ),
             UsbDeviceType::HidTablet => {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
                     hid_report.clone(),
                     port_wake_hdl,
                     pci_state,
+                    log,
                 ))
             }
         }
@@ -58,17 +61,17 @@ impl UsbDeviceType {
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        log: &slog::Logger,
     ) -> core::result::Result<
         Box<dyn UsbDevice>,
         crate::migrate::MigrateStateError,
     > {
         let mut dev = match &payload.device_type {
             migrate::UsbDeviceTypeV1::Null => {
-                Self::Null.create(hid_report, port_wake_hdl, pci_state)
+                Self::Null.create(hid_report, port_wake_hdl, pci_state, log)
             }
-            migrate::UsbDeviceTypeV1::Tablet(tablet_payload) => {
-                Self::HidTablet.create(hid_report, port_wake_hdl, pci_state)
-            }
+            migrate::UsbDeviceTypeV1::Tablet(tablet_payload) => Self::HidTablet
+                .create(hid_report, port_wake_hdl, pci_state, log),
         };
         dev.import(&payload)?;
         Ok(dev)

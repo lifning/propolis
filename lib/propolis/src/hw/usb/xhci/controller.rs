@@ -202,6 +202,9 @@ pub struct XhciPortHandle {
 }
 
 impl XhciPortHandle {
+    pub fn port_id(&self) -> PortId {
+        self.port_id
+    }
     /// Wake a port if it is in suspend, generating an Event TRB.
     pub fn wake_up(&self) {
         if let Some(state) = self.state_weak.upgrade() {
@@ -293,6 +296,7 @@ impl PciXhci {
             hid_report,
             self.port_wake_handles.handle_for_port(port_id),
             &self.pci_state,
+            &self.log,
         );
 
         state.queued_device_connections.push((port_id, dev));
@@ -1172,6 +1176,7 @@ impl MigrateMulti for PciXhci {
                     ctx.hid_report,
                     self.port_wake_handles.handle_for_port(port_id),
                     &self.pci_state,
+                    &self.log,
                 )?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))
             })

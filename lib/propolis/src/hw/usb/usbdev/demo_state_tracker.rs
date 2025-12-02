@@ -27,6 +27,7 @@ use super::{
 pub struct NullUsbDevice {
     control_endpoint: Option<ControlEndpoint<NoClassRequestInfo>>,
     port_wake_hdl: Arc<XhciPortHandle>,
+    log: slog::Logger,
 }
 
 impl UsbDevice for NullUsbDevice {
@@ -98,6 +99,7 @@ impl UsbDevice for NullUsbDevice {
             self.control_endpoint = Some(ControlEndpoint::new_migrated(
                 ep,
                 Arc::clone(&self.port_wake_hdl),
+                &self.log,
             ));
         } else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
@@ -132,6 +134,7 @@ impl UsbDevice for NullUsbDevice {
             slot_id,
             EndpointId::from(1),
             Arc::clone(&self.port_wake_hdl),
+            &self.log,
         ));
     }
     fn configure_endpoint(
@@ -145,6 +148,7 @@ impl UsbDevice for NullUsbDevice {
                 slot_id,
                 endpoint_id,
                 Arc::clone(&self.port_wake_hdl),
+                &self.log,
             ));
         }
     }
@@ -165,8 +169,8 @@ impl NullUsbDevice {
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
-    pub fn new(port_wake_hdl: Arc<XhciPortHandle>) -> Self {
-        Self { control_endpoint: None, port_wake_hdl }
+    pub fn new(port_wake_hdl: Arc<XhciPortHandle>, log: slog::Logger) -> Self {
+        Self { control_endpoint: None, port_wake_hdl, log }
     }
 
     fn control_ep_mut(

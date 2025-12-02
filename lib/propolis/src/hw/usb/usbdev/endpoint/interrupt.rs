@@ -15,7 +15,7 @@ use crate::hw::{
         bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
         controller::XhciPortHandle,
         device_slots::{EndpointId, SlotId},
-        interrupter::Error as InterrupterError,
+        interrupter::Error as InterrupterError, // FIXME: our own error type
         rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
     },
 };
@@ -59,6 +59,7 @@ struct PeriodicTransferPollThread {
     port_hdl: Weak<XhciPortHandle>,
     slot_id: SlotId,
     endpoint_id: EndpointId,
+    log: slog::Logger,
 }
 
 impl PeriodicTransferPollThread {
@@ -68,6 +69,7 @@ impl PeriodicTransferPollThread {
         slot_id: SlotId,
         endpoint_id: EndpointId,
         data: &Arc<(Mutex<InterruptInData>, Condvar)>,
+        log: slog::Logger,
     ) -> JoinHandle<()> {
         let periodic_poll_thread = PeriodicTransferPollThread {
             weak_data: Arc::downgrade(data),
@@ -75,6 +77,7 @@ impl PeriodicTransferPollThread {
             port_hdl,
             slot_id,
             endpoint_id,
+            log,
         };
         std::thread::Builder::new()
             .name(format!(
@@ -124,7 +127,10 @@ impl PeriodicTransferPollThread {
             };
             if timeout_result.timed_out() {
                 if let Err(e) = self.notify_short_packet(&xfer, &port_hdl) {
-                    eprintln!("asdf {e}");
+                    slog::error!(
+                        self.log,
+                        "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
+                    );
                 }
 
                 let mut guard = cvar
@@ -138,7 +144,10 @@ impl PeriodicTransferPollThread {
                     if let Err(e) =
                         self.complete_transfer(data, xfer, &port_hdl)
                     {
-                        eprintln!("sdfg {e}");
+                        slog::error!(
+                            self.log,
+                            "Failed to complete USB Interrupt-IN transfer after periodic wait: {e}"
+                        );
                     }
                 }
 
@@ -147,15 +156,20 @@ impl PeriodicTransferPollThread {
                 // unwrap: if we didn't time out, then payload is some
                 let data = guard.payload.take().unwrap();
                 if let Err(e) = self.complete_transfer(data, xfer, &port_hdl) {
-                    eprintln!("dfgh {e}");
+                    slog::error!(
+                        self.log,
+                        "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
+                    );
                 }
 
                 guard.block_migration = false;
             }
             cvar.notify_one();
         }
-        // TODO: slog::error!
-        eprintln!("int-in loop: bailed");
+        slog::error!(
+            self.log,
+            "USB Interrupt-IN Endpoint packet processing loop terminated"
+        );
     }
 
     fn notify_short_packet(
@@ -229,6 +243,7 @@ impl InterruptInEndpoint {
         pci_state: &Arc<pci::DeviceState>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
+        log: &slog::Logger,
     ) -> Self {
         let data = Arc::new((
             Mutex::new(InterruptInData {
@@ -240,12 +255,14 @@ impl InterruptInEndpoint {
             }),
             Condvar::new(),
         ));
+        let log = log.new(slog::o!("endpoint_type" => "interrupt_in", "endpoint_id" => u8::from(endpoint_id)));
         let _jh = PeriodicTransferPollThread::spawn(
             port_hdl,
             pci_state,
             slot_id,
             endpoint_id,
             &data,
+            log,
         );
         Self { data, slot_id, endpoint_id, _jh }
     }
@@ -254,6 +271,7 @@ impl InterruptInEndpoint {
         value: &migrate::InterruptInEndpointV1,
         port_hdl: Weak<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        log: &slog::Logger,
     ) -> Self {
         let migrate::InterruptInEndpointV1 {
             transfers,
@@ -274,12 +292,14 @@ impl InterruptInEndpoint {
             }),
             Condvar::new(),
         ));
+        let log = log.new(slog::o!("endpoint_type" => "interrupt_in", "endpoint_id" => u8::from(endpoint_id)));
         let _jh = PeriodicTransferPollThread::spawn(
             port_hdl,
             pci_state,
             slot_id,
             endpoint_id,
             &data,
+            log,
         );
         Self { data, slot_id, endpoint_id, _jh }
     }

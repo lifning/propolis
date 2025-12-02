@@ -1001,6 +1001,7 @@ impl DeviceSlotTable {
                         ctx.hid_report,
                         wake_handles.handle_for_port(port_id),
                         pci_state,
+                        &self.log,
                     )?;
                     *dst = Some(dst_dev);
                 }

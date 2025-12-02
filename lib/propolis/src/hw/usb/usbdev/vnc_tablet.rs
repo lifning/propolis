@@ -121,6 +121,7 @@ pub struct HIDTabletDevice {
     report: Arc<Mutex<HIDTabletReport>>,
     port_wake_hdl: Arc<XhciPortHandle>,
     pci_state: Arc<pci::DeviceState>,
+    log: slog::Logger,
 }
 
 impl HIDTabletDevice {
@@ -134,6 +135,7 @@ impl HIDTabletDevice {
         report: Arc<Mutex<HIDTabletReport>>,
         port_wake_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        log: slog::Logger,
     ) -> Self {
         Self {
             control_endpoint: None,
@@ -143,6 +145,7 @@ impl HIDTabletDevice {
             report,
             port_wake_hdl,
             pci_state: pci_state.to_owned(),
+            log,
         }
     }
 
@@ -429,6 +432,7 @@ impl UsbDevice for HIDTabletDevice {
             slot_id,
             EndpointId::from(1),
             Arc::clone(&self.port_wake_hdl),
+            &self.log,
         ));
     }
 
@@ -445,6 +449,7 @@ impl UsbDevice for HIDTabletDevice {
                     slot_id,
                     endpoint_id,
                     Arc::clone(&self.port_wake_hdl),
+                    &self.log,
                 ));
             }
             3 => {
@@ -454,6 +459,7 @@ impl UsbDevice for HIDTabletDevice {
                     &self.pci_state,
                     slot_id,
                     endpoint_id,
+                    &self.log,
                 );
                 // XXX ugly
                 self.report
@@ -477,7 +483,7 @@ impl UsbDevice for HIDTabletDevice {
                 ep.normal(xfer_trbs);
             }
             Err(e) => {
-                eprintln!("no interrupt endpoint {e}");
+                slog::warn!(self.log, "Guest tried to send Transfer TRBs to uninitialized {endpoint_id:?}: {e}");
                 if let Err(e) = self.port_wake_hdl.event_sender.enqueue_event(
                     EventInfo::Transfer {
                         trb_pointer: xfer_trbs
@@ -493,7 +499,7 @@ impl UsbDevice for HIDTabletDevice {
                     },
                     false,
                 ) {
-                    eprintln!("couldn't even tell guest about it {e}");
+                    slog::error!(self.log, "xHC was unable to enqueue an Endpoint Not Enabled Error TRB on the Event Ring: {e}");
                 }
             }
         }
@@ -567,6 +573,7 @@ impl UsbDevice for HIDTabletDevice {
                 self.control_endpoint = Some(ControlEndpoint::new_migrated(
                     ctrl_ep_payload,
                     Arc::clone(&self.port_wake_hdl),
+                    &self.log,
                 ));
             }
         } else {
@@ -590,6 +597,7 @@ impl UsbDevice for HIDTabletDevice {
                     intr_in_ep_payload,
                     Arc::downgrade(&self.port_wake_hdl),
                     &self.pci_state,
+                    &self.log,
                 );
                 self.report
                     .lock()

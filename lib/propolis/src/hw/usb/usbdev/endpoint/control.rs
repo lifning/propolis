@@ -50,6 +50,7 @@ where
     slot_id: SlotId,
     endpoint_id: EndpointId,
     port_wake_hdl: Arc<XhciPortHandle>,
+    log: slog::Logger,
     _spooky: PhantomData<C>,
 }
 
@@ -62,6 +63,7 @@ where
         slot_id: SlotId,
         endpoint_id: EndpointId,
         port_wake_hdl: Arc<XhciPortHandle>,
+        log: &slog::Logger,
     ) -> Self {
         Self {
             current_setup: None,
@@ -70,6 +72,7 @@ where
             slot_id,
             endpoint_id,
             port_wake_hdl,
+            log: log.new(slog::o!("endpoint_type" => "control", "endpoint_id" => u8::from(endpoint_id))),
             _spooky: PhantomData,
         }
     }
@@ -77,11 +80,13 @@ where
     pub fn new_migrated(
         value: &migrate::ControlEndpointV1,
         port_wake_hdl: Arc<XhciPortHandle>,
+        log: &slog::Logger,
     ) -> Self {
         let mut new = Self::new(
             SlotId::from(value.slot_id),
             EndpointId::from(value.endpoint_id),
             port_wake_hdl,
+            log,
         );
         new.import(&value);
         new
@@ -207,7 +212,10 @@ where
                         self.endpoint_id,
                     )
                 {
-                    eprintln!("fghj {e}");
+                    slog::error!(
+                        self.log,
+                        "Failed to send completion events for USB Control transfer: {e}"
+                    );
                 }
                 self.bytes_transferred += count;
             }
@@ -273,6 +281,7 @@ where
             endpoint_id,
             _spooky,
             port_wake_hdl: _,
+            log: _,
         } = self;
         super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {
             current_setup: current_setup.as_ref().map(|x| x.0),
