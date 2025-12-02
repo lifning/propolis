@@ -1113,7 +1113,7 @@ bitstruct! {
         /// Interrupt Moderation Interval (IMODI)
         ///
         /// Minimum inter-interrupt interval, specified in 250 nanosecond increments.
-        /// 0 disables throttling logic altogether. Default 0x4000 (1 millisecond).
+        /// 0 disables throttling logic altogether. Default 4000 (1 millisecond).
         pub interval: u16 = 0..16;
 
         /// Interrupt Moderation Counter (IMODC)
@@ -1132,7 +1132,8 @@ pub const IMOD_TICK: Duration = Duration::from_nanos(250);
 
 impl Default for InterrupterModeration {
     fn default() -> Self {
-        Self(0).with_interval(0x4000)
+        // xHCI 1.2 table 5-39
+        Self(0).with_interval(4000)
     }
 }
 

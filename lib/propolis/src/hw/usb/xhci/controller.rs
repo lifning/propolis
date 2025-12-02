@@ -836,8 +836,9 @@ impl PciXhci {
             Runtime(MicroframeIndex) => NoOp, // Read-only
             Runtime(Interrupter(i, intr_regs)) => {
                 reg_index = i as i16;
+                let memctx = self.pci_state.acc_mem.access().unwrap();
                 let mut state = self.state.lock().unwrap();
-                state.interrupters[i as usize].reg_write(wo, intr_regs)
+                state.interrupters[i as usize].reg_write(wo, intr_regs, &memctx)
             }
 
             Doorbell(0) => {

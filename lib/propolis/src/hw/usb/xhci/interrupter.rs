@@ -71,7 +71,6 @@ pub struct InterruptRegulation {
 
     // ERDP contains Event Handler Busy
     evt_ring_deq_ptr: bits::EventRingDequeuePointer,
-    erdp_written: bool,
 
     /// Event Data Transfer Length Accumulator (EDTLA).
     evt_data_transfer_len_accum: u32,
@@ -169,6 +168,7 @@ impl XhciInterrupter {
         &mut self,
         wo: &mut WriteOp,
         intr_regs: InterrupterRegisters,
+        memctx: &MemCtx,
     ) -> RegRWOpValue {
         use RegRWOpValue::*;
 
@@ -203,10 +203,6 @@ impl XhciInterrupter {
                 let mut regulation = self.interrupts.0.lock().unwrap();
                 regulation.moderation =
                     bits::InterrupterModeration(wo.read_u32());
-
-                // XXX AAAAAAA yep this fixes it. time to figure out why
-                regulation.moderation = bits::InterrupterModeration(0x4000);
-                // XXX AAAAAAA
 
                 // emulating setting the value of IMODC, which counts down to zero.
                 if let Some(inst) = time::VmGuestInstant::now(&self.vmm_hdl)
@@ -243,7 +239,20 @@ impl XhciInterrupter {
                     regulation.evt_ring_deq_ptr.set_handler_busy(false);
                 }
                 regulation.evt_ring_deq_ptr.set_pointer(erdp.pointer());
-                regulation.erdp_written = true;
+                if let Ok(event_ring) = regulation.event_ring_mut(memctx) {
+                    event_ring.update_dequeue_pointer(erdp.pointer());
+                    // 4.17.5: "IPE shall be cleared to 0 If the Event Ring transitions to empty"
+                    // fig 4-23: "Interrupt Pending Enable is cleared when the Event Ring goes empty"
+                    if event_ring.is_empty() {
+                        regulation.intr_pending_enable = false;
+                    }
+                } else if regulation.intr_pending_enable {
+                    slog::error!(
+                        self.log,
+                        "Event Ring absent in ERDP write, after IPE was set"
+                    );
+                    regulation.intr_pending_enable = false;
+                }
                 notify = true;
                 U64(erdp.0)
             }
@@ -424,7 +433,7 @@ impl EventSender {
             regulation.intr_pending_enable = true;
             interrupts.1.notify_one();
             let intr_num = regulation.number;
-            probes::xhci_interrupter_pending!(move || (intr_num));
+            probes::xhci_interrupter_pending!(move || intr_num);
         }
 
         Ok(())
@@ -593,7 +602,6 @@ impl InterruptRegulation {
             moderation: bits::InterrupterModeration::default(),
             evt_ring: None,
             pending_erstba_erstsz_writes: None,
-            erdp_written: false,
             evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
             evt_data_transfer_len_accum: 0,
             imod_allow_at: time::VmGuestInstant::now(vmm_hdl).unwrap(),
@@ -627,22 +635,11 @@ impl InterruptRegulation {
             event_ring.update_segment_table(erstba, erstsz, &memctx)?;
         }
 
-        if self.erdp_written {
-            let erdp = self.evt_ring_deq_ptr.pointer();
-            self.erdp_written = false;
-            let empty_before = event_ring.is_empty();
-            event_ring.update_dequeue_pointer(erdp);
-            if !empty_before && event_ring.is_empty() {
-                // IPE should be set to 0 "when the Event Ring transitions to empty"
-                self.intr_pending_enable = false;
-            }
-        }
-
         Ok(event_ring)
     }
 
     // handling IMODI / IMODC / IP / IE.
-    // xHCI 1.2 figure 4-22
+    // xHCI 1.2 figure 4-22, sect 4.17.2
     fn imod_wait_loop(
         pair: Weak<(Mutex<Self>, Condvar)>,
         vmm_hdl: Arc<VmmHdl>,
@@ -678,7 +675,7 @@ impl InterruptRegulation {
                             && ir.management.enable()
                             // < Interrupt Pending Enable? >
                             && ir.intr_pending_enable
-                            // < Event Handler Busy? >
+                            // < Event Handler *not* Busy? > (EHB = 0)
                             && !ir.evt_ring_deq_ptr.handler_busy()
                         ))
                 })
@@ -702,12 +699,16 @@ impl InterruptRegulation {
             guard.evt_ring_deq_ptr.set_handler_busy(true);
 
             // Assertion of IP flag generates an MSI-X/Pin interrupt.
-            // IP flag cleared by the completion of PCI write.
+            // IP flag cleared by the completion of PCI write in MSI-X mode,
+            // or by software writing the IMAN register in Pin mode.
             // (xHCI 1.2 fig 4-22 description)
             guard.pci_intr.fire_interrupt(guard.number);
-            guard.management.set_pending(false);
+            if guard.pci_intr.pci_intr_mode == pci::IntrMode::Msix {
+                guard.management.set_pending(false);
+            }
 
-            // load counter with interval
+            // When IP is asserted, the IMODC is reloaded with the IMODI and
+            // the IMODC begins counting down again. (xHCI 1.2 fig 4-23 desc)
             guard.imod_allow_at = time::VmGuestInstant::now(&vmm_hdl)
                 .unwrap()
                 .checked_add(guard.moderation.interval_duration())
