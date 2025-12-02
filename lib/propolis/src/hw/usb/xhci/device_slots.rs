@@ -268,8 +268,8 @@ impl DeviceSlotTable {
     fn endpoint_context(
         slot_addr: GuestAddr,
         endpoint_id: EndpointId,
-        memctx: &MemCtx,
-    ) -> Option<MemCtxValue<EndpointContext>> {
+        memctx: &'_ MemCtx,
+    ) -> Option<MemCtxValue<'_, EndpointContext>> {
         const { assert!(size_of::<SlotContext>() == size_of::<EndpointContext>()) };
         MemCtxValue::new(
             slot_addr.offset::<SlotContext>(1).offset::<EndpointContext>(

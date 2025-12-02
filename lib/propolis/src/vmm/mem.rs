@@ -1232,12 +1232,6 @@ impl MemCtx {
     }
 }
 
-impl core::fmt::Debug for MemCtx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        core::fmt::Debug::fmt(&self.map.lock().unwrap(), f)
-    }
-}
-
 pub enum MemAccessed {}
 impl crate::accessors::AccessedResource for MemAccessed {
     type Root = Arc<MemCtx>;

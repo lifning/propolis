@@ -988,7 +988,7 @@ impl Lifecycle for PciXhci {
     fn type_name(&self) -> &'static str {
         "pci-xhci"
     }
-    fn migrate(&self) -> Migrator {
+    fn migrate(&'_ self) -> Migrator<'_> {
         Migrator::Multi(self)
     }
 }

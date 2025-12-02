@@ -124,7 +124,7 @@ impl EventRing {
 
     /// Must be called when interrupter's ERDP register is written
     pub fn update_dequeue_pointer(&mut self, erdp: GuestAddr) {
-        probes::xhci_producer_ring_set_dequeue_ptr!(|| (erdp.0 as usize));
+        probes::xhci_producer_ring_set_dequeue_ptr!(|| erdp.0 as usize);
         self.dequeue_pointer = Some(erdp);
     }
 
