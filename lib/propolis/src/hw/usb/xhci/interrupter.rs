@@ -397,7 +397,8 @@ impl XhciPciIntr {
 
 pub struct EventSender {
     // this is a ridiculous type.
-    // must be replaced with the new Arc<(Mutex<>, Condvar)> on device reset
+    // its value must be replaced with the new Arc<(Mutex<>, Condvar)>
+    // upon host controller reset
     interrupts: Mutex<Option<Weak<(Mutex<InterruptRegulation>, Condvar)>>>,
     pci_state: Weak<pci::DeviceState>,
 }

@@ -123,8 +123,15 @@ impl PeriodicTransferPollThread {
 
             let timeout = guard.period;
             let (mut guard, timeout_result) = cvar
-                .wait_timeout_while(guard, timeout, |x| x.payload.is_none())
+                .wait_timeout_while(guard, timeout, |x| {
+                    x.payload.is_none() && !x.terminate
+                })
                 .unwrap();
+
+            // did we try to reset/stop the endpoint with a transction in flight?
+            if guard.terminate {
+                break;
+            }
 
             // unwrap: this loop is the only pop from transfers & we wait_while it's empty
             let xfer = guard.transfers.pop_front().unwrap();
@@ -183,7 +190,7 @@ impl PeriodicTransferPollThread {
             }
             cvar.notify_one();
         }
-        slog::error!(
+        slog::debug!(
             self.log,
             "USB Interrupt-IN Endpoint packet processing loop terminated"
         );

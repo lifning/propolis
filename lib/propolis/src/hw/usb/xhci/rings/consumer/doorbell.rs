@@ -99,6 +99,11 @@ pub fn process_transfer_ring(
                 slog::trace!(log, "Transfer Ring empty");
                 break;
             }
+            Err(consumer::Error::IncompleteWorkItem(trbs)) => {
+                // TODO: special-case handling for storing them and completing it
+                slog::warn!(log, "Rewound dequeue pointer after trying to pull incomplete TD from Transfer Ring: {trbs:?}");
+                break;
+            }
             Err(e) => {
                 slog::error!(log, "dequeueing TD from endpoint failed: {e}");
                 break;

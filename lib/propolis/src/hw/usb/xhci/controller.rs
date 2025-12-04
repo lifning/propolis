@@ -272,7 +272,7 @@ impl PciXhci {
             log.clone(),
         );
 
-        xhci_state.interrupters[0].update_event_sender(&event_sender);
+        // xhci_state.interrupters[0].update_event_sender(&event_sender);
 
         let state = Arc::new(Mutex::new(xhci_state));
 

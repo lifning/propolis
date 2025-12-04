@@ -795,7 +795,7 @@ impl DeviceSlotTable {
                                 ctx.set_endpoint_state(EndpointState::Stopped)
                             });
 
-                            // TODO: wait for any partially completed split transactions
+                            // n/a: wait for any partially completed split transactions
                             TrbCompletionCode::Success
                         }
                         x => {

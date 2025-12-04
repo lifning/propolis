@@ -102,7 +102,12 @@ impl TransferDescriptor {
         }
         return true;
     }
-
+    // TODO: verify EDTRB rules from xHCI 1.2 sect 4.11.7:
+    // """
+    // If Event Data TRBs are defined within a TD, then the IOC or ISP flags shall not be
+    // set in any Transfer TRB of a TD. i.e. the use of Event Data Transfer Events and
+    // normal Transfer Events to report a TD completion are mutually exclusive.
+    // """
     fn to_transfer_trbs(&self) -> Result<Vec<TransferTrb>> {
         let mut xfer_trbs = Vec::with_capacity(self.trbs.len());
         let mut iter = self.trbs.iter().peekable();
@@ -263,6 +268,12 @@ pub enum TransferInfo {
     },
     // unimplemented
     Isoch {},
+    // xHCI 1.2 sect 4.11.7:
+    // """
+    // Software may insert an Event Data TD immediately following a TD to
+    // provide additional information related to the previous TD. An Event
+    // Data TD is a TD that consists of just one Event Data TRB.
+    // """
     EventData(EventDataTrb),
     NoOp,
 }
@@ -393,7 +404,7 @@ impl TransferInfo {
         event_sender: &EventSender,
         log: &slog::Logger,
     ) -> Result<()> {
-        // FIXME: EventSender only supports one interrupter, so interrupter fields are ignored
+        // NOTE: EventSender only supports one interrupter, so interrupter fields are ignored
         const {
             assert!(NUM_INTRS == 1);
         }
@@ -501,11 +512,14 @@ impl TransferInfo {
                 // unimplemented on purpose
                 slog::warn!(log, "Isochronous TD unimplemented");
             }
-            TransferInfo::EventData(tdevent_data) => {
-                slog::warn!(
-                    log,
-                    "Event Data TD unimplemented ({tdevent_data:?})"
-                );
+            TransferInfo::EventData(ed) => {
+                if ed.interrupt_on_completion() {
+                    enqueue_success(
+                        GuestAddr(ed.event_data()),
+                        true,
+                        ed.block_event_interrupt(),
+                    );
+                }
             }
             TransferInfo::NoOp => {}
         }

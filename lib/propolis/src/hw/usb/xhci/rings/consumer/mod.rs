@@ -219,6 +219,7 @@ impl<T: WorkItem> ConsumerRing<T> {
 
     pub fn dequeue_work_item(&mut self, memctx: &MemCtx) -> Result<T> {
         let start_deq_ptr = self.dequeue_ptr;
+        let start_cycle_state = self.consumer_cycle_state;
         let mut trbs: Vec<(Trb, GuestAddr)> =
             self.dequeue_trb(memctx)?.into_iter().collect();
         while trbs
@@ -234,6 +235,8 @@ impl<T: WorkItem> ConsumerRing<T> {
                 trbs.push(trb);
             } else {
                 // we need more TRBs for this work item that aren't here yet!
+                self.dequeue_ptr = start_deq_ptr;
+                self.consumer_cycle_state = start_cycle_state;
                 return Err(Error::IncompleteWorkItem(trbs));
             }
         }
