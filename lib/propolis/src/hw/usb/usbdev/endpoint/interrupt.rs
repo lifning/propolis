@@ -9,16 +9,33 @@ use std::{
     time::Duration,
 };
 
-use crate::hw::{
-    pci,
-    usb::xhci::{
-        bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
-        controller::XhciPortHandle,
-        device_slots::{EndpointId, SlotId},
-        interrupter::Error as InterrupterError, // FIXME: our own error type
-        rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
+use crate::{
+    common::GuestAddr,
+    hw::{
+        pci,
+        usb::xhci::{
+            bits::{ring_data::TrbCompletionCode, MINIMUM_INTERVAL_TIME},
+            controller::XhciPortHandle,
+            device_slots::{EndpointId, SlotId},
+            interrupter::Error as InterrupterError,
+            rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
+        },
     },
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Immediate data (rather than pointer) given in Interrupt-IN endpoint transfer TRB at {0:x?}")]
+    ImmediateDataInTransfer(GuestAddr),
+    #[error("Reference to xHCI PCI device dropped")]
+    PciDeviceReferenceGone,
+    #[error("Failed to get MemAccessor")]
+    MemAccessorFail,
+    #[error(
+        "Failed to place transfer completion event TRBs in event ring: {0}"
+    )]
+    Completion(#[from] InterrupterError),
+}
 
 #[usdt::provider(provider = "propolis")]
 mod probes {
@@ -176,7 +193,7 @@ impl PeriodicTransferPollThread {
         &self,
         xfer: &TransferTrb,
         port_hdl: &Arc<XhciPortHandle>,
-    ) -> Result<(), InterrupterError> {
+    ) -> Result<(), Error> {
         if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
             probes::usb_interrupt_xfer_shortpacket!(|| (
                 u8::from(self.slot_id),
@@ -186,13 +203,16 @@ impl PeriodicTransferPollThread {
                 0,
             ));
         };
-        port_hdl.event_sender.send_completion_events_for_trb(
-            xfer,
-            TrbCompletionCode::ShortPacket,
-            0,
-            self.slot_id,
-            self.endpoint_id,
-        )
+        port_hdl
+            .event_sender
+            .send_completion_events_for_trb(
+                xfer,
+                TrbCompletionCode::ShortPacket,
+                0,
+                self.slot_id,
+                self.endpoint_id,
+            )
+            .map_err(Into::into)
     }
 
     fn complete_transfer(
@@ -200,16 +220,16 @@ impl PeriodicTransferPollThread {
         data: Vec<u8>,
         xfer: TransferTrb,
         port_hdl: &Arc<XhciPortHandle>,
-    ) -> Result<(), InterrupterError> {
+    ) -> Result<(), Error> {
         let PointerOrImmediate::Pointer(region) = xfer.data_buffer() else {
-            return Err(todo!());
+            return Err(Error::ImmediateDataInTransfer(xfer.trb_pointer()));
         };
         let bytes_transferred = data.len().min(region.1);
         let Some(pci_state) = self.weak_pci_state.upgrade() else {
-            return Err(todo!());
+            return Err(Error::PciDeviceReferenceGone);
         };
         let Some(memctx) = pci_state.acc_mem.access() else {
-            return Err(todo!());
+            return Err(Error::MemAccessorFail);
         };
         memctx.write_many(region.0, &data[..bytes_transferred]);
         probes::usb_interrupt_xfer_complete!(|| (
@@ -218,14 +238,16 @@ impl PeriodicTransferPollThread {
             region.0 .0,
             region.1,
         ));
-        port_hdl.event_sender.send_completion_events_for_trb(
-            &xfer,
-            TrbCompletionCode::Success,
-            bytes_transferred,
-            self.slot_id,
-            self.endpoint_id,
-        )?;
-        Ok(())
+        port_hdl
+            .event_sender
+            .send_completion_events_for_trb(
+                &xfer,
+                TrbCompletionCode::Success,
+                bytes_transferred,
+                self.slot_id,
+                self.endpoint_id,
+            )
+            .map_err(Into::into)
     }
 }
 
@@ -330,7 +352,9 @@ impl InterruptInEndpoint {
         let mut guard =
             self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
         if guard.terminate {
-            return Err(todo!()); // loop bailed from missing port handle
+            return Err(crate::migrate::MigrateStateError::ImportFailed(
+                "Interrupt-IN endpoint periodic transfer loop was terminated for missing its handle to the xHC".to_string()
+            ));
         }
         self.slot_id = SlotId::from(*slot_id);
         self.endpoint_id = EndpointId::from(*endpoint_id);
