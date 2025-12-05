@@ -10,6 +10,8 @@ use zerocopy::{FromBytes, FromZeros};
 use crate::common::GuestAddr;
 use crate::hw::pci;
 use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
+use crate::hw::usb::xhci::interrupter::EventSender;
+use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::vmm::MemCtx;
 
 use super::bits::device_context::{
@@ -748,11 +750,8 @@ impl DeviceSlotTable {
         endpoint_id: EndpointId,
         _suspend: bool,
         memctx: &MemCtx,
+        event_sender: &EventSender,
     ) -> Option<TrbCompletionCode> {
-        // NOTE: spec says to also insert a Transfer Event to the Event Ring
-        // if we interrupt the execution of a Transfer Descriptor, but we at
-        // present cannot interrupt an in-flight TD execution.
-
         // if enabled by previous enable slot command
         Some(if self.slot(slot_id).is_ok() {
             // retrieve dev ctx
@@ -766,12 +765,31 @@ impl DeviceSlotTable {
                         Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
                     match ep_ctx.endpoint_state() {
                         EndpointState::Running => {
-                            // TODO:
-                            // stop USB activity for pipe
-                            // stop transfer ring activity for pipe
-
-                            // write dequeue pointer value to output endpoint tr dequeue pointer field
-                            // write ccs value to output endpoint dequeue cycle state field
+                            if let Ok(dev) = self.usbdev_for_slot(slot_id) {
+                                // stop USB activity for pipe
+                                // stop transfer ring activity for pipe
+                                if let Ok(Some((
+                                    trb_pointer,
+                                    remaining_bytes,
+                                ))) = dev.stop_endpoint(endpoint_id)
+                                {
+                                    // if we interrupted the execution of a TD, insert a transfer event
+                                    event_sender.enqueue_event(
+                                        EventInfo::Transfer {
+                                            trb_pointer,
+                                            completion_code:
+                                                TrbCompletionCode::Stopped,
+                                            trb_transfer_length: remaining_bytes
+                                                as u32,
+                                            slot_id,
+                                            endpoint_id,
+                                            event_data: false, // TODO: handle if pointed trb is event data trb
+                                        },
+                                        // will interrupt after enqueueing the command completion event
+                                        true,
+                                    );
+                                }
+                            }
 
                             // unwrap: self.slot(slot_id).is_ok(), above
                             let slot = self.slot_mut(slot_id).unwrap();

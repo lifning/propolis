@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use crate::{
+    common::GuestAddr,
     hw::usb::xhci::{
         controller::XhciPortHandle,
         device_slots::{EndpointId, SlotId},
@@ -35,8 +36,12 @@ impl UsbDevice for NullUsbDevice {
         self.port_wake_hdl.event_sender.reset_edtla();
     }
 
-    fn abort_transactions(&mut self) -> Result<()> {
-        // no periodic transfers
+    fn stop_endpoint(
+        &mut self,
+        _endpoint_id: EndpointId,
+    ) -> Result<Option<(GuestAddr, usize)>> {
+        // no transfers handled out-of-band
+        Ok(None)
     }
 
     fn setup_stage(

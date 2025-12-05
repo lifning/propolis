@@ -8,7 +8,7 @@ use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 use vnc_tablet::HIDTabletReport;
 
-use crate::{hw::pci, vmm::MemCtx};
+use crate::{common::GuestAddr, hw::pci, vmm::MemCtx};
 
 use super::xhci::{
     bits::device_context::EndpointContext,
@@ -134,7 +134,11 @@ pub trait UsbDevice: Send + Sync + 'static {
     /// Resets EDTLA (xHCI 1.2 sect 4.11.5.2)
     fn new_transfer_descriptor(&self);
     /// Aborts any in-flight transactions for a Stop or Reset Endpoint Command.
-    fn abort_transactions(&mut self) -> Result<()>;
+    /// Returns pointer to interrupted TRB, and how many bytes remained.
+    fn stop_endpoint(
+        &mut self,
+        endpoint_id: EndpointId,
+    ) -> Result<Option<(GuestAddr, usize)>>;
     /// *Caller* must put an appropriate completion event into the Event Ring.
     fn setup_stage(
         &mut self,

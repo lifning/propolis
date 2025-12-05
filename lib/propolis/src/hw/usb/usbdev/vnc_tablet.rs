@@ -393,11 +393,16 @@ impl UsbDevice for HIDTabletDevice {
         self.port_wake_hdl.event_sender.reset_edtla();
     }
 
-    fn abort_transactions(&mut self) -> Result<()> {
-        if let Ok(ep) = self.interrupt_ep_mut(3.into()) {
-            // TODO: ep.abort_transfers();
-        };
-        Ok(())
+    fn stop_endpoint(
+        &mut self,
+        endpoint_id: EndpointId,
+    ) -> Result<Option<(GuestAddr, usize)>> {
+        if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
+            // TODO:
+            ep.abort_transfers()
+        } else {
+            Ok(None)
+        }
     }
 
     fn setup_stage(

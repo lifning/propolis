@@ -391,7 +391,13 @@ impl CommandInfo {
             }
             CommandInfo::StopEndpoint { slot_id, endpoint_id, suspend } => {
                 let completion_code = dev_slots
-                    .stop_endpoint(slot_id, endpoint_id, suspend, memctx)
+                    .stop_endpoint(
+                        slot_id,
+                        endpoint_id,
+                        suspend,
+                        memctx,
+                        event_sender,
+                    )
                     .unwrap_or(TrbCompletionCode::ContextStateError);
                 EventInfo::CommandCompletion {
                     completion_code,
