@@ -129,12 +129,8 @@ impl PeriodicTransferPollThread {
                 .unwrap();
 
             // did we try to reset/stop the endpoint with a transction in flight?
-            if guard.terminate {
-                break;
-            }
-
-            // unwrap: this loop is the only pop from transfers & we wait_while it's empty
-            let xfer = guard.transfers.pop_front().unwrap();
+            // this loop is otherwise the only pop from transfers & we wait_while it's empty
+            let Some(xfer) = guard.transfers.pop_front() else { continue };
 
             let PointerOrImmediate::Pointer(_) = xfer.data_buffer() else {
                 continue;
@@ -341,6 +337,11 @@ impl InterruptInEndpoint {
 
     pub fn data_ref(&self) -> Weak<(Mutex<InterruptInData>, Condvar)> {
         Arc::downgrade(&self.data)
+    }
+
+    pub fn stop_transfers(&mut self) -> TODO {
+        // store these elsewhere so we can resume them on doorbell ring
+        self.data.0.lock().unwrap().transfers.drain(..);
     }
 
     pub fn import(
