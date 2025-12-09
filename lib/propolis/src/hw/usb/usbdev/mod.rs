@@ -152,7 +152,7 @@ pub trait UsbDevice: Send + Sync + 'static {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
+        trbs: Vec<TransferTrb>,
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()>;
@@ -166,10 +166,10 @@ pub trait UsbDevice: Send + Sync + 'static {
     /// each successful Transfer TRB.
     /// *Caller* must put a USB Transaction Error event into the Event Ring
     /// when Err(_) is returned.
-    fn normal(
+    fn normal_transfer(
         &mut self,
         endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
+        trbs: Vec<TransferTrb>,
     ) -> Result<()>;
     /// Configures the Default Control Endpoint.
     fn set_address(&mut self, slot_id: SlotId, port_id: PortId);

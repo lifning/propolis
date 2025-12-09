@@ -423,12 +423,12 @@ impl UsbDevice for HIDTabletDevice {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
+        trbs: Vec<TransferTrb>,
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()> {
         self.control_ep_mut(endpoint_id)?.data_stage(
-            trbs,
+            &trbs,
             data_direction,
             memctx,
         )
@@ -484,15 +484,15 @@ impl UsbDevice for HIDTabletDevice {
         }
     }
 
-    fn normal(
+    fn normal_transfer(
         &mut self,
         endpoint_id: EndpointId,
-        xfer_trbs: &[TransferTrb],
+        xfer_trbs: Vec<TransferTrb>,
     ) -> Result<()> {
         // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         match self.interrupt_ep_mut(endpoint_id) {
             Ok(ep) => {
-                ep.normal(xfer_trbs);
+                ep.normal_transfer(xfer_trbs);
             }
             Err(e) => {
                 slog::warn!(self.log, "Guest tried to send Transfer TRBs to uninitialized {endpoint_id:?}: {e}");

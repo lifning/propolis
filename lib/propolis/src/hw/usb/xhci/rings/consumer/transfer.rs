@@ -436,7 +436,7 @@ impl TransferInfo {
         match self {
             TransferInfo::Normal(xfer_trbs) => {
                 // responsible for enqueueing its own successful completion events
-                usbdev.normal(endpoint_id, &xfer_trbs)?;
+                usbdev.normal_transfer(endpoint_id, xfer_trbs)?;
             }
             TransferInfo::SetupStage {
                 data,
@@ -476,7 +476,7 @@ impl TransferInfo {
                 // responsible for enqueueing its own successful completion events
                 usbdev.data_stage(
                     endpoint_id,
-                    &transfer_trbs,
+                    transfer_trbs,
                     req_dir,
                     memctx,
                 )?;

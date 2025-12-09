@@ -61,12 +61,12 @@ impl UsbDevice for NullUsbDevice {
     fn data_stage(
         &mut self,
         endpoint_id: EndpointId,
-        trbs: &[TransferTrb],
+        trbs: Vec<TransferTrb>,
         data_direction: RequestDirection,
         memctx: &MemCtx,
     ) -> Result<()> {
         self.control_ep_mut(endpoint_id)?.data_stage(
-            trbs,
+            &trbs,
             data_direction,
             memctx,
         )
@@ -162,10 +162,10 @@ impl UsbDevice for NullUsbDevice {
         }
     }
 
-    fn normal(
+    fn normal_transfer(
         &mut self,
         _endpoint_id: EndpointId,
-        _normal_td: &[TransferTrb],
+        _normal_td: Vec<TransferTrb>,
     ) -> Result<()> {
         Ok(())
     }

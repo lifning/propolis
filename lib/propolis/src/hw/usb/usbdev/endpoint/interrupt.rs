@@ -57,17 +57,30 @@ mod probes {
 }
 
 pub struct InterruptInData {
-    transfers: VecDeque<TransferTrb>,
+    /// Each VecDeque<TransferTrb> within the outer VecDeque is a TD.
+    transfers: VecDeque<VecDeque<TransferTrb>>,
+    /// Data from the USB device to write into the transfers
     payload: Option<Vec<u8>>,
     period: Duration,
     terminate: bool,
-    block_migration: bool,
+    phase: InterruptInPhase,
 }
 
 impl InterruptInData {
     pub fn set_payload(&mut self, payload: Vec<u8>) {
         self.payload = Some(payload);
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum InterruptInPhase {
+    WaitForTransferDescriptors,
+    WaitForPayloadPeriod,
+    // wait indefinitely after a short-packet (i.e. missing a periodic transfer due to no data from usb dev)
+    WaitForPayloadOrTransfer,
+    StoppedEndpoint,
+    Writing,
+    TerminateLoop,
 }
 
 struct PeriodicTransferPollThread {
@@ -109,80 +122,129 @@ impl PeriodicTransferPollThread {
     fn main_loop(self) {
         while let Some(pair) = self.weak_data.upgrade() {
             let (mtx, cvar) = &*pair;
-            let mut guard = cvar
-                .wait_while(mtx.lock().unwrap(), |x| {
-                    x.transfers.is_empty() && !x.terminate
-                })
-                .unwrap();
-            if guard.terminate {
-                break;
-            }
-
-            // position in thread loop becomes state we must consider
-            guard.block_migration = true;
-
-            let timeout = guard.period;
-            let (mut guard, timeout_result) = cvar
-                .wait_timeout_while(guard, timeout, |x| {
-                    x.payload.is_none() && !x.terminate
-                })
-                .unwrap();
-
-            // did we try to reset/stop the endpoint with a transction in flight?
-            // this loop is otherwise the only pop from transfers & we wait_while it's empty
-            let Some(xfer) = guard.transfers.pop_front() else { continue };
-
-            let PointerOrImmediate::Pointer(_) = xfer.data_buffer() else {
-                continue;
-            };
-
-            // TODO: no more than one TD consumed per ESIT if software gives us
-            // too many at once (xHCI 1.2 sect 4.14.3)
-
-            let Some(port_hdl) = self.port_hdl.upgrade() else {
-                guard.block_migration = false;
-                guard.terminate = true;
-                cvar.notify_one();
-                break;
-            };
-            if timeout_result.timed_out() {
-                if let Err(e) = self.notify_short_packet(&xfer, &port_hdl) {
-                    slog::error!(
-                        self.log,
-                        "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
-                    );
+            let guard = mtx.lock().unwrap();
+            match guard.phase {
+                InterruptInPhase::WaitForTransferDescriptors => {
+                    let mut guard = cvar
+                        .wait_while(guard, |x| {
+                            x.transfers.is_empty()
+                                && x.phase == InterruptInPhase::WaitForTransferDescriptors
+                        })
+                        .unwrap();
+                    guard.phase = InterruptInPhase::WaitForPayloadPeriod;
                 }
+                InterruptInPhase::WaitForPayloadPeriod => {
+                    let timeout = guard.period;
+                    let (mut guard, timeout_result) = cvar
+                        .wait_timeout_while(guard, timeout, |x| {
+                            x.payload.is_none()
+                                && x.phase
+                                    == InterruptInPhase::WaitForPayloadPeriod
+                        })
+                        .unwrap();
 
-                let mut guard = cvar
-                    .wait_while(guard, |x| {
-                        x.payload.is_none()
-                            && x.transfers.is_empty()
-                            && !x.terminate
-                    })
-                    .unwrap();
-                if let Some(data) = guard.payload.take() {
-                    if let Err(e) =
-                        self.complete_transfer(data, xfer, &port_hdl)
+                    if !timeout_result.timed_out() {
+                        // we have a payload, proceed
+                        guard.phase = InterruptInPhase::Writing;
+                    } else if let Some(xfer) =
+                        guard.transfers.iter().flatten().next()
                     {
-                        slog::error!(
-                            self.log,
-                            "Failed to complete USB Interrupt-IN transfer after periodic wait: {e}"
-                        );
+                        let Some(port_hdl) = self.port_hdl.upgrade() else {
+                            guard.phase = InterruptInPhase::TerminateLoop;
+                            continue;
+                        };
+                        if let Err(e) =
+                            self.notify_short_packet(&xfer, &port_hdl)
+                        {
+                            slog::error!(
+                                    self.log,
+                                    "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
+                                );
+                        }
+                        guard.phase =
+                            InterruptInPhase::WaitForPayloadOrTransfer;
+                    } else {
+                        guard.phase =
+                            InterruptInPhase::WaitForTransferDescriptors;
                     }
                 }
-
-                guard.block_migration = false;
-            } else {
-                // unwrap: if we didn't time out, then payload is some
-                let data = guard.payload.take().unwrap();
-                if let Err(e) = self.complete_transfer(data, xfer, &port_hdl) {
-                    slog::error!(
-                        self.log,
-                        "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
-                    );
+                InterruptInPhase::WaitForPayloadOrTransfer => {
+                    let num_tds = guard.transfers.len();
+                    let mut guard = cvar
+                        .wait_while(guard, |x| {
+                            x.payload.is_none()
+                                && x.transfers.len() == num_tds
+                                && x.phase == InterruptInPhase::WaitForPayloadOrTransfer
+                                && !x.terminate // TODO: remove
+                        })
+                        .unwrap();
+                    if guard.payload.is_some() {
+                        guard.phase = InterruptInPhase::Writing;
+                    } else if guard.transfers.len() != num_tds {
+                        // abandon and move onto a new transfer if one has been given to us
+                        // XXX (TODO: check spec again for citation, is this correct to do?) XXX
+                        guard.transfers.pop_front();
+                        if guard.transfers.is_empty() {
+                            guard.phase =
+                                InterruptInPhase::WaitForTransferDescriptors;
+                        } else {
+                            guard.phase =
+                                InterruptInPhase::WaitForPayloadPeriod;
+                        }
+                    }
                 }
+                // TODO: no more than one TD consumed per ESIT if software gives us
+                // too many at once (xHCI 1.2 sect 4.14.3)
+                InterruptInPhase::Writing => {
+                    // no waiting here
+                    let mut guard = guard;
+                    if let Some(td) = guard.transfers.front_mut() {
+                        if let Some(trb) = td.pop_front() {
+                            let PointerOrImmediate::Pointer(_) =
+                                trb.data_buffer()
+                            else {
+                                slog::error!(self.log, "Immediate data found in USB Interrupt-IN endpoint at {:x?}", trb.trb_pointer());
+                                continue;
+                            };
+                            let Some(port_hdl) = self.port_hdl.upgrade() else {
+                                guard.phase = InterruptInPhase::TerminateLoop;
+                                continue;
+                            };
 
-                guard.block_migration = false;
+                            if let Some(data) = guard.payload.take() {
+                                if let Err(e) =
+                                    self.complete_transfer(data, trb, &port_hdl)
+                                {
+                                    slog::error!(
+                                        self.log,
+                                        "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
+                                    );
+                                }
+                            } else {
+                                slog::error!(
+                                    self.log,
+                                    "USB Interrupt-IN endpoint in writing state with no payload"
+                                );
+                            }
+                        } else {
+                            // TD empty
+                            guard.transfers.pop_front();
+                        }
+                    } else {
+                        guard.phase =
+                            InterruptInPhase::WaitForTransferDescriptors;
+                    };
+                }
+                InterruptInPhase::StoppedEndpoint => {
+                    // TODO
+                    // did we try to reset/stop the endpoint with a transction in flight?
+                }
+                InterruptInPhase::TerminateLoop => {
+                    // FIXME: remove once unnecessary
+                    guard.terminate = true;
+                    cvar.notify_one();
+                    break;
+                }
             }
             cvar.notify_one();
         }
@@ -309,7 +371,10 @@ impl InterruptInEndpoint {
         let endpoint_id = EndpointId::from(*endpoint_id);
         let data = Arc::new((
             Mutex::new(InterruptInData {
-                transfers: transfers.into_iter().map(From::from).collect(),
+                transfers: transfers
+                    .into_iter()
+                    .map(|trbs| trbs.iter().map(From::from).collect())
+                    .collect(),
                 payload: payload.to_owned(),
                 period: MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks),
                 terminate: false,
@@ -329,9 +394,9 @@ impl InterruptInEndpoint {
         Self { data, slot_id, endpoint_id, _jh }
     }
 
-    pub fn normal(&self, xfer_trbs: &[TransferTrb]) {
+    pub fn normal_transfer(&self, td_trbs: Vec<TransferTrb>) {
         let mut data = self.data.0.lock().unwrap();
-        data.transfers.extend(xfer_trbs);
+        data.transfers.push_back(td_trbs.into()); // Vec into VecDeque guaranteed O(1) by stdlib
         self.data.1.notify_one();
     }
 
@@ -359,18 +424,27 @@ impl InterruptInEndpoint {
         let guard = self.data.0.lock().unwrap();
         let mut guard =
             self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
-        if guard.terminate {
+        let InterruptInData {
+            transfers: transfers_mut,
+            payload: payload_mut,
+            period,
+            terminate,
+            block_migration: _,
+        } = &mut *guard;
+        if *terminate {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 "Interrupt-IN endpoint periodic transfer loop was terminated for missing its handle to the xHC".to_string()
             ));
         }
         self.slot_id = SlotId::from(*slot_id);
         self.endpoint_id = EndpointId::from(*endpoint_id);
-        guard.transfers = transfers.iter().map(From::from).collect();
-        guard.payload = payload.to_owned();
-        guard.period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
-
-        todo!()
+        *transfers_mut = transfers
+            .iter()
+            .map(|trbs| trbs.map(From::from).collect())
+            .collect();
+        *payload_mut = payload.to_owned();
+        *period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
+        Ok(())
     }
 
     pub fn export(
@@ -394,7 +468,10 @@ impl InterruptInEndpoint {
             period.as_secs_f64() / MINIMUM_INTERVAL_TIME.as_secs_f64();
         Ok(super::migrate::EndpointV1::InterruptIn(
             migrate::InterruptInEndpointV1 {
-                transfers: transfers.iter().map(From::from).collect(),
+                transfers: transfers
+                    .iter()
+                    .map(|trbs| trbs.iter().map(From::from).collect())
+                    .collect(),
                 payload: payload.to_owned(),
                 period_ticks,
                 slot_id: u8::from(self.slot_id),
@@ -418,7 +495,7 @@ pub mod migrate {
 
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
-        pub transfers: Vec<TransferTrbV1>, // maybe?
+        pub transfers: Vec<Vec<TransferTrbV1>>, // maybe?
         pub payload: Option<Vec<u8>>,
         pub period_ticks: f64,
         pub slot_id: u8,
