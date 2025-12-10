@@ -35,6 +35,10 @@ pub enum Error {
     SlotNotEnabled(SlotId),
     #[error("No port associated with {0:?}")]
     NoPortAssociatedWithSlot(SlotId),
+    #[error(
+        "Could not set TR Dequeue Pointer {0:x?} and cycle state {1}: {2}"
+    )]
+    SetTRDPFailed(GuestAddr, bool, super::rings::consumer::Error),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -761,6 +765,15 @@ impl DeviceSlotTable {
                 SlotState::Default
                 | SlotState::Addressed
                 | SlotState::Configured => {
+                    let mut trdp;
+                    let mut ccs;
+                    {
+                        // unwrap: self.slot(slot_id).is_ok(), above
+                        let slot = self.slot_mut(slot_id).unwrap();
+                        let xfer_ring = slot.endpoints.get_mut(&endpoint_id)?;
+                        trdp = xfer_ring.current_dequeue_pointer();
+                        ccs = xfer_ring.consumer_cycle_state();
+                    }
                     let mut ep_ctx =
                         Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
                     match ep_ctx.endpoint_state() {
@@ -768,22 +781,29 @@ impl DeviceSlotTable {
                             if let Ok(dev) = self.usbdev_for_slot(slot_id) {
                                 // stop USB activity for pipe
                                 // stop transfer ring activity for pipe
-                                if let Ok(Some((
-                                    trb_pointer,
-                                    remaining_bytes,
-                                ))) = dev.stop_endpoint(endpoint_id)
+                                // remove endpoint from pipe schedule
+                                if let Ok(Some(trb)) =
+                                    dev.stop_endpoint(endpoint_id)
                                 {
+                                    trdp = trb.trb_pointer();
+                                    ccs = trb.cycle_state();
                                     // if we interrupted the execution of a TD, insert a transfer event
                                     event_sender.enqueue_event(
                                         EventInfo::Transfer {
-                                            trb_pointer,
+                                            trb_pointer: trb.trb_pointer(),
                                             completion_code:
                                                 TrbCompletionCode::Stopped,
-                                            trb_transfer_length: remaining_bytes
+                                            trb_transfer_length: trb
+                                                .data_buffer()
+                                                .len()
                                                 as u32,
                                             slot_id,
                                             endpoint_id,
-                                            event_data: false, // TODO: handle if pointed trb is event data trb
+                                            // Event Data TRBs are rolled up into the TransferTrb
+                                            // struct and processed at the same time as the TRB
+                                            // they immediately follow, so we will always be
+                                            // pointing to a non-Event-Data TRB in this case
+                                            event_data: false,
                                         },
                                         // will interrupt after enqueueing the command completion event
                                         true,
@@ -793,20 +813,14 @@ impl DeviceSlotTable {
 
                             // unwrap: self.slot(slot_id).is_ok(), above
                             let slot = self.slot_mut(slot_id).unwrap();
-                            if let Some(evt_ring) =
-                                slot.endpoints.get_mut(&endpoint_id)
-                            {
-                                ep_ctx.mutate(|ctx| {
-                                    ctx.set_tr_dequeue_pointer(
-                                        evt_ring.current_dequeue_pointer(),
-                                    );
-                                    ctx.set_dequeue_cycle_state(
-                                        evt_ring.consumer_cycle_state(),
-                                    );
-                                });
-                            }
-
-                            // TODO: remove endpoint from pipe schedule
+                            let xfer_ring =
+                                slot.endpoints.get_mut(&endpoint_id)?;
+                            Self::set_trdp_inner(
+                                xfer_ring,
+                                &mut ep_ctx,
+                                trdp,
+                                ccs,
+                            );
 
                             // set ep state to stopped
                             ep_ctx.mutate(|ctx| {
@@ -852,49 +866,61 @@ impl DeviceSlotTable {
             // retrieve dev ctx
             let slot_addr = self.dev_context_addr(slot_id, memctx)?;
             let output_slot_ctx = memctx.read::<SlotContext>(slot_addr)?;
-            match output_slot_ctx.slot_state() {
-                SlotState::Default
-                | SlotState::Addressed
-                | SlotState::Configured => {
-                    let mut ep_ctx =
-                        Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
-                    // TODO(USB3): cmd trb decode currently assumes MaxPStreams and StreamID are 0
-                    match ep_ctx.endpoint_state() {
-                        EndpointState::Stopped | EndpointState::Error => {
-                            // copy new_tr_dequeue_ptr to target Endpoint Context
-                            // copy dequeue_cycle_state to target Endpoint Context
-                            ep_ctx.mutate(|ctx| {
-                                ctx.set_tr_dequeue_pointer(new_tr_dequeue_ptr);
-                                ctx.set_dequeue_cycle_state(dequeue_cycle_state)
-                            });
-
-                            // unwrap: if self.slot(slot_id).is_ok(), above
-                            let slot = self.slot_mut(slot_id).unwrap();
-                            if let Some(endpoint) =
-                                slot.endpoints.get_mut(&endpoint_id)
-                            {
-                                if let Err(e) = endpoint
-                                    .set_dequeue_pointer_and_cycle(
-                                        new_tr_dequeue_ptr,
-                                        dequeue_cycle_state,
-                                    )
-                                {
-                                    slog::error!(self.log, "Error setting Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}, {endpoint_id:?}: {e}");
-                                }
-                            } else {
-                                slog::error!(self.log, "can't set Transfer Ring's dequeue pointer and cycle bit for {slot_id:?}'s nonexistent {endpoint_id:?}");
-                            }
-
-                            TrbCompletionCode::Success
-                        }
-                        _ => TrbCompletionCode::ContextStateError,
+            if let SlotState::Default
+            | SlotState::Addressed
+            | SlotState::Configured = output_slot_ctx.slot_state()
+            {
+                let mut ep_ctx =
+                    Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
+                // TODO(USB3): cmd trb decode currently assumes MaxPStreams and StreamID are 0
+                if let EndpointState::Stopped | EndpointState::Error =
+                    ep_ctx.endpoint_state()
+                {
+                    // unwrap: self.slot(slot_id).is_ok(), above
+                    let slot = self.slot_mut(slot_id).unwrap();
+                    let xfer_ring = slot.endpoints.get_mut(&endpoint_id)?;
+                    // copy new_tr_dequeue_ptr to target Endpoint Context
+                    // copy dequeue_cycle_state to target Endpoint Context
+                    if let Err(e) = Self::set_trdp_inner(
+                        xfer_ring,
+                        &mut ep_ctx,
+                        new_tr_dequeue_ptr,
+                        dequeue_cycle_state,
+                    ) {
+                        slog::error!(
+                            self.log,
+                            "Error on {slot_id:?} {endpoint_id:?}: {e}"
+                        );
+                    } else {
+                        return Some(TrbCompletionCode::Success);
                     }
                 }
-                _ => TrbCompletionCode::ContextStateError,
             }
+            TrbCompletionCode::ContextStateError
         } else {
             TrbCompletionCode::SlotNotEnabledError
         })
+    }
+
+    fn set_trdp_inner(
+        xfer_ring: &mut TransferRing,
+        ep_ctx: &mut MemCtxValue<'_, EndpointContext>,
+        new_tr_dequeue_ptr: GuestAddr,
+        dequeue_cycle_state: bool,
+    ) -> Result<(), Error> {
+        ep_ctx.mutate(|ctx| {
+            ctx.set_tr_dequeue_pointer(new_tr_dequeue_ptr);
+            ctx.set_dequeue_cycle_state(dequeue_cycle_state)
+        });
+
+        xfer_ring
+            .set_dequeue_pointer_and_cycle(
+                new_tr_dequeue_ptr,
+                dequeue_cycle_state,
+            )
+            .map_err(|e| {
+                Error::SetTRDPFailed(new_tr_dequeue_ptr, dequeue_cycle_state, e)
+            })
     }
 
     // xHCI 1.2 sect 4.6.11

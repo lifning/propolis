@@ -227,6 +227,9 @@ impl TransferTrb {
     pub fn trb_pointer(&self) -> GuestAddr {
         self.addr
     }
+    pub fn cycle_state(&self) -> bool {
+        self.trb.control.cycle()
+    }
     pub fn event_data(&self) -> Option<&EventDataTrb> {
         self.event_data.as_ref()
     }

@@ -134,11 +134,12 @@ pub trait UsbDevice: Send + Sync + 'static {
     /// Resets EDTLA (xHCI 1.2 sect 4.11.5.2)
     fn new_transfer_descriptor(&self);
     /// Aborts any in-flight transactions for a Stop or Reset Endpoint Command.
-    /// Returns pointer to interrupted TRB, and how many bytes remained.
+    /// Returns interrupted Transfer TRB, indicating how many bytes remained
+    /// and the location to which the TRDP and cycle state should be restored.
     fn stop_endpoint(
         &mut self,
         endpoint_id: EndpointId,
-    ) -> Result<Option<(GuestAddr, usize)>>;
+    ) -> Result<Option<TransferTrb>>;
     /// *Caller* must put an appropriate completion event into the Event Ring.
     fn setup_stage(
         &mut self,

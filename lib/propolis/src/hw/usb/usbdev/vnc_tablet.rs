@@ -396,10 +396,10 @@ impl UsbDevice for HIDTabletDevice {
     fn stop_endpoint(
         &mut self,
         endpoint_id: EndpointId,
-    ) -> Result<Option<(GuestAddr, usize)>> {
+    ) -> Result<Option<TransferTrb>> {
         if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
             // TODO:
-            ep.stop_transfers()
+            Ok(ep.stop_transfers())
         } else {
             Ok(None)
         }

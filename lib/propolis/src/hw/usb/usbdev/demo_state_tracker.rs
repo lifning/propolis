@@ -39,7 +39,7 @@ impl UsbDevice for NullUsbDevice {
     fn stop_endpoint(
         &mut self,
         _endpoint_id: EndpointId,
-    ) -> Result<Option<(GuestAddr, usize)>> {
+    ) -> Result<Option<TransferTrb>> {
         // no transfers handled out-of-band
         Ok(None)
     }

@@ -236,8 +236,14 @@ impl PeriodicTransferPollThread {
                     };
                 }
                 InterruptInPhase::StoppedEndpoint => {
+                    // wait until we're resumed
+                    let _guard = cvar
+                        .wait_while(guard, |x| {
+                            x.phase == InterruptInPhase::StoppedEndpoint
+                        })
+                        .unwrap();
                     // TODO
-                    // did we try to reset/stop the endpoint with a transction in flight?
+                    // handle anything about reset/stop the endpoint with a transction in flight?
                 }
                 InterruptInPhase::TerminateLoop => {
                     // FIXME: remove once unnecessary
@@ -404,9 +410,23 @@ impl InterruptInEndpoint {
         Arc::downgrade(&self.data)
     }
 
-    pub fn stop_transfers(&mut self) -> TODO {
-        // store these elsewhere so we can resume them on doorbell ring
-        self.data.0.lock().unwrap().transfers.drain(..);
+    pub fn stop_transfers(&mut self) -> Option<TransferTrb> {
+        let mut guard = self.data.0.lock().unwrap();
+        guard.phase = InterruptInPhase::StoppedEndpoint;
+        // clear out all cached TDs besides the one we're currently executing.
+        // leave current TD so we can resume it on a doorbell ring.
+        while guard.transfers.len() > 1 {
+            guard.transfers.pop_back();
+        }
+        // return the current TRB, whose pointer and cycle state values will be
+        // written back to the transfer ring's dequeue pointer, and whose
+        // transfer size will be sent in the resulting 'Stopped' Transfer Event
+        guard
+            .transfers
+            .iter()
+            .next()
+            .and_then(|trbs| trbs.iter().next())
+            .copied()
     }
 
     pub fn import(
