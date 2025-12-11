@@ -788,7 +788,7 @@ impl DeviceSlotTable {
                                     trdp = trb.trb_pointer();
                                     ccs = trb.cycle_state();
                                     // if we interrupted the execution of a TD, insert a transfer event
-                                    event_sender.enqueue_event(
+                                    if let Err(e) = event_sender.enqueue_event(
                                         EventInfo::Transfer {
                                             trb_pointer: trb.trb_pointer(),
                                             completion_code:
@@ -807,7 +807,9 @@ impl DeviceSlotTable {
                                         },
                                         // will interrupt after enqueueing the command completion event
                                         true,
-                                    );
+                                    ) {
+                                        slog::error!(self.log, "Failed to insert event for interrupted TD in {slot_id:?} {endpoint_id:?}: {e}");
+                                    }
                                 }
                             }
 
@@ -815,20 +817,29 @@ impl DeviceSlotTable {
                             let slot = self.slot_mut(slot_id).unwrap();
                             let xfer_ring =
                                 slot.endpoints.get_mut(&endpoint_id)?;
-                            Self::write_trdp_and_ccs(
+
+                            if let Err(e) = Self::write_trdp_and_ccs(
                                 xfer_ring,
                                 &mut ep_ctx,
                                 trdp,
                                 ccs,
-                            );
+                            ) {
+                                slog::error!(
+                                    self.log,
+                                    "Error in {slot_id:?} {endpoint_id:?}: {e}"
+                                );
+                                TrbCompletionCode::ContextStateError
+                            } else {
+                                // set ep state to stopped
+                                ep_ctx.mutate(|ctx| {
+                                    ctx.set_endpoint_state(
+                                        EndpointState::Stopped,
+                                    )
+                                });
 
-                            // set ep state to stopped
-                            ep_ctx.mutate(|ctx| {
-                                ctx.set_endpoint_state(EndpointState::Stopped)
-                            });
-
-                            // n/a: wait for any partially completed split transactions
-                            TrbCompletionCode::Success
+                                // n/a: wait for any partially completed split transactions
+                                TrbCompletionCode::Success
+                            }
                         }
                         x => {
                             slog::error!(
