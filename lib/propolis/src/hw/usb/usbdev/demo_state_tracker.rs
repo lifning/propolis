@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use crate::{
-    common::GuestAddr,
     hw::usb::xhci::{
         controller::XhciPortHandle,
         device_slots::{EndpointId, SlotId},

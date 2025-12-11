@@ -62,7 +62,6 @@ pub struct InterruptInData {
     /// Data from the USB device to write into the transfers
     payload: Option<Vec<u8>>,
     period: Duration,
-    terminate: bool,
     phase: InterruptInPhase,
 }
 
@@ -157,9 +156,9 @@ impl PeriodicTransferPollThread {
                             self.notify_short_packet(&xfer, &port_hdl)
                         {
                             slog::error!(
-                                    self.log,
-                                    "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
-                                );
+                                self.log,
+                                "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
+                            );
                         }
                         guard.phase =
                             InterruptInPhase::WaitForPayloadOrTransfer;
@@ -175,7 +174,6 @@ impl PeriodicTransferPollThread {
                             x.payload.is_none()
                                 && x.transfers.len() == num_tds
                                 && x.phase == InterruptInPhase::WaitForPayloadOrTransfer
-                                && !x.terminate // TODO: remove
                         })
                         .unwrap();
                     if guard.payload.is_some() {
@@ -246,8 +244,6 @@ impl PeriodicTransferPollThread {
                     // handle anything about reset/stop the endpoint with a transction in flight?
                 }
                 InterruptInPhase::TerminateLoop => {
-                    // FIXME: remove once unnecessary
-                    guard.terminate = true;
                     cvar.notify_one();
                     break;
                 }
@@ -343,8 +339,7 @@ impl InterruptInEndpoint {
                 transfers: VecDeque::new(),
                 payload: None,
                 period,
-                terminate: false,
-                block_migration: false,
+                phase: InterruptInPhase::WaitForTransferDescriptors,
             }),
             Condvar::new(),
         ));
@@ -372,6 +367,7 @@ impl InterruptInEndpoint {
             period_ticks,
             slot_id,
             endpoint_id,
+            phase,
         } = value;
         let slot_id = SlotId::from(*slot_id);
         let endpoint_id = EndpointId::from(*endpoint_id);
@@ -383,8 +379,7 @@ impl InterruptInEndpoint {
                     .collect(),
                 payload: payload.to_owned(),
                 period: MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks),
-                terminate: false,
-                block_migration: false,
+                phase: phase.into(),
             }),
             Condvar::new(),
         ));
@@ -440,18 +435,21 @@ impl InterruptInEndpoint {
             period_ticks,
             slot_id,
             endpoint_id,
+            phase,
         } = ep;
         let guard = self.data.0.lock().unwrap();
-        let mut guard =
-            self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
+        let mut guard = self
+            .data
+            .1
+            .wait_while(guard, |x| x.phase == InterruptInPhase::Writing)
+            .unwrap();
         let InterruptInData {
             transfers: transfers_mut,
             payload: payload_mut,
             period,
-            terminate,
-            block_migration: _,
+            phase: phase_mut,
         } = &mut *guard;
-        if *terminate {
+        if let InterruptInPhase::TerminateLoop = phase_mut {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
                 "Interrupt-IN endpoint periodic transfer loop was terminated for missing its handle to the xHC".to_string()
             ));
@@ -460,10 +458,11 @@ impl InterruptInEndpoint {
         self.endpoint_id = EndpointId::from(*endpoint_id);
         *transfers_mut = transfers
             .iter()
-            .map(|trbs| trbs.map(From::from).collect())
+            .map(|trbs| trbs.iter().map(From::from).collect())
             .collect();
         *payload_mut = payload.to_owned();
         *period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
+        *phase_mut = phase.into();
         Ok(())
     }
 
@@ -472,17 +471,15 @@ impl InterruptInEndpoint {
     ) -> Result<super::migrate::EndpointV1, crate::migrate::MigrateStateError>
     {
         let guard = self.data.0.lock().unwrap();
-        let guard =
-            self.data.1.wait_while(guard, |x| x.block_migration).unwrap();
-        let InterruptInData {
-            transfers,
-            payload,
-            period,
-            terminate,
-            block_migration: _,
-        } = &*guard;
-        if *terminate {
-            return Err(crate::migrate::MigrateStateError::NotReadyForExport); // loop bailed from missing handle
+        let guard = self
+            .data
+            .1
+            .wait_while(guard, |x| x.phase == InterruptInPhase::Writing)
+            .unwrap();
+        let InterruptInData { transfers, payload, period, phase } = &*guard;
+        if guard.phase == InterruptInPhase::TerminateLoop {
+            // loop bailed from missing handle (TODO: better variant than 'not ready' unless we can make it become ready)
+            return Err(crate::migrate::MigrateStateError::NotReadyForExport);
         }
         let period_ticks =
             period.as_secs_f64() / MINIMUM_INTERVAL_TIME.as_secs_f64();
@@ -496,6 +493,7 @@ impl InterruptInEndpoint {
                 period_ticks,
                 slot_id: u8::from(self.slot_id),
                 endpoint_id: u8::from(self.endpoint_id),
+                phase: phase.into(),
             },
         ))
     }
@@ -503,7 +501,7 @@ impl InterruptInEndpoint {
 
 impl Drop for InterruptInEndpoint {
     fn drop(&mut self) {
-        self.data.0.lock().unwrap().terminate = true;
+        self.data.0.lock().unwrap().phase = InterruptInPhase::TerminateLoop;
         self.data.1.notify_one();
     }
 }
@@ -520,5 +518,43 @@ pub mod migrate {
         pub period_ticks: f64,
         pub slot_id: u8,
         pub endpoint_id: u8,
+        pub phase: InterruptInPhaseV1,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub enum InterruptInPhaseV1 {
+        WaitForTransferDescriptors,
+        WaitForPayloadPeriod,
+        WaitForPayloadOrTransfer,
+        StoppedEndpoint,
+        Writing,
+        TerminateLoop,
+    }
+
+    impl From<&super::InterruptInPhase> for InterruptInPhaseV1 {
+        fn from(value: &super::InterruptInPhase) -> Self {
+            use super::InterruptInPhase::*;
+            match value {
+                WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
+                WaitForPayloadPeriod => Self::WaitForPayloadPeriod,
+                WaitForPayloadOrTransfer => Self::WaitForPayloadOrTransfer,
+                StoppedEndpoint => Self::StoppedEndpoint,
+                Writing => Self::Writing,
+                TerminateLoop => Self::TerminateLoop,
+            }
+        }
+    }
+    impl From<&InterruptInPhaseV1> for super::InterruptInPhase {
+        fn from(value: &InterruptInPhaseV1) -> Self {
+            use InterruptInPhaseV1::*;
+            match value {
+                WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
+                WaitForPayloadPeriod => Self::WaitForPayloadPeriod,
+                WaitForPayloadOrTransfer => Self::WaitForPayloadOrTransfer,
+                StoppedEndpoint => Self::StoppedEndpoint,
+                Writing => Self::Writing,
+                TerminateLoop => Self::TerminateLoop,
+            }
+        }
     }
 }

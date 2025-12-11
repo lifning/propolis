@@ -815,7 +815,7 @@ impl DeviceSlotTable {
                             let slot = self.slot_mut(slot_id).unwrap();
                             let xfer_ring =
                                 slot.endpoints.get_mut(&endpoint_id)?;
-                            Self::set_trdp_inner(
+                            Self::write_trdp_and_ccs(
                                 xfer_ring,
                                 &mut ep_ctx,
                                 trdp,
@@ -881,7 +881,7 @@ impl DeviceSlotTable {
                     let xfer_ring = slot.endpoints.get_mut(&endpoint_id)?;
                     // copy new_tr_dequeue_ptr to target Endpoint Context
                     // copy dequeue_cycle_state to target Endpoint Context
-                    if let Err(e) = Self::set_trdp_inner(
+                    if let Err(e) = Self::write_trdp_and_ccs(
                         xfer_ring,
                         &mut ep_ctx,
                         new_tr_dequeue_ptr,
@@ -902,7 +902,7 @@ impl DeviceSlotTable {
         })
     }
 
-    fn set_trdp_inner(
+    fn write_trdp_and_ccs(
         xfer_ring: &mut TransferRing,
         ep_ctx: &mut MemCtxValue<'_, EndpointContext>,
         new_tr_dequeue_ptr: GuestAddr,

@@ -8,7 +8,7 @@ use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 use vnc_tablet::HIDTabletReport;
 
-use crate::{common::GuestAddr, hw::pci, vmm::MemCtx};
+use crate::{hw::pci, vmm::MemCtx};
 
 use super::xhci::{
     bits::device_context::EndpointContext,
