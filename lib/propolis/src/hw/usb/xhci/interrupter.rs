@@ -223,8 +223,10 @@ impl XhciInterrupter {
                 U32(self.evt_ring_seg_tbl_size.0)
             }
             // subject to 64-bit split writes when AC64=1 (xHCI 1.2 sect 5.1)
+            // which through our abstraction appear as multiple reads/writes
+            // to the same 64-bit register
             InterrupterRegisters::EventRingSegmentTableBaseAddress => {
-                self.evt_ring_seg_base_addr.0 = wo.read_u64() as u64;
+                self.evt_ring_seg_base_addr.0 = wo.read_u64();
                 U64(self.evt_ring_seg_base_addr.0)
             }
             // also subject to 64-bit split writes

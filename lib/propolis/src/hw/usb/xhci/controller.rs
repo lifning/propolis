@@ -933,7 +933,7 @@ impl PciXhci {
 
             state.mfindex_wrap_thread = Some(
                 std::thread::Builder::new()
-                    .name(format!("xHCI mfindex wrap thread"))
+                    .name("xHCI mfindex wrap thread".to_string())
                     .spawn(move || {
                         use rings::producer::event::EventInfo;
                         let mut wraps = 0;

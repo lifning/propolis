@@ -5,10 +5,13 @@
 use std::sync::Arc;
 
 use crate::{
-    hw::usb::xhci::{
-        controller::XhciPortHandle,
-        device_slots::{EndpointId, SlotId},
-        rings::consumer::transfer::TransferTrb,
+    hw::usb::{
+        usbdev::endpoint::control::ControlEPStatusStageResult,
+        xhci::{
+            controller::XhciPortHandle,
+            device_slots::{EndpointId, SlotId},
+            rings::consumer::transfer::TransferTrb,
+        },
     },
     vmm::MemCtx,
 };
@@ -84,13 +87,19 @@ impl UsbDevice for NullUsbDevice {
             .control_ep_mut(endpoint_id)?
             .status_stage(status_direction)?
         {
-            Some((req, _payload)) => match req {
-                ControlRequestInfo::SetConfiguration { configuration: _ } => {
-                    // TODO: check config value
-                    Ok(())
+            Some(ControlEPStatusStageResult { request, payload: _ }) => {
+                match request {
+                    ControlRequestInfo::SetConfiguration {
+                        configuration: _,
+                    } => {
+                        // TODO: check config value
+                        Ok(())
+                    }
+                    x => Err(Error::UnimplementedRequestBehavior(format!(
+                        "{x:?}"
+                    ))),
                 }
-                x => Err(Error::UnimplementedRequestBehavior(format!("{x:?}"))),
-            },
+            }
             None => Ok(()),
         }
     }
@@ -115,7 +124,7 @@ impl UsbDevice for NullUsbDevice {
             ));
         } else {
             return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB Default Control Endpoint missing from payload"),
+                "USB Default Control Endpoint missing from payload".to_string(),
             ));
         }
         Ok(())

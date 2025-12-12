@@ -17,14 +17,18 @@ use crate::{
     hw::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
         pci,
-        usb::xhci::{
-            bits::{
-                device_context::EndpointContext, ring_data::TrbCompletionCode,
-            },
-            controller::XhciPortHandle,
-            device_slots::{EndpointId, SlotId},
-            rings::{
-                consumer::transfer::TransferTrb, producer::event::EventInfo,
+        usb::{
+            usbdev::endpoint::control::ControlEPStatusStageResult,
+            xhci::{
+                bits::{
+                    device_context::EndpointContext,
+                    ring_data::TrbCompletionCode,
+                },
+                controller::XhciPortHandle,
+                device_slots::{EndpointId, SlotId},
+                rings::{
+                    consumer::transfer::TransferTrb, producer::event::EventInfo,
+                },
             },
         },
     },
@@ -532,9 +536,9 @@ impl UsbDevice for HIDTabletDevice {
             .control_ep_mut(endpoint_id)?
             .status_stage(status_direction)?
         {
-            Some((req, _payload)) => {
+            Some(ControlEPStatusStageResult { request, payload: _ }) => {
                 // eprintln!("out {endpoint_id:?}: {req:?}");
-                match req {
+                match request {
                     ControlRequestInfo::SetConfiguration {
                         configuration: _,
                     } => {
@@ -579,9 +583,8 @@ impl UsbDevice for HIDTabletDevice {
                 ep_payload
             else {
                 return Err(crate::migrate::MigrateStateError::ImportFailed(
-                    format!(
-                        "wrong endpoint type for USB Default Control Endpoint"
-                    ),
+                    "Wrong endpoint type for USB Default Control Endpoint"
+                        .to_string(),
                 ));
             };
             if let Some(ctrl_ep) = self.control_endpoint.as_mut() {
@@ -626,7 +629,7 @@ impl UsbDevice for HIDTabletDevice {
             self.interrupt_endpoint = None; // drop() terminates transfer thread
 
             return Err(crate::migrate::MigrateStateError::ImportFailed(
-                format!("USB interrupt endpoint 1 missing"),
+                "USB interrupt endpoint 1 missing".to_string(),
             ));
         }
         Ok(())

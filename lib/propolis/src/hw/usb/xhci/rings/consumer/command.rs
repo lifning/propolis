@@ -274,8 +274,6 @@ pub enum CommandInfo {
     },
 }
 
-// TODO: return an iterator of EventInfo's for commands that may produce
-// multiple Event TRB's, such as the Stop Endpoint Command
 impl CommandInfo {
     /// Returns an Err if enqueuing the Command Completion Event TRB fails.
     pub fn run(

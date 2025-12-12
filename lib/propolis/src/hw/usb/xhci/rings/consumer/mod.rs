@@ -313,7 +313,8 @@ mod test {
     fn test_get_device_descriptor_transfer_ring() {
         let mut phys_map = PhysMap::new_test(16 * 1024);
         phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024).unwrap();
-        let memctx = phys_map.memctx();
+        let accessor = phys_map.finalize();
+        let memctx = accessor.access().unwrap();
 
         // mimicking pg. 85 of xHCI 1.2, but with Links thrown in
         let ring_segments: &[&[_]] = &[
@@ -460,7 +461,8 @@ mod test {
     fn test_get_chained_td() {
         let mut phys_map = PhysMap::new_test(16 * 1024);
         phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024).unwrap();
-        let memctx = phys_map.memctx();
+        let accessor = phys_map.finalize();
+        let memctx = accessor.access().unwrap();
 
         let status =
             TrbStatusField { transfer: TrbStatusFieldTransfer::default() };

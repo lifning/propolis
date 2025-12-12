@@ -480,7 +480,8 @@ mod test {
     fn test_event_ring_enqueue() {
         let mut phys_map = PhysMap::new_test(16 * 1024);
         phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024).unwrap();
-        let memctx = phys_map.memctx();
+        let accessor = phys_map.finalize();
+        let memctx = accessor.access().unwrap();
 
         let erstba = GuestAddr(0);
         let erstsz = 2;

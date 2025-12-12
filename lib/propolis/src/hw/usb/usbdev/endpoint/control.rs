@@ -54,6 +54,14 @@ where
     _spooky: PhantomData<C>,
 }
 
+pub struct ControlEPStatusStageResult<
+    'a,
+    C: TryFrom<SetupData, Error = Error> + Debug,
+> {
+    pub request: ControlRequestInfo<C>,
+    pub payload: Option<&'a [u8]>,
+}
+
 impl<C> ControlEndpoint<C>
 where
     ControlRequestInfo<C>: TryFrom<SetupData, Error = Error>,
@@ -228,7 +236,7 @@ where
     pub fn status_stage(
         &mut self,
         status_direction: RequestDirection,
-    ) -> Result<Option<(ControlRequestInfo<C>, Option<&[u8]>)>> {
+    ) -> Result<Option<ControlEPStatusStageResult<'_, C>>> {
         if let Some(setup) = self.current_setup.take() {
             if status_direction == setup.direction() {
                 return Err(Error::SetupVsStatusDirectionMatch(
@@ -237,11 +245,15 @@ where
             }
 
             let result = match setup.direction() {
-                RequestDirection::HostToDevice => Some(
-                    ControlRequestInfo::try_from(setup)
-                        .map(|x| (x, self.payload.as_ref().map(Vec::as_slice))),
-                )
-                .transpose(),
+                RequestDirection::HostToDevice => {
+                    Some(ControlRequestInfo::try_from(setup).map(|request| {
+                        ControlEPStatusStageResult {
+                            request,
+                            payload: self.payload.as_deref(),
+                        }
+                    }))
+                    .transpose()
+                }
                 RequestDirection::DeviceToHost => Ok(None),
             };
 
@@ -251,7 +263,7 @@ where
                 result.is_ok(),
             ));
             self.bytes_transferred = 0;
-            result.map_err(From::from)
+            result
         } else {
             Err(Error::NoSetupStageBefore("Status Stage"))
         }

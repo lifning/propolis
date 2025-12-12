@@ -52,13 +52,9 @@ impl IntoIterator for TransferDescriptor {
     }
 }
 
-pub enum Never {}
-impl TryFrom<Vec<(Trb, GuestAddr)>> for TransferDescriptor {
-    type Error = Never;
-    fn try_from(
-        trbs: Vec<(Trb, GuestAddr)>,
-    ) -> core::result::Result<Self, Self::Error> {
-        Ok(Self { trbs })
+impl From<Vec<(Trb, GuestAddr)>> for TransferDescriptor {
+    fn from(trbs: Vec<(Trb, GuestAddr)>) -> Self {
+        Self { trbs }
     }
 }
 

@@ -4,7 +4,7 @@
 
 use phd_testcase::*;
 use propolis_client::instance_spec::{
-    PciPath, SpecKey, UsbDevice, XhciController,
+    PciPath, SpecKey, UsbDevice, UsbDeviceType, XhciController,
 };
 
 #[phd_testcase]
@@ -21,6 +21,7 @@ async fn usb_device_enumerates(ctx: &Framework) {
         .usb_device(UsbDevice {
             xhc_device: xhc_name,
             root_hub_port_num: USB_PORT,
+            usb_device_type: UsbDeviceType::HidTablet,
         });
 
     let spec = config.vm_spec(ctx).await?;
