@@ -43,6 +43,10 @@ impl UsbDevice for NullUsbDevice {
         Ok(None)
     }
 
+    fn resume_endpoint(&mut self, _endpoint_id: EndpointId) {
+        // no transfers handled out-of-band
+    }
+
     fn setup_stage(
         &mut self,
         endpoint_id: EndpointId,

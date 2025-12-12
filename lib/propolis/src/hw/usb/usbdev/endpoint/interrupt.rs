@@ -130,7 +130,11 @@ impl PeriodicTransferPollThread {
                                 && x.phase == InterruptInPhase::WaitForTransferDescriptors
                         })
                         .unwrap();
-                    guard.phase = InterruptInPhase::WaitForPayloadPeriod;
+                    if guard.phase
+                        == InterruptInPhase::WaitForTransferDescriptors
+                    {
+                        guard.phase = InterruptInPhase::WaitForPayloadPeriod;
+                    }
                 }
                 InterruptInPhase::WaitForPayloadPeriod => {
                     let timeout = guard.period;
@@ -142,7 +146,9 @@ impl PeriodicTransferPollThread {
                         })
                         .unwrap();
 
-                    if !timeout_result.timed_out() {
+                    if guard.phase != InterruptInPhase::WaitForPayloadPeriod {
+                        // if phase was changed out-of-band, loop around to match again
+                    } else if !timeout_result.timed_out() {
                         // we have a payload, proceed
                         guard.phase = InterruptInPhase::Writing;
                     } else if let Some(xfer) =
@@ -176,7 +182,10 @@ impl PeriodicTransferPollThread {
                                 && x.phase == InterruptInPhase::WaitForPayloadOrTransfer
                         })
                         .unwrap();
-                    if guard.payload.is_some() {
+                    if guard.phase != InterruptInPhase::WaitForPayloadOrTransfer
+                    {
+                        // if phase was changed out-of-band, loop around to match again
+                    } else if guard.payload.is_some() {
                         guard.phase = InterruptInPhase::Writing;
                     } else if guard.transfers.len() != num_tds {
                         // abandon and move onto a new transfer if one has been given to us
@@ -241,7 +250,7 @@ impl PeriodicTransferPollThread {
                         })
                         .unwrap();
                     // TODO
-                    // handle anything about reset/stop the endpoint with a transction in flight?
+                    // handle anything else about reset/stop the endpoint with a transction in flight?
                 }
                 InterruptInPhase::TerminateLoop => {
                     cvar.notify_one();
@@ -408,6 +417,7 @@ impl InterruptInEndpoint {
     pub fn stop_transfers(&mut self) -> Option<TransferTrb> {
         let mut guard = self.data.0.lock().unwrap();
         guard.phase = InterruptInPhase::StoppedEndpoint;
+
         // clear out all cached TDs besides the one we're currently executing.
         // leave current TD so we can resume it on a doorbell ring.
         while guard.transfers.len() > 1 {
@@ -422,6 +432,14 @@ impl InterruptInEndpoint {
             .next()
             .and_then(|trbs| trbs.iter().next())
             .copied()
+    }
+
+    pub fn resume_transfers(&mut self) {
+        let mut guard = self.data.0.lock().unwrap();
+        // restart at first phase and filter through accordingly
+        // (if there was an in-progress TD it will be at the head of the queue)
+        guard.phase = InterruptInPhase::WaitForTransferDescriptors;
+        self.data.1.notify_one();
     }
 
     pub fn import(

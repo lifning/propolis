@@ -140,6 +140,9 @@ pub trait UsbDevice: Send + Sync + 'static {
         &mut self,
         endpoint_id: EndpointId,
     ) -> Result<Option<TransferTrb>>;
+    /// Resume a previously-stopped endpoint which was in the middle of a
+    /// transfer when `stop_endpoint` was called.
+    fn resume_endpoint(&mut self, endpoint_id: EndpointId);
     /// *Caller* must put an appropriate completion event into the Event Ring.
     fn setup_stage(
         &mut self,
