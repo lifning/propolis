@@ -715,7 +715,7 @@ impl DeviceSlotTable {
 
     // xHCI 1.2 sect 4.6.8
     pub fn reset_endpoint(
-        &self,
+        &mut self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         transfer_state_preserve: bool,
@@ -726,17 +726,43 @@ impl DeviceSlotTable {
         let mut ep_ctx =
             Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
         Some(match ep_ctx.endpoint_state() {
-            EndpointState::Halted => TrbCompletionCode::ContextStateError,
-            _ => {
+            // endpoint must be in halted state for reset endpoint command
+            EndpointState::Halted => {
                 if transfer_state_preserve {
-                    // TODO:
-                    // retry last transaction the next time the doorbell is rung,
-                    // if no other commands have been issued to the endpoint
+                    // when TSP=1, we wish to retry last transaction the next time
+                    // the doorbell is rung, if no other commands have been issued
+                    // to the endpoint
+                    if let Ok(dev) = self.usbdev_for_slot(slot_id) {
+                        if let Ok(Some(trb)) = dev.stop_endpoint(endpoint_id) {
+                            // unwrap: usbdev_for_slot was Ok
+                            let slot = self.slot_mut(slot_id).unwrap();
+                            // rewind transfer ring so we can recapture TRBs we
+                            // dropped from our cache
+                            if let Err(e) = Self::write_trdp_and_ccs(
+                                slot.endpoints.get_mut(&endpoint_id)?,
+                                &mut ep_ctx,
+                                trb.trb_pointer(),
+                                trb.cycle_state(),
+                            ) {
+                                slog::error!(
+                                    self.log,
+                                    "Error in {slot_id:?} {endpoint_id:?}: {e}"
+                                );
+                                return Some(
+                                    TrbCompletionCode::ContextStateError,
+                                );
+                            }
+                        }
+                    }
                 } else {
                     // TODO:
                     // reset data toggle for usb2 device / sequence number for usb3 device
                     // reset any usb2 split transaction state on this endpoint
-                    // invalidate cached Transfer TRBs
+
+                    // invalidate all cached Transfer TRBs
+                    if let Ok(dev) = self.usbdev_for_slot(slot_id) {
+                        dev.abort_transfers(endpoint_id);
+                    }
                 }
                 ep_ctx.mutate(|ctx| {
                     ctx.set_endpoint_state(EndpointState::Stopped)
@@ -744,6 +770,7 @@ impl DeviceSlotTable {
 
                 TrbCompletionCode::Success
             }
+            _ => TrbCompletionCode::ContextStateError,
         })
     }
 
@@ -887,6 +914,10 @@ impl DeviceSlotTable {
                 if let EndpointState::Stopped | EndpointState::Error =
                     ep_ctx.endpoint_state()
                 {
+                    // invalidate any cached TDs
+                    if let Ok(dev) = self.usbdev_for_slot(slot_id) {
+                        dev.abort_transfers(endpoint_id);
+                    }
                     // unwrap: self.slot(slot_id).is_ok(), above
                     let slot = self.slot_mut(slot_id).unwrap();
                     let xfer_ring = slot.endpoints.get_mut(&endpoint_id)?;

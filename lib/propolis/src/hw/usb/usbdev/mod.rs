@@ -140,6 +140,8 @@ pub trait UsbDevice: Send + Sync + 'static {
         &mut self,
         endpoint_id: EndpointId,
     ) -> Result<Option<TransferTrb>>;
+    /// Invalidate cached Transfer TRBs, including those of any in-progress TD
+    fn abort_transfers(&mut self, endpoint_id: EndpointId);
     /// Resume a previously-stopped endpoint which was in the middle of a
     /// transfer when `stop_endpoint` was called.
     fn resume_endpoint(&mut self, endpoint_id: EndpointId);

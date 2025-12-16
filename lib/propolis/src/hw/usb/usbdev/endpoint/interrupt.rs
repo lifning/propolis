@@ -414,7 +414,7 @@ impl InterruptInEndpoint {
         Arc::downgrade(&self.data)
     }
 
-    pub fn stop_transfers(&mut self) -> Option<TransferTrb> {
+    pub fn stop_endpoint(&self) -> Option<TransferTrb> {
         let mut guard = self.data.0.lock().unwrap();
         guard.phase = InterruptInPhase::StoppedEndpoint;
 
@@ -434,7 +434,14 @@ impl InterruptInEndpoint {
             .copied()
     }
 
-    pub fn resume_transfers(&mut self) {
+    pub fn abort_transfers(&self) {
+        let mut guard = self.data.0.lock().unwrap();
+        guard.transfers.clear();
+        guard.phase = InterruptInPhase::WaitForTransferDescriptors;
+        self.data.1.notify_one();
+    }
+
+    pub fn resume_transfers(&self) {
         let mut guard = self.data.0.lock().unwrap();
         // restart at first phase and filter through accordingly
         // (if there was an in-progress TD it will be at the head of the queue)

@@ -402,9 +402,14 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
     ) -> Result<Option<TransferTrb>> {
         if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
-            Ok(ep.stop_transfers())
+            Ok(ep.stop_endpoint())
         } else {
             Ok(None)
+        }
+    }
+    fn abort_transfers(&mut self, endpoint_id: EndpointId) {
+        if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
+            ep.abort_transfers()
         }
     }
 
@@ -605,9 +610,8 @@ impl UsbDevice for HIDTabletDevice {
             ) = ep_payload
             else {
                 return Err(crate::migrate::MigrateStateError::ImportFailed(
-                    format!(
-                        "wrong endpoint type for USB Interrupt IN Endpoint"
-                    ),
+                    "wrong endpoint type for USB Interrupt IN Endpoint"
+                        .to_string(),
                 ));
             };
             if let Some(intr_ep) = self.interrupt_endpoint.as_mut() {

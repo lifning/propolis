@@ -38,17 +38,15 @@ impl UsbDevice for NullUsbDevice {
         self.port_wake_hdl.event_sender.reset_edtla();
     }
 
+    // no transfers handled out-of-band
     fn stop_endpoint(
         &mut self,
         _endpoint_id: EndpointId,
     ) -> Result<Option<TransferTrb>> {
-        // no transfers handled out-of-band
         Ok(None)
     }
-
-    fn resume_endpoint(&mut self, _endpoint_id: EndpointId) {
-        // no transfers handled out-of-band
-    }
+    fn abort_transfers(&mut self, _endpoint_id: EndpointId) {}
+    fn resume_endpoint(&mut self, _endpoint_id: EndpointId) {}
 
     fn setup_stage(
         &mut self,
