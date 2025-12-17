@@ -280,7 +280,6 @@ impl PeriodicTransferPollThread {
             ));
         };
         port_hdl
-            .event_sender
             .send_completion_events_for_trb(
                 xfer,
                 TrbCompletionCode::ShortPacket,
@@ -315,7 +314,6 @@ impl PeriodicTransferPollThread {
             region.1,
         ));
         port_hdl
-            .event_sender
             .send_completion_events_for_trb(
                 &xfer,
                 TrbCompletionCode::Success,

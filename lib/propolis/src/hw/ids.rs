@@ -71,6 +71,6 @@ pub mod usb {
     /// The Oxide USB Vendor ID assigned by USB-IF
     pub const VENDOR_OXIDE: u16 = 0x38c6;
 
-    /// FIXME: MAY BE A PLACEHOLDER
+    /// USB Device ID for the Propolis HID tablet used for VNC pointer input.
     pub const PROPOLIS_USB_TABLET_DEV_ID: u16 = 0x0001;
 }

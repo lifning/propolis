@@ -1054,7 +1054,7 @@ impl DeviceSlotTable {
         &mut self,
         value: &migrate::DeviceSlotTableV1,
         ctx: &crate::migrate::MigrateCtx,
-        wake_handles: &super::controller::XhciPortHandleCollection,
+        port_handles: &super::controller::XhciPortHandleCollection,
         pci_state: &Arc<pci::DeviceState>,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
@@ -1085,7 +1085,7 @@ impl DeviceSlotTable {
                     let dst_dev = UsbDeviceType::create_from_payload(
                         src_dev,
                         ctx.hid_report,
-                        wake_handles.handle_for_port(port_id),
+                        port_handles.handle_for_port(port_id),
                         pci_state,
                         &self.log,
                     )?;

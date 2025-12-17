@@ -442,7 +442,8 @@ impl CommandInfo {
             } => {
                 let completion_code = match root_hub_port_number {
                     0..NUM_USB2_PORTS => {
-                        // TODO: transmit Force Header packet
+                        // TODO: transmit Force Header packet, if that ever
+                        // makes sense as a concept with any of our devices
                         TrbCompletionCode::UndefinedError
                     }
                     _ => TrbCompletionCode::TrbError,

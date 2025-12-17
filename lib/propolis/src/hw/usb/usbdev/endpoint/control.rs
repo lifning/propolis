@@ -49,7 +49,7 @@ where
     bytes_transferred: usize,
     slot_id: SlotId,
     endpoint_id: EndpointId,
-    port_wake_hdl: Arc<XhciPortHandle>,
+    port_hdl: Arc<XhciPortHandle>,
     log: slog::Logger,
     _spooky: PhantomData<C>,
 }
@@ -70,7 +70,7 @@ where
     pub fn new(
         slot_id: SlotId,
         endpoint_id: EndpointId,
-        port_wake_hdl: Arc<XhciPortHandle>,
+        port_hdl: Arc<XhciPortHandle>,
         log: &slog::Logger,
     ) -> Self {
         Self {
@@ -79,7 +79,7 @@ where
             bytes_transferred: 0,
             slot_id,
             endpoint_id,
-            port_wake_hdl,
+            port_hdl,
             log: log.new(slog::o!("endpoint_type" => "control", "endpoint_id" => u8::from(endpoint_id))),
             _spooky: PhantomData,
         }
@@ -87,13 +87,13 @@ where
 
     pub fn new_migrated(
         value: &migrate::ControlEndpointV1,
-        port_wake_hdl: Arc<XhciPortHandle>,
+        port_hdl: Arc<XhciPortHandle>,
         log: &slog::Logger,
     ) -> Self {
         let mut new = Self::new(
             SlotId::from(value.slot_id),
             EndpointId::from(value.endpoint_id),
-            port_wake_hdl,
+            port_hdl,
             log,
         );
         new.import(&value);
@@ -209,17 +209,13 @@ where
                     u8::from(self.endpoint_id),
                     trb.trb_pointer().0,
                 ));
-                if let Err(e) = self
-                    .port_wake_hdl
-                    .event_sender
-                    .send_completion_events_for_trb(
-                        trb,
-                        TrbCompletionCode::Success,
-                        count,
-                        self.slot_id,
-                        self.endpoint_id,
-                    )
-                {
+                if let Err(e) = self.port_hdl.send_completion_events_for_trb(
+                    trb,
+                    TrbCompletionCode::Success,
+                    count,
+                    self.slot_id,
+                    self.endpoint_id,
+                ) {
                     slog::error!(
                         self.log,
                         "Failed to send completion events for USB Control transfer: {e}"
@@ -292,7 +288,7 @@ where
             slot_id,
             endpoint_id,
             _spooky,
-            port_wake_hdl: _,
+            port_hdl: _,
             log: _,
         } = self;
         super::migrate::EndpointV1::Control(migrate::ControlEndpointV1 {

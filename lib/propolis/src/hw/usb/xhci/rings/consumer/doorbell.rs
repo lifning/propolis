@@ -99,6 +99,7 @@ pub fn process_transfer_ring(
             }
             Err(consumer::Error::IncompleteWorkItem(trbs)) => {
                 // TODO: special-case handling for storing them and completing it
+                // (would need adjustment to command trb impls as well)
                 slog::warn!(log, "Rewound dequeue pointer after trying to pull incomplete TD from Transfer Ring: {trbs:?}");
                 break;
             }

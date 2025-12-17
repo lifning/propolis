@@ -137,7 +137,7 @@ impl From<u8> for ItemSize {
 
 bitstruct! {
     /// HID 1.11 sect 6.2.2.5
-    // TODO: better names for these fields, or enums
+    // TODO: enums?
     #[derive(Clone, Copy, Debug, Default)]
     pub struct InputOutputFeatureItem(pub u32) {
         /// 0 if Data
@@ -430,7 +430,9 @@ impl Part {
         match self {
             Part::Item(prefix, item) => {
                 if let ItemTag::LongItem = prefix.tag() {
-                    todo!("Serializing Long Item tag in HID Report Descriptor")
+                    unimplemented!(
+                        "Serializing Long Item tag in HID Report Descriptor"
+                    )
                 } else {
                     Box::new(
                         [prefix.0].into_iter().chain(

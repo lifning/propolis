@@ -13,7 +13,6 @@ use rfb::proto::{MouseButtons, PointerEvent};
 use rgb_frame::Spec;
 
 use crate::{
-    common::GuestAddr,
     hw::{
         ids::usb::{PROPOLIS_USB_TABLET_DEV_ID, VENDOR_OXIDE},
         pci,
@@ -26,9 +25,7 @@ use crate::{
                 },
                 controller::XhciPortHandle,
                 device_slots::{EndpointId, SlotId},
-                rings::{
-                    consumer::transfer::TransferTrb, producer::event::EventInfo,
-                },
+                rings::consumer::transfer::TransferTrb,
             },
         },
     },
@@ -123,7 +120,7 @@ pub struct HIDTabletDevice {
     slot_id: Option<SlotId>,
     idle_duration_4ms: u8,
     report: Arc<Mutex<HIDTabletReport>>,
-    port_wake_hdl: Arc<XhciPortHandle>,
+    port_hdl: Arc<XhciPortHandle>,
     pci_state: Arc<pci::DeviceState>,
     log: slog::Logger,
 }
@@ -137,7 +134,7 @@ impl HIDTabletDevice {
 
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortHandle>,
+        port_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
         log: slog::Logger,
     ) -> Self {
@@ -147,7 +144,7 @@ impl HIDTabletDevice {
             slot_id: None,
             idle_duration_4ms: 0,
             report,
-            port_wake_hdl,
+            port_hdl,
             pci_state: pci_state.to_owned(),
             log,
         }
@@ -394,7 +391,7 @@ impl HIDTabletDevice {
 
 impl UsbDevice for HIDTabletDevice {
     fn new_transfer_descriptor(&self) {
-        self.port_wake_hdl.event_sender.reset_edtla();
+        self.port_hdl.reset_edtla();
     }
 
     fn stop_endpoint(
@@ -457,7 +454,7 @@ impl UsbDevice for HIDTabletDevice {
         self.control_endpoint = Some(ControlEndpoint::new(
             slot_id,
             EndpointId::from(1),
-            Arc::clone(&self.port_wake_hdl),
+            Arc::clone(&self.port_hdl),
             &self.log,
         ));
     }
@@ -474,14 +471,14 @@ impl UsbDevice for HIDTabletDevice {
                 self.control_endpoint = Some(ControlEndpoint::new(
                     slot_id,
                     endpoint_id,
-                    Arc::clone(&self.port_wake_hdl),
+                    Arc::clone(&self.port_hdl),
                     &self.log,
                 ));
             }
             3 => {
                 let interrupt_in_endpoint = InterruptInEndpoint::new(
                     ep_ctx.interval_as_duration(),
-                    Arc::downgrade(&self.port_wake_hdl),
+                    Arc::downgrade(&self.port_hdl),
                     &self.pci_state,
                     slot_id,
                     endpoint_id,
@@ -510,20 +507,11 @@ impl UsbDevice for HIDTabletDevice {
             }
             Err(e) => {
                 slog::warn!(self.log, "Guest tried to send Transfer TRBs to uninitialized {endpoint_id:?}: {e}");
-                if let Err(e) = self.port_wake_hdl.event_sender.enqueue_event(
-                    EventInfo::Transfer {
-                        trb_pointer: xfer_trbs
-                            .first()
-                            .map(|trb| trb.trb_pointer())
-                            .unwrap_or(GuestAddr(0)),
-                        completion_code:
-                            TrbCompletionCode::EndpointNotEnabledError,
-                        trb_transfer_length: 0,
-                        slot_id: self.slot_id.unwrap_or(SlotId::from(0)),
-                        endpoint_id,
-                        event_data: false,
-                    },
-                    false,
+                if let Err(e) = self.port_hdl.send_error_event(
+                    xfer_trbs.first().map(|trb| trb.trb_pointer()),
+                    TrbCompletionCode::EndpointNotEnabledError,
+                    self.slot_id.unwrap_or(SlotId::from(0)),
+                    endpoint_id,
                 ) {
                     slog::error!(self.log, "xHC was unable to enqueue an Endpoint Not Enabled Error TRB on the Event Ring: {e}");
                 }
@@ -597,7 +585,7 @@ impl UsbDevice for HIDTabletDevice {
             } else {
                 self.control_endpoint = Some(ControlEndpoint::new_migrated(
                     ctrl_ep_payload,
-                    Arc::clone(&self.port_wake_hdl),
+                    Arc::clone(&self.port_hdl),
                     &self.log,
                 ));
             }
@@ -619,7 +607,7 @@ impl UsbDevice for HIDTabletDevice {
             } else {
                 let interrupt_in_endpoint = InterruptInEndpoint::new_migrated(
                     intr_in_ep_payload,
-                    Arc::downgrade(&self.port_wake_hdl),
+                    Arc::downgrade(&self.port_hdl),
                     &self.pci_state,
                     &self.log,
                 );

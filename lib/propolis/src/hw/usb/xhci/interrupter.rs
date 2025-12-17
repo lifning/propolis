@@ -448,6 +448,26 @@ impl EventSender {
         }
     }
 
+    pub fn send_error_event(
+        &self,
+        trb_pointer: Option<GuestAddr>,
+        completion_code: TrbCompletionCode,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
+    ) -> Result<()> {
+        self.enqueue_event(
+            EventInfo::Transfer {
+                trb_pointer: trb_pointer.unwrap_or(GuestAddr(0)),
+                completion_code,
+                trb_transfer_length: 0,
+                slot_id,
+                endpoint_id,
+                event_data: false,
+            },
+            false,
+        )
+    }
+
     /// After a transfer, post the appropriate Event TRBs to the Event Ring
     pub fn send_completion_events_for_trb(
         &self,

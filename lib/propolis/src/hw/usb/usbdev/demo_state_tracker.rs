@@ -29,13 +29,13 @@ use super::{
 /// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
 pub struct NullUsbDevice {
     control_endpoint: Option<ControlEndpoint<NoClassRequestInfo>>,
-    port_wake_hdl: Arc<XhciPortHandle>,
+    port_hdl: Arc<XhciPortHandle>,
     log: slog::Logger,
 }
 
 impl UsbDevice for NullUsbDevice {
     fn new_transfer_descriptor(&self) {
-        self.port_wake_hdl.event_sender.reset_edtla();
+        self.port_hdl.reset_edtla();
     }
 
     // no transfers handled out-of-band
@@ -117,7 +117,7 @@ impl UsbDevice for NullUsbDevice {
         {
             self.control_endpoint = Some(ControlEndpoint::new_migrated(
                 ep,
-                Arc::clone(&self.port_wake_hdl),
+                Arc::clone(&self.port_hdl),
                 &self.log,
             ));
         } else {
@@ -152,7 +152,7 @@ impl UsbDevice for NullUsbDevice {
         self.control_endpoint = Some(ControlEndpoint::new(
             slot_id,
             EndpointId::from(1),
-            Arc::clone(&self.port_wake_hdl),
+            Arc::clone(&self.port_hdl),
             &self.log,
         ));
     }
@@ -166,7 +166,7 @@ impl UsbDevice for NullUsbDevice {
             self.control_endpoint = Some(ControlEndpoint::new(
                 slot_id,
                 endpoint_id,
-                Arc::clone(&self.port_wake_hdl),
+                Arc::clone(&self.port_hdl),
                 &self.log,
             ));
         }
@@ -188,8 +188,8 @@ impl NullUsbDevice {
     const CONFIG_NAME_INDEX: StringIndex = StringIndex(4);
     const INTERFACE_NAME_INDEX: StringIndex = StringIndex(5);
 
-    pub fn new(port_wake_hdl: Arc<XhciPortHandle>, log: slog::Logger) -> Self {
-        Self { control_endpoint: None, port_wake_hdl, log }
+    pub fn new(port_hdl: Arc<XhciPortHandle>, log: slog::Logger) -> Self {
+        Self { control_endpoint: None, port_hdl, log }
     }
 
     fn control_ep_mut(

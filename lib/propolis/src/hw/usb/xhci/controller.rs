@@ -21,6 +21,7 @@ use crate::hw::usb::xhci::bits::ring_data::TrbCompletionCode;
 use crate::hw::usb::xhci::device_slots::EndpointId;
 use crate::hw::usb::xhci::port::PortId;
 use crate::hw::usb::xhci::rings::consumer::doorbell;
+use crate::hw::usb::xhci::rings::consumer::transfer::TransferTrb;
 use crate::migrate::{MigrateMulti, Migrator};
 use crate::vmm::{time, VmmHdl};
 
@@ -196,8 +197,7 @@ impl XhciPortHandleCollection {
 
 pub struct XhciPortHandle {
     state_weak: Weak<Mutex<XhciState>>,
-    // HACK - unpub, currently leaky abstraction for trying out possible plumbing configurations
-    pub(crate) event_sender: Arc<EventSender>,
+    event_sender: Arc<EventSender>,
     port_id: PortId,
 }
 
@@ -222,6 +222,42 @@ impl XhciPortHandle {
             );
         }
     }
+
+    pub fn reset_edtla(&self) {
+        self.event_sender.reset_edtla();
+    }
+
+    pub fn send_completion_events_for_trb(
+        &self,
+        trb: &TransferTrb,
+        completion_code: TrbCompletionCode,
+        bytes_transferred: usize,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
+    ) -> Result<(), interrupter::Error> {
+        self.event_sender.send_completion_events_for_trb(
+            trb,
+            completion_code,
+            bytes_transferred,
+            slot_id,
+            endpoint_id,
+        )
+    }
+
+    pub fn send_error_event(
+        &self,
+        trb_pointer: Option<GuestAddr>,
+        completion_code: TrbCompletionCode,
+        slot_id: SlotId,
+        endpoint_id: EndpointId,
+    ) -> Result<(), interrupter::Error> {
+        self.event_sender.send_error_event(
+            trb_pointer,
+            completion_code,
+            slot_id,
+            endpoint_id,
+        )
+    }
 }
 
 /// An emulated USB Host Controller attached over PCI
@@ -232,7 +268,7 @@ pub struct PciXhci {
     /// Controller state
     state: Arc<Mutex<XhciState>>,
 
-    port_wake_handles: XhciPortHandleCollection,
+    port_handles: XhciPortHandleCollection,
 
     log: slog::Logger,
 }
@@ -272,14 +308,12 @@ impl PciXhci {
             log.clone(),
         );
 
-        // xhci_state.interrupters[0].update_event_sender(&event_sender);
-
         let state = Arc::new(Mutex::new(xhci_state));
 
-        let port_wake_handles =
+        let port_handles =
             XhciPortHandleCollection::new(event_sender, Arc::downgrade(&state));
 
-        Arc::new(Self { pci_state, state, port_wake_handles, log })
+        Arc::new(Self { pci_state, state, port_handles, log })
     }
 
     pub fn add_usb_device(
@@ -294,7 +328,7 @@ impl PciXhci {
         // TODO: factor this out, used in migrate import too
         let dev = device_type.create(
             hid_report,
-            self.port_wake_handles.handle_for_port(port_id),
+            self.port_handles.handle_for_port(port_id),
             &self.pci_state,
             &self.log,
         );
@@ -1161,7 +1195,7 @@ impl MigrateMulti for PciXhci {
         state.dev_slots.import(
             &dev_slots,
             ctx,
-            &self.port_wake_handles,
+            &self.port_handles,
             &self.pci_state,
         )?; // HACK
 
@@ -1174,7 +1208,7 @@ impl MigrateMulti for PciXhci {
                 let dev = UsbDeviceType::create_from_payload(
                     &dev_data,
                     ctx.hid_report,
-                    self.port_wake_handles.handle_for_port(port_id),
+                    self.port_handles.handle_for_port(port_id),
                     &self.pci_state,
                     &self.log,
                 )?;

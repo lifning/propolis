@@ -87,19 +87,19 @@ impl UsbDeviceType {
     pub fn create(
         &self,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortHandle>,
+        port_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
         log: &slog::Logger,
     ) -> Box<dyn UsbDevice> {
-        let log = log.new(slog::o!("component" => "usbdev", "port_id" => port_wake_hdl.port_id().as_raw_id()));
+        let log = log.new(slog::o!("component" => "usbdev", "port_id" => port_hdl.port_id().as_raw_id()));
         match self {
-            UsbDeviceType::Null => Box::new(
-                demo_state_tracker::NullUsbDevice::new(port_wake_hdl, log),
-            ),
+            UsbDeviceType::Null => {
+                Box::new(demo_state_tracker::NullUsbDevice::new(port_hdl, log))
+            }
             UsbDeviceType::HidTablet => {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
                     hid_report.clone(),
-                    port_wake_hdl,
+                    port_hdl,
                     pci_state,
                     log,
                 ))
@@ -110,7 +110,7 @@ impl UsbDeviceType {
     pub fn create_from_payload(
         payload: &migrate::UsbDeviceV1,
         hid_report: &Arc<Mutex<HIDTabletReport>>,
-        port_wake_hdl: Arc<XhciPortHandle>,
+        port_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
         log: &slog::Logger,
     ) -> core::result::Result<
@@ -119,11 +119,12 @@ impl UsbDeviceType {
     > {
         let mut dev = match &payload.device_type {
             migrate::UsbDeviceTypeV1::Null => {
-                Self::Null.create(hid_report, port_wake_hdl, pci_state, log)
+                Self::Null.create(hid_report, port_hdl, pci_state, log)
             }
             // specifics imported below this match
-            migrate::UsbDeviceTypeV1::Tablet(_specifics) => Self::HidTablet
-                .create(hid_report, port_wake_hdl, pci_state, log),
+            migrate::UsbDeviceTypeV1::Tablet(_specifics) => {
+                Self::HidTablet.create(hid_report, port_hdl, pci_state, log)
+            }
         };
         dev.import(&payload)?;
         Ok(dev)
