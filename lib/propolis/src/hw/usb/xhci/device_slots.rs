@@ -1081,7 +1081,7 @@ impl DeviceSlotTable {
                 } else {
                     let port_id =
                         PortId::try_from((port_index_raw + 1) as u8).unwrap();
-                    // FIXME
+                    // FIXME: dedupe
                     let dst_dev = UsbDeviceType::create_from_payload(
                         src_dev,
                         ctx.hid_report,

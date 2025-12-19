@@ -114,7 +114,7 @@ impl TransferDescriptor {
                 })
                 // unwrap: only error in TryFrom impl is type not being EventData
                 .map(|(edtrb, _)| EventDataTrb::try_from(edtrb).unwrap());
-            xfer_trbs.push(TransferTrb::try_from((trb, addr, edtrb))?);
+            xfer_trbs.push(TransferTrb::new(trb, addr, edtrb)?);
         }
         Ok(xfer_trbs)
     }
@@ -229,13 +229,11 @@ impl TransferTrb {
     pub fn event_data(&self) -> Option<&EventDataTrb> {
         self.event_data.as_ref()
     }
-}
 
-impl TryFrom<(&Trb, &GuestAddr, Option<EventDataTrb>)> for TransferTrb {
-    type Error = Error;
-
-    fn try_from(
-        (trb, ptr, event_data): (&Trb, &GuestAddr, Option<EventDataTrb>),
+    pub fn new(
+        trb: &Trb,
+        ptr: &GuestAddr,
+        event_data: Option<EventDataTrb>,
     ) -> Result<Self> {
         let trb_type = unsafe { trb.control.normal.trb_type() };
         if matches!(trb_type, TrbType::Normal | TrbType::DataStage) {
@@ -330,9 +328,9 @@ impl TryFrom<TransferDescriptor> for TransferInfo {
                         direction: unsafe {
                             first.control.data_stage.direction()
                         },
-                        transfer_trbs: vec![TransferTrb::try_from((
+                        transfer_trbs: vec![TransferTrb::new(
                             first, ptr, event_data,
-                        ))?],
+                        )?],
                     }
                 } else {
                     // xHCI 1.2 table 6-29 (and sect 3.2.9): "a Data Stage TD is

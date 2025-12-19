@@ -202,6 +202,15 @@ pub struct XhciPortHandle {
 }
 
 impl XhciPortHandle {
+    #[cfg(test)]
+    pub fn new_test(event_sender: Arc<EventSender>) -> Self {
+        Self {
+            state_weak: Weak::new(),
+            event_sender,
+            port_id: PortId::try_from(1).unwrap(),
+        }
+    }
+
     pub fn port_id(&self) -> PortId {
         self.port_id
     }

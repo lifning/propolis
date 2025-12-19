@@ -581,3 +581,80 @@ pub mod migrate {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::{sync::Arc, time::Duration};
+
+    use crate::{
+        common::GuestAddr,
+        hw::{
+            pci,
+            usb::xhci::{
+                bits::ring_data::{
+                    Trb, TrbControlField, TrbControlFieldNormal,
+                    TrbStatusField, TrbStatusFieldTransfer, TrbType,
+                },
+                controller::XhciPortHandle,
+                device_slots::{EndpointId, SlotId},
+                interrupter::EventSender,
+                rings::consumer::transfer::TransferTrb,
+            },
+        },
+        vmm::PhysMap,
+    };
+
+    fn test_logger() -> slog::Logger {
+        slog::Logger::root(slog::Discard, slog::o!())
+    }
+
+    fn test_pci_state() -> Arc<pci::DeviceState> {
+        let mut pci_state = pci::Builder::new(pci::Ident::default())
+            .add_cap_msix(pci::BarN::BAR0, 1)
+            .finish();
+        let mut phys_map = PhysMap::new_test(16 * 1024);
+        phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024).unwrap();
+        pci_state.acc_mem = phys_map.finalize();
+        Arc::new(pci_state)
+    }
+
+    #[test]
+    fn single_trb_transfer() {
+        let pci_state = test_pci_state();
+        let event_sender = Arc::new(EventSender::new(&pci_state));
+        let port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
+        let memctx = pci_state.acc_mem.access().unwrap();
+
+        let ep = super::InterruptInEndpoint::new(
+            Duration::from_millis(10),
+            Arc::downgrade(&port_hdl),
+            &pci_state,
+            SlotId::from(1),
+            EndpointId::from(3),
+            &test_logger(),
+        );
+        ep.normal_transfer(vec![TransferTrb::new(
+            &Trb {
+                parameter: 1 * 1024,
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer(0)
+                        .with_trb_transfer_length(7),
+                },
+                control: TrbControlField {
+                    normal: TrbControlFieldNormal(0)
+                        .with_trb_type(TrbType::Normal),
+                },
+            },
+            &GuestAddr(8 * 1024),
+            None,
+        )
+        .unwrap()]);
+
+        todo!("finish")
+    }
+
+    #[test]
+    fn stop_resume() {
+        // todo!()
+    }
+}
