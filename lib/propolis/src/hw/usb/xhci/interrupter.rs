@@ -292,8 +292,7 @@ impl XhciInterrupter {
     // but it needs to be able to get at the Mutex<InterruptRegulation>
     // even when it's been swapped out in a reset
     pub fn update_event_sender(&self, sender: &EventSender) {
-        *sender.interrupts.lock().unwrap() =
-            Some(Arc::downgrade(&self.interrupts));
+        *sender.interrupts.lock().unwrap() = Arc::downgrade(&self.interrupts);
     }
 
     pub fn set_pci_intr_mode(
@@ -401,14 +400,14 @@ pub struct EventSender {
     // this is a ridiculous type.
     // its value must be replaced with the new Arc<(Mutex<>, Condvar)>
     // upon host controller reset
-    interrupts: Mutex<Option<Weak<(Mutex<InterruptRegulation>, Condvar)>>>,
+    interrupts: Mutex<Weak<(Mutex<InterruptRegulation>, Condvar)>>,
     pci_state: Weak<pci::DeviceState>,
 }
 
 impl EventSender {
     pub fn new(pci_state: &Arc<pci::DeviceState>) -> Self {
         Self {
-            interrupts: Mutex::new(None),
+            interrupts: Mutex::new(Weak::new()),
             pci_state: Arc::downgrade(pci_state),
         }
     }
@@ -572,9 +571,16 @@ impl EventSender {
         self.interrupts
             .lock()
             .unwrap()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
+            .upgrade()
             .ok_or(Error::StaleInterrupterReference)
+    }
+
+    #[cfg(test)]
+    pub fn set_interrupts(
+        &self,
+        interrupts: &Arc<(Mutex<InterruptRegulation>, Condvar)>,
+    ) {
+        *self.interrupts.lock().unwrap() = Arc::downgrade(interrupts);
     }
 }
 
@@ -628,6 +634,35 @@ impl InterruptRegulation {
             evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
             evt_data_transfer_len_accum: 0,
             imod_allow_at: time::VmGuestInstant::now(vmm_hdl).unwrap(),
+            intr_pending_enable: false,
+            pci_intr: XhciPciIntr {
+                msix_hdl: pci_state.msix_hdl(),
+                pin: pci_state.lintr_pin(),
+                pci_intr_mode: pci_state.get_intr_mode(),
+                log: log.to_owned(),
+            },
+            terminate: false,
+            log: log.to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_test(
+        event_ring: EventRing,
+        pci_state: &Arc<pci::DeviceState>,
+        log: &slog::Logger,
+    ) -> Self {
+        Self {
+            usbcmd_inte: true,
+            any_ip_raised: Weak::new(),
+            number: 0,
+            management: bits::InterrupterManagement::default(),
+            moderation: bits::InterrupterModeration::default(),
+            evt_ring: Some(event_ring),
+            pending_erstba_erstsz_writes: None,
+            evt_ring_deq_ptr: bits::EventRingDequeuePointer(0),
+            evt_data_transfer_len_accum: 0,
+            imod_allow_at: time::VmGuestInstant::zero_test(),
             intr_pending_enable: false,
             pci_intr: XhciPciIntr {
                 msix_hdl: pci_state.msix_hdl(),

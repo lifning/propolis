@@ -102,6 +102,11 @@ impl VmGuestInstant {
         Ok(Self(normalized_ns))
     }
 
+    #[cfg(test)]
+    pub fn zero_test() -> Self {
+        Self(0)
+    }
+
     pub fn checked_add(&self, dur: Duration) -> Option<Self> {
         self.0.checked_add(dur.as_nanos().try_into().ok()?).map(Self)
     }

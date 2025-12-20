@@ -584,61 +584,127 @@ pub mod migrate {
 
 #[cfg(test)]
 mod test {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, Condvar, Mutex},
+        time::Duration,
+    };
 
     use crate::{
+        accessors::Guard,
         common::GuestAddr,
         hw::{
             pci,
             usb::xhci::{
                 bits::ring_data::{
-                    Trb, TrbControlField, TrbControlFieldNormal,
-                    TrbStatusField, TrbStatusFieldTransfer, TrbType,
+                    EventRingSegment, Trb, TrbControlField,
+                    TrbControlFieldNormal, TrbStatusField,
+                    TrbStatusFieldTransfer, TrbType,
                 },
                 controller::XhciPortHandle,
                 device_slots::{EndpointId, SlotId},
-                interrupter::EventSender,
-                rings::consumer::transfer::TransferTrb,
+                interrupter::{EventSender, InterruptRegulation},
+                rings::{
+                    consumer::transfer::TransferTrb, producer::event::EventRing,
+                },
             },
         },
-        vmm::PhysMap,
+        vmm::{MemAccessed, PhysMap},
     };
 
-    fn test_logger() -> slog::Logger {
-        slog::Logger::root(slog::Discard, slog::o!())
+    // memory layout
+    // 1 KiB: destination for USB interrupt-in data transfers
+    // 6 KiB: the event ring
+    // 7 KiB: the event ring segment table
+    // 8 KiB: the 'transfer ring'
+    struct TestHarness {
+        _log: slog::Logger,
+        pci_state: Arc<pci::DeviceState>,
+        _interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
+        _port_hdl: Arc<XhciPortHandle>,
+        int_in_ep: super::InterruptInEndpoint,
+        data_ref: Arc<(Mutex<super::InterruptInData>, Condvar)>,
     }
 
-    fn test_pci_state() -> Arc<pci::DeviceState> {
-        let mut pci_state = pci::Builder::new(pci::Ident::default())
-            .add_cap_msix(pci::BarN::BAR0, 1)
-            .finish();
-        let mut phys_map = PhysMap::new_test(16 * 1024);
-        phys_map.add_test_mem("guest-ram".to_string(), 0, 16 * 1024).unwrap();
-        pci_state.acc_mem = phys_map.finalize();
-        Arc::new(pci_state)
+    impl TestHarness {
+        const ERDP: GuestAddr = GuestAddr(6 * 1024);
+        const ERSTBA: GuestAddr = GuestAddr(7 * 1024);
+        fn new() -> Self {
+            let _log = slog::Logger::root(slog::Discard, slog::o!());
+
+            let pci_state = Self::test_pci_state();
+            let memctx = pci_state.acc_mem.access().unwrap();
+
+            memctx.write_many(
+                Self::ERSTBA,
+                &[EventRingSegment {
+                    base_address: Self::ERDP,
+                    segment_trb_count: 16,
+                }],
+            );
+            let event_ring =
+                EventRing::new(Self::ERSTBA, 1, Self::ERDP, &memctx).unwrap();
+
+            let event_sender = Arc::new(EventSender::new(&pci_state));
+            let _interrupts = Arc::new((
+                Mutex::new(InterruptRegulation::new_test(
+                    event_ring, &pci_state, &_log,
+                )),
+                Condvar::new(),
+            ));
+            event_sender.set_interrupts(&_interrupts);
+
+            let _port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
+
+            let int_in_ep = super::InterruptInEndpoint::new(
+                Duration::from_millis(10),
+                Arc::downgrade(&_port_hdl),
+                &pci_state,
+                SlotId::from(1),
+                EndpointId::from(3),
+                &_log,
+            );
+
+            let data_ref = int_in_ep.data_ref().upgrade().unwrap();
+
+            Self {
+                _log,
+                pci_state,
+                _interrupts,
+                _port_hdl,
+                int_in_ep,
+                data_ref,
+            }
+        }
+        fn memctx(&self) -> Guard<'_, MemAccessed> {
+            self.pci_state.acc_mem.access().unwrap()
+        }
+        fn test_pci_state() -> Arc<pci::DeviceState> {
+            let mut pci_state = pci::Builder::new(pci::Ident::default())
+                .add_cap_msix(pci::BarN::BAR0, 1)
+                .finish();
+            let mut phys_map = PhysMap::new_test(16 * 1024);
+            phys_map
+                .add_test_mem("guest-ram".to_string(), 0, 16 * 1024)
+                .unwrap();
+            pci_state.acc_mem = phys_map.finalize();
+            Arc::new(pci_state)
+        }
     }
 
     #[test]
     fn single_trb_transfer() {
-        let pci_state = test_pci_state();
-        let event_sender = Arc::new(EventSender::new(&pci_state));
-        let port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
-        let memctx = pci_state.acc_mem.access().unwrap();
+        let harness = TestHarness::new();
+        let tgt_addr = GuestAddr(1 * 1024);
+        const TGT_LEN: usize = 7;
 
-        let ep = super::InterruptInEndpoint::new(
-            Duration::from_millis(10),
-            Arc::downgrade(&port_hdl),
-            &pci_state,
-            SlotId::from(1),
-            EndpointId::from(3),
-            &test_logger(),
-        );
-        ep.normal_transfer(vec![TransferTrb::new(
+        harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
+
+        harness.int_in_ep.normal_transfer(vec![TransferTrb::new(
             &Trb {
-                parameter: 1 * 1024,
+                parameter: tgt_addr.0,
                 status: TrbStatusField {
                     transfer: TrbStatusFieldTransfer(0)
-                        .with_trb_transfer_length(7),
+                        .with_trb_transfer_length(TGT_LEN as u32),
                 },
                 control: TrbControlField {
                     normal: TrbControlFieldNormal(0)
@@ -650,7 +716,35 @@ mod test {
         )
         .unwrap()]);
 
-        todo!("finish")
+        // still haven't provided a payload to endpoint, should be unchanged
+        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        assert_eq!(*value, [0u8; TGT_LEN]);
+
+        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        harness.data_ref.1.notify_one();
+
+        let (guard, timeout_result) = harness
+            .data_ref
+            .1
+            .wait_timeout_while(
+                harness.data_ref.0.lock().unwrap(),
+                Duration::from_millis(100),
+                |guard| {
+                    guard.payload.is_some()
+                        || guard.transfers.iter().flatten().next().is_some()
+                },
+            )
+            .unwrap();
+        drop(guard);
+        assert!(!timeout_result.timed_out());
+
+        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        assert_eq!(*value, [1u8; TGT_LEN]);
+
+        // FIXME - not working yet, something in the port_hdl -> event_sender -> event_ring link is dropping the ball
+        let xfer_evt_trb =
+            harness.memctx().read::<Trb>(TestHarness::ERDP).unwrap();
+        assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 
     #[test]
