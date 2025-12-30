@@ -616,7 +616,7 @@ mod test {
     // 6 KiB: the event ring
     // 7 KiB: the event ring segment table
     // 8 KiB: the 'transfer ring'
-    struct TestHarness {
+    struct TestScaffold {
         _log: slog::Logger,
         pci_state: Arc<pci::DeviceState>,
         _interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
@@ -625,12 +625,11 @@ mod test {
         data_ref: Arc<(Mutex<super::InterruptInData>, Condvar)>,
     }
 
-    impl TestHarness {
+    impl TestScaffold {
         const ERDP: GuestAddr = GuestAddr(6 * 1024);
         const ERSTBA: GuestAddr = GuestAddr(7 * 1024);
         fn new() -> Self {
             let _log = slog::Logger::root(slog::Discard, slog::o!());
-
             let pci_state = Self::test_pci_state();
             let memctx = pci_state.acc_mem.access().unwrap();
 
@@ -693,7 +692,7 @@ mod test {
 
     #[test]
     fn single_trb_transfer() {
-        let harness = TestHarness::new();
+        let harness = TestScaffold::new();
         let tgt_addr = GuestAddr(1 * 1024);
         const TGT_LEN: usize = 7;
 
@@ -708,7 +707,8 @@ mod test {
                 },
                 control: TrbControlField {
                     normal: TrbControlFieldNormal(0)
-                        .with_trb_type(TrbType::Normal),
+                        .with_trb_type(TrbType::Normal)
+                        .with_interrupt_on_completion(true),
                 },
             },
             &GuestAddr(8 * 1024),
@@ -741,14 +741,13 @@ mod test {
         let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [1u8; TGT_LEN]);
 
-        // FIXME - not working yet, something in the port_hdl -> event_sender -> event_ring link is dropping the ball
         let xfer_evt_trb =
-            harness.memctx().read::<Trb>(TestHarness::ERDP).unwrap();
+            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 
     #[test]
     fn stop_resume() {
-        // todo!()
+        todo!()
     }
 }
