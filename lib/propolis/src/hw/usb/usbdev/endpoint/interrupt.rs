@@ -218,6 +218,7 @@ impl PeriodicTransferPollThread {
                                 continue;
                             };
 
+                            // TODO: take only the number of bytes requested by TD from payload
                             if let Some(data) = guard.payload.take() {
                                 if let Err(e) =
                                     self.complete_transfer(data, trb, &port_hdl)
@@ -421,6 +422,7 @@ impl InterruptInEndpoint {
         while guard.transfers.len() > 1 {
             guard.transfers.pop_back();
         }
+        self.data.1.notify_one();
         // return the current TRB, whose pointer and cycle state values will be
         // written back to the transfer ring's dequeue pointer, and whose
         // transfer size will be sent in the resulting 'Stopped' Transfer Event
@@ -594,17 +596,21 @@ mod test {
         common::GuestAddr,
         hw::{
             pci,
-            usb::xhci::{
-                bits::ring_data::{
-                    EventRingSegment, Trb, TrbControlField,
-                    TrbControlFieldNormal, TrbStatusField,
-                    TrbStatusFieldTransfer, TrbType,
-                },
-                controller::XhciPortHandle,
-                device_slots::{EndpointId, SlotId},
-                interrupter::{EventSender, InterruptRegulation},
-                rings::{
-                    consumer::transfer::TransferTrb, producer::event::EventRing,
+            usb::{
+                usbdev::endpoint::interrupt::InterruptInPhase,
+                xhci::{
+                    bits::ring_data::{
+                        EventRingSegment, Trb, TrbControlField,
+                        TrbControlFieldNormal, TrbStatusField,
+                        TrbStatusFieldTransfer, TrbType,
+                    },
+                    controller::XhciPortHandle,
+                    device_slots::{EndpointId, SlotId},
+                    interrupter::{EventSender, InterruptRegulation},
+                    rings::{
+                        consumer::transfer::TransferTrb,
+                        producer::event::EventRing,
+                    },
                 },
             },
         },
@@ -628,6 +634,7 @@ mod test {
     impl TestScaffold {
         const ERDP: GuestAddr = GuestAddr(6 * 1024);
         const ERSTBA: GuestAddr = GuestAddr(7 * 1024);
+        const TRDP: GuestAddr = GuestAddr(8 * 1024);
         fn new() -> Self {
             let _log = slog::Logger::root(slog::Discard, slog::o!());
             let pci_state = Self::test_pci_state();
@@ -688,6 +695,21 @@ mod test {
             pci_state.acc_mem = phys_map.finalize();
             Arc::new(pci_state)
         }
+
+        fn normal_trb(tgt_addr: GuestAddr, len: usize) -> Trb {
+            Trb {
+                parameter: tgt_addr.0,
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer(0)
+                        .with_trb_transfer_length(len as u32),
+                },
+                control: TrbControlField {
+                    normal: TrbControlFieldNormal(0)
+                        .with_trb_type(TrbType::Normal)
+                        .with_interrupt_on_completion(true),
+                },
+            }
+        }
     }
 
     #[test]
@@ -699,19 +721,8 @@ mod test {
         harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
 
         harness.int_in_ep.normal_transfer(vec![TransferTrb::new(
-            &Trb {
-                parameter: tgt_addr.0,
-                status: TrbStatusField {
-                    transfer: TrbStatusFieldTransfer(0)
-                        .with_trb_transfer_length(TGT_LEN as u32),
-                },
-                control: TrbControlField {
-                    normal: TrbControlFieldNormal(0)
-                        .with_trb_type(TrbType::Normal)
-                        .with_interrupt_on_completion(true),
-                },
-            },
-            &GuestAddr(8 * 1024),
+            &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
+            &TestScaffold::TRDP,
             None,
         )
         .unwrap()]);
@@ -723,6 +734,7 @@ mod test {
         harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
         harness.data_ref.1.notify_one();
 
+        // wait until the payload and pending transfer have been processed together
         let (guard, timeout_result) = harness
             .data_ref
             .1
@@ -738,16 +750,92 @@ mod test {
         drop(guard);
         assert!(!timeout_result.timed_out());
 
+        // payload was written
         let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [1u8; TGT_LEN]);
 
+        // and completion event was enqueued
         let xfer_evt_trb =
             harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 
     #[test]
-    fn stop_resume() {
-        todo!()
+    fn stop_resume_endpoint() {
+        let harness = TestScaffold::new();
+        let tgt_addr = GuestAddr(1 * 1024);
+        const TGT_LEN: usize = 7;
+
+        harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
+
+        harness.int_in_ep.normal_transfer(vec![
+            TransferTrb::new(
+                &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
+                &TestScaffold::TRDP,
+                None,
+            )
+            .unwrap(),
+            TransferTrb::new(
+                &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
+                &TestScaffold::TRDP.offset::<Trb>(1),
+                None,
+            )
+            .unwrap(),
+        ]);
+
+        let in_progress_trb = harness.int_in_ep.stop_endpoint();
+        assert_eq!(
+            in_progress_trb.as_ref().unwrap().trb_pointer(),
+            TestScaffold::TRDP
+        );
+
+        let (guard, timeout_result) = harness
+            .data_ref
+            .1
+            .wait_timeout_while(
+                harness.data_ref.0.lock().unwrap(),
+                Duration::from_millis(100),
+                |guard| guard.phase == InterruptInPhase::StoppedEndpoint,
+            )
+            .unwrap();
+        drop(guard);
+        //
+        // FIXME: failing here
+        //
+        assert!(!timeout_result.timed_out());
+
+        // provide a payload to stopped endpoint
+        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        harness.data_ref.1.notify_one();
+
+        // payload not yet written to guest memory
+        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        assert_eq!(*value, [0u8; TGT_LEN]);
+
+        harness.int_in_ep.resume_transfers();
+
+        let (guard, timeout_result) = harness
+            .data_ref
+            .1
+            .wait_timeout_while(
+                harness.data_ref.0.lock().unwrap(),
+                Duration::from_millis(100),
+                |guard| {
+                    guard.payload.is_some()
+                        || guard.phase == InterruptInPhase::Writing
+                },
+            )
+            .unwrap();
+        drop(guard);
+        assert!(!timeout_result.timed_out());
+
+        // payload was written
+        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        assert_eq!(*value, [1u8; TGT_LEN]);
+
+        // and completion event was enqueued
+        let xfer_evt_trb =
+            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
+        assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 }
