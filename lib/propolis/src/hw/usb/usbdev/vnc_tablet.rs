@@ -404,17 +404,6 @@ impl UsbDevice for HIDTabletDevice {
             Ok(None)
         }
     }
-    fn abort_transfers(&mut self, endpoint_id: EndpointId) {
-        if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
-            ep.abort_transfers()
-        }
-    }
-
-    fn resume_endpoint(&mut self, endpoint_id: EndpointId) {
-        if let Ok(ep) = self.interrupt_ep_mut(endpoint_id) {
-            ep.resume_transfers()
-        }
-    }
 
     fn setup_stage(
         &mut self,

@@ -732,36 +732,63 @@ impl DeviceSlotTable {
                     // when TSP=1, we wish to retry last transaction the next time
                     // the doorbell is rung, if no other commands have been issued
                     // to the endpoint
-                    if let Ok(dev) = self.usbdev_for_slot(slot_id) {
-                        if let Ok(Some(trb)) = dev.stop_endpoint(endpoint_id) {
-                            // unwrap: usbdev_for_slot was Ok
-                            let slot = self.slot_mut(slot_id).unwrap();
-                            // rewind transfer ring so we can recapture TRBs we
-                            // dropped from our cache
-                            if let Err(e) = Self::write_trdp_and_ccs(
-                                slot.endpoints.get_mut(&endpoint_id)?,
-                                &mut ep_ctx,
-                                trb.trb_pointer(),
-                                trb.cycle_state(),
-                            ) {
+                    match self.usbdev_for_slot(slot_id) {
+                        Ok(dev) => match dev.stop_endpoint(endpoint_id) {
+                            Ok(Some(trb)) => {
+                                let slot = self.slot_mut(slot_id).unwrap();
+                                if let Err(e) = Self::write_trdp_and_ccs(
+                                    slot.endpoints.get_mut(&endpoint_id)?,
+                                    &mut ep_ctx,
+                                    trb.trb_pointer(),
+                                    trb.cycle_state(),
+                                ) {
+                                    slog::error!(
+                                        self.log,
+                                        "Error in {slot_id:?} {endpoint_id:?}: {e}"
+                                    );
+                                    return Some(
+                                        TrbCompletionCode::ContextStateError,
+                                    );
+                                }
+                            }
+                            Ok(None) => (),
+                            Err(e) => {
                                 slog::error!(
                                     self.log,
-                                    "Error in {slot_id:?} {endpoint_id:?}: {e}"
+                                    "Error stopping {slot_id:?} {endpoint_id:?}: {e}"
+                                );
+                                return Some(
+                                    TrbCompletionCode::ContextStateError,
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            slog::error!(self.log, "{e}");
+                            return Some(TrbCompletionCode::ContextStateError);
+                        }
+                    }
+                } else {
+                    // TODO when/if becomes relevant:
+                    // reset data toggle for usb2 device / sequence number for usb3 device
+                    // reset any usb2 split transaction state on this endpoint
+
+                    // invalidate all cached Transfer TRBs
+                    match self.usbdev_for_slot(slot_id) {
+                        Ok(dev) => {
+                            if let Err(e) = dev.stop_endpoint(endpoint_id) {
+                                slog::error!(
+                                    self.log,
+                                    "Error stopping {slot_id:?} {endpoint_id:?}: {e}"
                                 );
                                 return Some(
                                     TrbCompletionCode::ContextStateError,
                                 );
                             }
                         }
-                    }
-                } else {
-                    // TODO:
-                    // reset data toggle for usb2 device / sequence number for usb3 device
-                    // reset any usb2 split transaction state on this endpoint
-
-                    // invalidate all cached Transfer TRBs
-                    if let Ok(dev) = self.usbdev_for_slot(slot_id) {
-                        dev.abort_transfers(endpoint_id);
+                        Err(e) => {
+                            slog::error!(self.log, "{e}");
+                            return Some(TrbCompletionCode::ContextStateError);
+                        }
                     }
                 }
                 ep_ctx.mutate(|ctx| {
@@ -916,7 +943,7 @@ impl DeviceSlotTable {
                 {
                     // invalidate any cached TDs
                     if let Ok(dev) = self.usbdev_for_slot(slot_id) {
-                        dev.abort_transfers(endpoint_id);
+                        dev.stop_endpoint(endpoint_id);
                     }
                     // unwrap: self.slot(slot_id).is_ok(), above
                     let slot = self.slot_mut(slot_id).unwrap();

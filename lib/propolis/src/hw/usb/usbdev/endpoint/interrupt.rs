@@ -228,11 +228,15 @@ impl PeriodicTransferPollThread {
                                         "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
                                     );
                                 }
+                                guard.phase = InterruptInPhase::WaitForTransferDescriptors;
                             } else {
                                 slog::error!(
                                     self.log,
                                     "USB Interrupt-IN endpoint in writing state with no payload"
                                 );
+                                // should never happen - only transitions into Writing are when payload is Some
+                                guard.phase = InterruptInPhase::TerminateLoop;
+                                continue;
                             }
                         } else {
                             // TD empty
@@ -250,8 +254,8 @@ impl PeriodicTransferPollThread {
                             x.phase == InterruptInPhase::StoppedEndpoint
                         })
                         .unwrap();
-                    // TODO
-                    // handle anything else about reset/stop the endpoint with a transction in flight?
+                    // TODO:
+                    // need we handle anything else here about reset/stopping the endpoint with a transction in flight?
                 }
                 InterruptInPhase::TerminateLoop => {
                     cvar.notify_one();
@@ -415,38 +419,25 @@ impl InterruptInEndpoint {
 
     pub fn stop_endpoint(&self) -> Option<TransferTrb> {
         let mut guard = self.data.0.lock().unwrap();
-        guard.phase = InterruptInPhase::StoppedEndpoint;
+        // FIXME is this necesssary (vs. just returning to WaitForTransferDescriptors, since a doorbell ring will necessarily have happened for that)
+        // guard.phase = InterruptInPhase::StoppedEndpoint;
+        guard.phase = InterruptInPhase::WaitForTransferDescriptors;
 
-        // clear out all cached TDs besides the one we're currently executing.
-        // leave current TD so we can resume it on a doorbell ring.
-        while guard.transfers.len() > 1 {
-            guard.transfers.pop_back();
-        }
-        self.data.1.notify_one();
         // return the current TRB, whose pointer and cycle state values will be
         // written back to the transfer ring's dequeue pointer, and whose
         // transfer size will be sent in the resulting 'Stopped' Transfer Event
-        guard
+        let current_trb = guard
             .transfers
             .iter()
             .next()
             .and_then(|trbs| trbs.iter().next())
-            .copied()
-    }
+            .copied();
 
-    pub fn abort_transfers(&self) {
-        let mut guard = self.data.0.lock().unwrap();
+        // clear out all cached TDs.
         guard.transfers.clear();
-        guard.phase = InterruptInPhase::WaitForTransferDescriptors;
         self.data.1.notify_one();
-    }
 
-    pub fn resume_transfers(&self) {
-        let mut guard = self.data.0.lock().unwrap();
-        // restart at first phase and filter through accordingly
-        // (if there was an in-progress TD it will be at the head of the queue)
-        guard.phase = InterruptInPhase::WaitForTransferDescriptors;
-        self.data.1.notify_one();
+        current_trb
     }
 
     pub fn import(
@@ -712,6 +703,8 @@ mod test {
         }
     }
 
+    // simple golden-path test of a normal transfer request being submitted
+    // and filled with data from the USB device.
     #[test]
     fn single_trb_transfer() {
         let harness = TestScaffold::new();
@@ -760,6 +753,9 @@ mod test {
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 
+    // underlying function of Stop Endpoint Command when used to temporarily
+    // stop transfer ring activity until a doorbell ring, as discussed in
+    // xHCI 1.2 sect 4.6.9
     #[test]
     fn stop_resume_endpoint() {
         let harness = TestScaffold::new();
@@ -768,6 +764,7 @@ mod test {
 
         harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
 
+        // two-TRB TD
         harness.int_in_ep.normal_transfer(vec![
             TransferTrb::new(
                 &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
@@ -782,37 +779,63 @@ mod test {
             )
             .unwrap(),
         ]);
+        // additional dummy TD to verify absent after clearing cached TRBs
+        harness.int_in_ep.normal_transfer(vec![
+            TransferTrb::new(
+                &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
+                &TestScaffold::TRDP.offset::<Trb>(2),
+                None,
+            )
+            .unwrap(),
+            TransferTrb::new(
+                &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
+                &TestScaffold::TRDP.offset::<Trb>(3),
+                None,
+            )
+            .unwrap(),
+        ]);
 
-        let in_progress_trb = harness.int_in_ep.stop_endpoint();
-        assert_eq!(
-            in_progress_trb.as_ref().unwrap().trb_pointer(),
-            TestScaffold::TRDP
-        );
+        // provide a payload for first TRB of TD
+        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        harness.data_ref.1.notify_one();
 
+        // wait for it to be processed
         let (guard, timeout_result) = harness
             .data_ref
             .1
             .wait_timeout_while(
                 harness.data_ref.0.lock().unwrap(),
                 Duration::from_millis(100),
-                |guard| guard.phase == InterruptInPhase::StoppedEndpoint,
+                |guard| {
+                    guard.payload.is_some()
+                        || guard.phase == InterruptInPhase::Writing
+                },
             )
             .unwrap();
         drop(guard);
-        //
-        // FIXME: failing here
-        //
         assert!(!timeout_result.timed_out());
+        let xfer_evt_trb =
+            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
+        assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
+
+        // stop endpoint with second TRB still in progress (awaiting payload)
+        let in_progress_trb = harness.int_in_ep.stop_endpoint().unwrap();
+        assert_eq!(
+            in_progress_trb.trb_pointer(),
+            TestScaffold::TRDP.offset::<Trb>(1)
+        );
 
         // provide a payload to stopped endpoint
-        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        harness.data_ref.0.lock().unwrap().set_payload(vec![2; TGT_LEN]);
         harness.data_ref.1.notify_one();
 
-        // payload not yet written to guest memory
+        // second payload not yet written to guest memory
         let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
-        assert_eq!(*value, [0u8; TGT_LEN]);
+        assert_eq!(*value, [1u8; TGT_LEN]);
 
-        harness.int_in_ep.resume_transfers();
+        // resume by re-applying TD, should advance us through Writing since
+        // the payload is already present
+        harness.int_in_ep.normal_transfer(vec![in_progress_trb]);
 
         let (guard, timeout_result) = harness
             .data_ref
@@ -831,11 +854,13 @@ mod test {
 
         // payload was written
         let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
-        assert_eq!(*value, [1u8; TGT_LEN]);
+        assert_eq!(*value, [2u8; TGT_LEN]);
 
-        // and completion event was enqueued
-        let xfer_evt_trb =
-            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
+        // and a second completion event was enqueued
+        let xfer_evt_trb = harness
+            .memctx()
+            .read::<Trb>(TestScaffold::ERDP.offset::<Trb>(1))
+            .unwrap();
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 }

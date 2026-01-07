@@ -45,15 +45,6 @@ pub fn process_transfer_ring(
     memctx: &MemCtx,
     log: &slog::Logger,
 ) {
-    match state.dev_slots.usbdev_for_slot(slot_id) {
-        // resume in-progress TD if previously paused by stop endpoint command
-        Ok(usbdev) => usbdev.resume_endpoint(endpoint_id),
-        Err(e) => {
-            slog::error!(log, "No USB device in slot: {e}");
-            return;
-        }
-    }
-
     while let Some(raw_td) =
         state.dev_slots.transfer_ring(slot_id, endpoint_id).map(|xfer_ring| {
             slog::trace!(log, "Transfer Ring at {:#x}", xfer_ring.start_addr.0);
@@ -63,7 +54,11 @@ pub fn process_transfer_ring(
         match raw_td.and_then(TransferInfo::try_from) {
             Ok(xfer) => {
                 // unwrap: checked at start of fn
-                let usbdev = state.dev_slots.usbdev_for_slot(slot_id).unwrap();
+                let Ok(usbdev) = state.dev_slots.usbdev_for_slot(slot_id)
+                else {
+                    slog::error!(log, "No USB device in {slot_id:?}");
+                    return;
+                };
                 let trb_ptr_opt = xfer.first_trb_pointer();
                 if let Err(e) = xfer.run(
                     slot_id,
@@ -104,7 +99,7 @@ pub fn process_transfer_ring(
                 break;
             }
             Err(e) => {
-                slog::error!(log, "dequeueing TD from endpoint failed: {e}");
+                slog::error!(log, "Dequeueing TD from endpoint failed: {e}");
                 break;
             }
         }

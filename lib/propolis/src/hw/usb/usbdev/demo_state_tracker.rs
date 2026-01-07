@@ -45,8 +45,6 @@ impl UsbDevice for NullUsbDevice {
     ) -> Result<Option<TransferTrb>> {
         Ok(None)
     }
-    fn abort_transfers(&mut self, _endpoint_id: EndpointId) {}
-    fn resume_endpoint(&mut self, _endpoint_id: EndpointId) {}
 
     fn setup_stage(
         &mut self,

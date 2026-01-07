@@ -137,15 +137,11 @@ pub trait UsbDevice: Send + Sync + 'static {
     /// Aborts any in-flight transactions for a Stop or Reset Endpoint Command.
     /// Returns interrupted Transfer TRB, indicating how many bytes remained
     /// and the location to which the TRDP and cycle state should be restored.
+    /// The endpoint will resume when a new transfer is provided by the xHC.
     fn stop_endpoint(
         &mut self,
         endpoint_id: EndpointId,
     ) -> Result<Option<TransferTrb>>;
-    /// Invalidate cached Transfer TRBs, including those of any in-progress TD
-    fn abort_transfers(&mut self, endpoint_id: EndpointId);
-    /// Resume a previously-stopped endpoint which was in the middle of a
-    /// transfer when `stop_endpoint` was called.
-    fn resume_endpoint(&mut self, endpoint_id: EndpointId);
     /// *Caller* must put an appropriate completion event into the Event Ring.
     fn setup_stage(
         &mut self,
