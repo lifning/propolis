@@ -60,14 +60,25 @@ pub struct InterruptInData {
     /// Each VecDeque<TransferTrb> within the outer VecDeque is a TD.
     transfers: VecDeque<VecDeque<TransferTrb>>,
     /// Data from the USB device to write into the transfers
-    payload: Option<Vec<u8>>,
+    payload: VecDeque<u8>,
     period: Duration,
     phase: InterruptInPhase,
 }
 
 impl InterruptInData {
-    pub fn set_payload(&mut self, payload: Vec<u8>) {
-        self.payload = Some(payload);
+    pub fn set_payload(&mut self, payload: impl Into<VecDeque<u8>>) {
+        self.payload = payload.into();
+    }
+    #[allow(unused)]
+    pub fn append_payload(&mut self, payload: impl Iterator<Item = u8>) {
+        self.payload.extend(payload);
+    }
+    fn first_trb(&self) -> Option<&TransferTrb> {
+        self.transfers.iter().flatten().next()
+    }
+    fn sufficient_payload_for_current_trb(&self) -> bool {
+        self.payload.len()
+            >= self.first_trb().map(|trb| trb.data_buffer().len()).unwrap_or(0)
     }
 }
 
@@ -139,9 +150,9 @@ impl PeriodicTransferPollThread {
                 InterruptInPhase::WaitForPayloadPeriod => {
                     let timeout = guard.period;
                     let (mut guard, timeout_result) = cvar
-                        .wait_timeout_while(guard, timeout, |x| {
-                            x.payload.is_none()
-                                && x.phase
+                        .wait_timeout_while(guard, timeout, |guard| {
+                            !guard.sufficient_payload_for_current_trb()
+                                && guard.phase
                                     == InterruptInPhase::WaitForPayloadPeriod
                         })
                         .unwrap();
@@ -151,9 +162,7 @@ impl PeriodicTransferPollThread {
                     } else if !timeout_result.timed_out() {
                         // we have a payload, proceed
                         guard.phase = InterruptInPhase::Writing;
-                    } else if let Some(xfer) =
-                        guard.transfers.iter().flatten().next()
-                    {
+                    } else if let Some(xfer) = guard.first_trb() {
                         let Some(port_hdl) = self.port_hdl.upgrade() else {
                             guard.phase = InterruptInPhase::TerminateLoop;
                             continue;
@@ -176,16 +185,16 @@ impl PeriodicTransferPollThread {
                 InterruptInPhase::WaitForPayloadOrTransfer => {
                     let num_tds = guard.transfers.len();
                     let mut guard = cvar
-                        .wait_while(guard, |x| {
-                            x.payload.is_none()
-                                && x.transfers.len() == num_tds
-                                && x.phase == InterruptInPhase::WaitForPayloadOrTransfer
+                        .wait_while(guard, |guard| {
+                            !guard.sufficient_payload_for_current_trb()
+                                && guard.transfers.len() == num_tds
+                                && guard.phase == InterruptInPhase::WaitForPayloadOrTransfer
                         })
                         .unwrap();
                     if guard.phase != InterruptInPhase::WaitForPayloadOrTransfer
                     {
                         // if phase was changed out-of-band, loop around to match again
-                    } else if guard.payload.is_some() {
+                    } else if guard.sufficient_payload_for_current_trb() {
                         guard.phase = InterruptInPhase::Writing;
                     } else if guard.transfers.len() != num_tds {
                         // abandon and move onto a new transfer if one has been given to us
@@ -218,26 +227,20 @@ impl PeriodicTransferPollThread {
                                 continue;
                             };
 
-                            // TODO: take only the number of bytes requested by TD from payload
-                            if let Some(data) = guard.payload.take() {
-                                if let Err(e) =
-                                    self.complete_transfer(data, trb, &port_hdl)
-                                {
-                                    slog::error!(
-                                        self.log,
-                                        "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
-                                    );
-                                }
-                                guard.phase = InterruptInPhase::WaitForTransferDescriptors;
-                            } else {
+                            let data = guard
+                                .payload
+                                .drain(..trb.data_buffer().len())
+                                .collect();
+                            if let Err(e) =
+                                self.complete_transfer(data, trb, &port_hdl)
+                            {
                                 slog::error!(
                                     self.log,
-                                    "USB Interrupt-IN endpoint in writing state with no payload"
+                                    "Failed to complete USB Interrupt-IN transfer after receiving packet: {e}"
                                 );
-                                // should never happen - only transitions into Writing are when payload is Some
-                                guard.phase = InterruptInPhase::TerminateLoop;
-                                continue;
                             }
+                            guard.phase =
+                                InterruptInPhase::WaitForTransferDescriptors;
                         } else {
                             // TD empty
                             guard.transfers.pop_front();
@@ -349,7 +352,7 @@ impl InterruptInEndpoint {
         let data = Arc::new((
             Mutex::new(InterruptInData {
                 transfers: VecDeque::new(),
-                payload: None,
+                payload: VecDeque::new(),
                 period,
                 phase: InterruptInPhase::WaitForTransferDescriptors,
             }),
@@ -389,7 +392,7 @@ impl InterruptInEndpoint {
                     .into_iter()
                     .map(|trbs| trbs.iter().map(From::from).collect())
                     .collect(),
-                payload: payload.to_owned(),
+                payload: payload.iter().copied().collect(),
                 period: MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks),
                 phase: phase.into(),
             }),
@@ -426,12 +429,7 @@ impl InterruptInEndpoint {
         // return the current TRB, whose pointer and cycle state values will be
         // written back to the transfer ring's dequeue pointer, and whose
         // transfer size will be sent in the resulting 'Stopped' Transfer Event
-        let current_trb = guard
-            .transfers
-            .iter()
-            .next()
-            .and_then(|trbs| trbs.iter().next())
-            .copied();
+        let current_trb = guard.first_trb().copied();
 
         // clear out all cached TDs.
         guard.transfers.clear();
@@ -476,7 +474,7 @@ impl InterruptInEndpoint {
             .iter()
             .map(|trbs| trbs.iter().map(From::from).collect())
             .collect();
-        *payload_mut = payload.to_owned();
+        *payload_mut = payload.iter().copied().collect();
         *period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
         *phase_mut = phase.into();
         Ok(())
@@ -505,7 +503,7 @@ impl InterruptInEndpoint {
                     .iter()
                     .map(|trbs| trbs.iter().map(From::from).collect())
                     .collect(),
-                payload: payload.to_owned(),
+                payload: payload.iter().copied().collect(),
                 period_ticks,
                 slot_id: u8::from(self.slot_id),
                 endpoint_id: u8::from(self.endpoint_id),
@@ -530,7 +528,7 @@ pub mod migrate {
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
         pub transfers: Vec<Vec<TransferTrbV1>>, // maybe?
-        pub payload: Option<Vec<u8>>,
+        pub payload: Vec<u8>,
         pub period_ticks: f64,
         pub slot_id: u8,
         pub endpoint_id: u8,
@@ -588,7 +586,9 @@ mod test {
         hw::{
             pci,
             usb::{
-                usbdev::endpoint::interrupt::InterruptInPhase,
+                usbdev::endpoint::{
+                    interrupt::InterruptInPhase, test::test_pci_state,
+                },
                 xhci::{
                     bits::ring_data::{
                         EventRingSegment, Trb, TrbControlField,
@@ -605,7 +605,7 @@ mod test {
                 },
             },
         },
-        vmm::{MemAccessed, PhysMap},
+        vmm::MemAccessed,
     };
 
     // memory layout
@@ -628,7 +628,7 @@ mod test {
         const TRDP: GuestAddr = GuestAddr(8 * 1024);
         fn new() -> Self {
             let _log = slog::Logger::root(slog::Discard, slog::o!());
-            let pci_state = Self::test_pci_state();
+            let pci_state = test_pci_state();
             let memctx = pci_state.acc_mem.access().unwrap();
 
             memctx.write_many(
@@ -675,17 +675,6 @@ mod test {
         fn memctx(&self) -> Guard<'_, MemAccessed> {
             self.pci_state.acc_mem.access().unwrap()
         }
-        fn test_pci_state() -> Arc<pci::DeviceState> {
-            let mut pci_state = pci::Builder::new(pci::Ident::default())
-                .add_cap_msix(pci::BarN::BAR0, 1)
-                .finish();
-            let mut phys_map = PhysMap::new_test(16 * 1024);
-            phys_map
-                .add_test_mem("guest-ram".to_string(), 0, 16 * 1024)
-                .unwrap();
-            pci_state.acc_mem = phys_map.finalize();
-            Arc::new(pci_state)
-        }
 
         fn normal_trb(tgt_addr: GuestAddr, len: usize) -> Trb {
             Trb {
@@ -707,13 +696,13 @@ mod test {
     // and filled with data from the USB device.
     #[test]
     fn single_trb_transfer() {
-        let harness = TestScaffold::new();
+        let test = TestScaffold::new();
         let tgt_addr = GuestAddr(1 * 1024);
         const TGT_LEN: usize = 7;
 
-        harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
+        test.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
 
-        harness.int_in_ep.normal_transfer(vec![TransferTrb::new(
+        test.int_in_ep.normal_transfer(vec![TransferTrb::new(
             &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
             &TestScaffold::TRDP,
             None,
@@ -721,22 +710,21 @@ mod test {
         .unwrap()]);
 
         // still haven't provided a payload to endpoint, should be unchanged
-        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        let value = test.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [0u8; TGT_LEN]);
 
-        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
-        harness.data_ref.1.notify_one();
+        test.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        test.data_ref.1.notify_one();
 
         // wait until the payload and pending transfer have been processed together
-        let (guard, timeout_result) = harness
+        let (guard, timeout_result) = test
             .data_ref
             .1
             .wait_timeout_while(
-                harness.data_ref.0.lock().unwrap(),
+                test.data_ref.0.lock().unwrap(),
                 Duration::from_millis(100),
                 |guard| {
-                    guard.payload.is_some()
-                        || guard.transfers.iter().flatten().next().is_some()
+                    !guard.payload.is_empty() || guard.first_trb().is_some()
                 },
             )
             .unwrap();
@@ -744,12 +732,12 @@ mod test {
         assert!(!timeout_result.timed_out());
 
         // payload was written
-        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        let value = test.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [1u8; TGT_LEN]);
 
         // and completion event was enqueued
         let xfer_evt_trb =
-            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
+            test.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
     }
 
@@ -758,14 +746,14 @@ mod test {
     // xHCI 1.2 sect 4.6.9
     #[test]
     fn stop_resume_endpoint() {
-        let harness = TestScaffold::new();
+        let test = TestScaffold::new();
         let tgt_addr = GuestAddr(1 * 1024);
         const TGT_LEN: usize = 7;
 
-        harness.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
+        test.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
 
         // two-TRB TD
-        harness.int_in_ep.normal_transfer(vec![
+        test.int_in_ep.normal_transfer(vec![
             TransferTrb::new(
                 &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
                 &TestScaffold::TRDP,
@@ -780,7 +768,7 @@ mod test {
             .unwrap(),
         ]);
         // additional dummy TD to verify absent after clearing cached TRBs
-        harness.int_in_ep.normal_transfer(vec![
+        test.int_in_ep.normal_transfer(vec![
             TransferTrb::new(
                 &TestScaffold::normal_trb(tgt_addr, TGT_LEN),
                 &TestScaffold::TRDP.offset::<Trb>(2),
@@ -796,18 +784,18 @@ mod test {
         ]);
 
         // provide a payload for first TRB of TD
-        harness.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
-        harness.data_ref.1.notify_one();
+        test.data_ref.0.lock().unwrap().set_payload(vec![1; TGT_LEN]);
+        test.data_ref.1.notify_one();
 
         // wait for it to be processed
-        let (guard, timeout_result) = harness
+        let (guard, timeout_result) = test
             .data_ref
             .1
             .wait_timeout_while(
-                harness.data_ref.0.lock().unwrap(),
+                test.data_ref.0.lock().unwrap(),
                 Duration::from_millis(100),
                 |guard| {
-                    guard.payload.is_some()
+                    !guard.payload.is_empty()
                         || guard.phase == InterruptInPhase::Writing
                 },
             )
@@ -815,36 +803,36 @@ mod test {
         drop(guard);
         assert!(!timeout_result.timed_out());
         let xfer_evt_trb =
-            harness.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
+            test.memctx().read::<Trb>(TestScaffold::ERDP).unwrap();
         assert_eq!(xfer_evt_trb.control.trb_type(), TrbType::TransferEvent);
 
         // stop endpoint with second TRB still in progress (awaiting payload)
-        let in_progress_trb = harness.int_in_ep.stop_endpoint().unwrap();
+        let in_progress_trb = test.int_in_ep.stop_endpoint().unwrap();
         assert_eq!(
             in_progress_trb.trb_pointer(),
             TestScaffold::TRDP.offset::<Trb>(1)
         );
 
         // provide a payload to stopped endpoint
-        harness.data_ref.0.lock().unwrap().set_payload(vec![2; TGT_LEN]);
-        harness.data_ref.1.notify_one();
+        test.data_ref.0.lock().unwrap().set_payload(vec![2; TGT_LEN]);
+        test.data_ref.1.notify_one();
 
         // second payload not yet written to guest memory
-        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        let value = test.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [1u8; TGT_LEN]);
 
         // resume by re-applying TD, should advance us through Writing since
         // the payload is already present
-        harness.int_in_ep.normal_transfer(vec![in_progress_trb]);
+        test.int_in_ep.normal_transfer(vec![in_progress_trb]);
 
-        let (guard, timeout_result) = harness
+        let (guard, timeout_result) = test
             .data_ref
             .1
             .wait_timeout_while(
-                harness.data_ref.0.lock().unwrap(),
+                test.data_ref.0.lock().unwrap(),
                 Duration::from_millis(100),
                 |guard| {
-                    guard.payload.is_some()
+                    !guard.payload.is_empty()
                         || guard.phase == InterruptInPhase::Writing
                 },
             )
@@ -853,11 +841,11 @@ mod test {
         assert!(!timeout_result.timed_out());
 
         // payload was written
-        let value = harness.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
+        let value = test.memctx().read::<[u8; TGT_LEN]>(tgt_addr).unwrap();
         assert_eq!(*value, [2u8; TGT_LEN]);
 
         // and a second completion event was enqueued
-        let xfer_evt_trb = harness
+        let xfer_evt_trb = test
             .memctx()
             .read::<Trb>(TestScaffold::ERDP.offset::<Trb>(1))
             .unwrap();
