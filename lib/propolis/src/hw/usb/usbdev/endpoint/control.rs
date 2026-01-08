@@ -388,3 +388,86 @@ pub mod migrate {
         pub endpoint_id: u8,
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    use crate::{
+        common::GuestAddr,
+        hw::{
+            pci,
+            usb::{
+                usbdev::endpoint::{
+                    control::{
+                        ControlEndpoint, ControlRequestInfo, NoClassRequestInfo,
+                    },
+                    test::test_pci_state,
+                },
+                xhci::{
+                    bits::ring_data::EventRingSegment,
+                    controller::XhciPortHandle,
+                    device_slots::{EndpointId, SlotId},
+                    interrupter::{EventSender, InterruptRegulation},
+                    rings::producer::event::EventRing,
+                },
+            },
+        },
+    };
+
+    struct TestScaffold {
+        _log: slog::Logger,
+        _pci_state: Arc<pci::DeviceState>,
+        _port_hdl: Arc<XhciPortHandle>,
+        _interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
+        ctrl_ep: ControlEndpoint<ControlRequestInfo<NoClassRequestInfo>>,
+    }
+
+    impl TestScaffold {
+        const ERDP: GuestAddr = GuestAddr(6 * 1024);
+        const ERSTBA: GuestAddr = GuestAddr(7 * 1024);
+        fn new() -> Self {
+            let _log = slog::Logger::root(slog::Discard, slog::o!());
+            let _pci_state = test_pci_state();
+            let memctx = _pci_state.acc_mem.access().unwrap();
+
+            memctx.write_many(
+                Self::ERSTBA,
+                &[EventRingSegment {
+                    base_address: Self::ERDP,
+                    segment_trb_count: 16,
+                }],
+            );
+            let event_ring =
+                EventRing::new(Self::ERSTBA, 1, Self::ERDP, &memctx).unwrap();
+
+            let event_sender = Arc::new(EventSender::new(&_pci_state));
+            let _interrupts = Arc::new((
+                Mutex::new(InterruptRegulation::new_test(
+                    event_ring,
+                    &_pci_state,
+                    &_log,
+                )),
+                Condvar::new(),
+            ));
+            event_sender.set_interrupts(&_interrupts);
+
+            let _port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
+
+            let ctrl_ep = ControlEndpoint::new(
+                SlotId::from(1),
+                EndpointId::from(1),
+                _port_hdl.to_owned(),
+                &_log,
+            );
+
+            Self { _log, _interrupts, _port_hdl, _pci_state, ctrl_ep }
+        }
+    }
+
+    #[test]
+    fn in_request() {
+        let test = TestScaffold::new();
+        todo!();
+    }
+}
