@@ -288,12 +288,12 @@ impl PciXhci {
         let pci_builder = pci::Builder::new(pci::Ident {
             vendor_id: VENDOR_OXIDE,
             device_id: PROPOLIS_XHCI_DEV_ID,
+            device_class: pci::bits::CLASS_SERIAL_BUS,
+            device_subclass: pci::bits::SUBCLASS_USB,
+            prog_if: pci::bits::PROGIF_USB3,
+            revision_id: 0,
             sub_vendor_id: VENDOR_OXIDE,
             sub_device_id: PROPOLIS_XHCI_DEV_ID,
-            class: pci::bits::CLASS_SERIAL_BUS,
-            subclass: pci::bits::SUBCLASS_USB,
-            prog_if: pci::bits::PROGIF_USB3,
-            ..Default::default()
         });
 
         let pci_state = Arc::new(

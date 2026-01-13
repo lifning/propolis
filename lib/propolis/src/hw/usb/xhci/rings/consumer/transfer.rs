@@ -191,7 +191,6 @@ impl EventDataTrb {
     pub fn block_event_interrupt(&self) -> bool {
         unsafe { self.trb.control.normal }.block_event_interrupt()
     }
-    // TODO: Evaluate Next TRB ?
 }
 
 // WIP: making sure we can serialize scatter-gather properly in the future,

@@ -43,7 +43,8 @@ pub struct ServerProcessParameters<'a> {
 
 pub struct PropolisServer {
     server: Option<std::process::Child>,
-    address: SocketAddrV4,
+    server_addr: SocketAddrV4,
+    vnc_addr: SocketAddrV4,
 }
 
 impl PropolisServer {
@@ -116,7 +117,8 @@ impl PropolisServer {
 
         let server = PropolisServer {
             server: Some(server_cmd.spawn()?),
-            address: server_addr,
+            server_addr,
+            vnc_addr,
         };
 
         info!(
@@ -127,7 +129,11 @@ impl PropolisServer {
     }
 
     pub(crate) fn server_addr(&self) -> SocketAddrV4 {
-        self.address
+        self.server_addr
+    }
+
+    pub(crate) fn vnc_addr(&self) -> SocketAddrV4 {
+        self.vnc_addr
     }
 
     /// Kills this server process if it hasn't been killed already.
@@ -139,7 +145,7 @@ impl PropolisServer {
         let pid = server.id();
         debug!(
             pid,
-            %self.address,
+            %self.server_addr,
             "Killing Propolis server process"
         );
 

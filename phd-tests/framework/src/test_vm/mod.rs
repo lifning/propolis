@@ -912,7 +912,7 @@ impl TestVm {
             let line = line.to_string();
             let (preceding_tx, preceding_rx) = oneshot::channel();
             match &self.state {
-                VmState::Ensured { serial } => {
+                VmState::Ensured { serial, .. } => {
                     serial
                         .register_wait_for_string(line.clone(), preceding_tx)?;
                     let t =
@@ -1056,6 +1056,31 @@ impl TestVm {
     fn serial_console(&self) -> Result<&SerialConsole> {
         match &self.state {
             VmState::Ensured { serial } => Ok(serial),
+            VmState::New => Err(VmStateError::InstanceNotEnsured.into()),
+        }
+    }
+
+    pub fn vnc_client(&self) -> Result<vnc::Client> {
+        match &self.state {
+            // not stored as a field in VmState because it's not Send
+            VmState::Ensured { .. } => {
+                let vnc_addr = SocketAddr::V4(
+                    self.server
+                        .as_ref()
+                        .expect("server should be alive")
+                        .vnc_addr(),
+                );
+                let vnc_tcp_stream = std::net::TcpStream::connect(vnc_addr)
+                    .with_context(|| {
+                        anyhow!(
+                            "failed to connect to VNC socket at {vnc_addr:?}"
+                        )
+                    })?;
+                vnc::Client::from_tcp_stream(vnc_tcp_stream, true, |_| None)
+                    .with_context(|| {
+                        anyhow!("failed to create VNC client from TCP stream")
+                    })
+            }
             VmState::New => Err(VmStateError::InstanceNotEnsured.into()),
         }
     }
