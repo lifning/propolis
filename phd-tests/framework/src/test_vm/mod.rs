@@ -49,6 +49,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 use uuid::Uuid;
+use vnc::client::AuthChoice;
 
 type PropolisClientError =
     propolis_client::Error<propolis_client::types::Error>;
@@ -1076,10 +1077,12 @@ impl TestVm {
                             "failed to connect to VNC socket at {vnc_addr:?}"
                         )
                     })?;
-                vnc::Client::from_tcp_stream(vnc_tcp_stream, true, |_| None)
-                    .with_context(|| {
-                        anyhow!("failed to create VNC client from TCP stream")
-                    })
+                vnc::Client::from_tcp_stream(vnc_tcp_stream, true, |_| {
+                    Some(AuthChoice::None)
+                })
+                .with_context(|| {
+                    anyhow!("failed to create VNC client from TCP stream")
+                })
             }
             VmState::New => Err(VmStateError::InstanceNotEnsured.into()),
         }

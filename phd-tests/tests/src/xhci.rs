@@ -2,7 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::sync::Arc;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use phd_testcase::*;
 use propolis_client::instance_spec::{
@@ -47,7 +53,8 @@ async fn usb_device_enumerates(ctx: &Framework) {
 
 #[phd_testcase]
 async fn usb_tablet_vnc_pointer_events(ctx: &Framework) {
-    let mut config = ctx.vm_config_builder("xhci_usb_device_enumerates_test");
+    let mut config =
+        ctx.vm_config_builder("xhci_usb_tablet_vnc_pointer_events_test");
     let xhc_name: SpecKey = "xhc0".into();
     const PCI_DEV: u8 = 3;
     const USB_PORT: u8 = 2;
@@ -66,28 +73,34 @@ async fn usb_tablet_vnc_pointer_events(ctx: &Framework) {
 
     let mut vm = ctx.spawn_vm_with_spec(spec, None).await?;
     if !vm.guest_os_kind().is_linux() {
-        phd_skip!("USB/VNC test uses evtest to enumerate devices and receive HID events");
+        phd_skip!("USB/VNC test uses /dev/hidraw0 to receive raw HID events");
     }
 
     vm.launch().await?;
     vm.wait_to_boot().await?;
 
-    let device_node = vm.run_shell_command("echo '' | evtest 2>&1 | grep 'Propolis HID Tablet' | head -1 | cut -d: -f1").await?;
-    assert!(device_node.starts_with("/dev/input/event"));
-
-    let vm = Arc::new(vm);
-    let task_vm = vm.to_owned();
-
-    let task = tokio::spawn(async move {
-        task_vm
-        .run_shell_command(
-            &format!("evtest {device_node} | grep --line-buffered '^Event:.*(BTN_LEFT)' | head -1")
-        ).await
-    });
+    let waiting = Arc::new(AtomicBool::new(true));
+    let waiting_outer = waiting.clone();
     let mut vnc_client = vm.vnc_client()?;
-    vnc_client.send_pointer_event(0x01u8, 234, 567)?;
-    vnc_client.disconnect()?;
+    std::thread::spawn(move || {
+        while waiting.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(1));
+            vnc_client.send_pointer_event(0x01u8, 234, 567).unwrap();
+            vnc_client.send_pointer_event(0x01u8, 234, 568).unwrap();
+        }
+        vnc_client.disconnect().unwrap();
+    });
 
-    let output = task.await??;
-    assert!(output.contains("BTN_LEFT"));
+    let output = vm
+        .run_shell_command(
+            // 7-byte HID reports (propolis::hw::usb::usbdev::vnc_tablet::REPORT_SIZE)
+            "od -tx1 -w7 -N14 /dev/hidraw0",
+        )
+        .await?;
+    waiting_outer.store(false, Ordering::Relaxed);
+
+    assert!(
+        output.contains(" 01"),
+        "primary mouse button press (01) not found in raw HID event dump:\n{output}"
+    );
 }
