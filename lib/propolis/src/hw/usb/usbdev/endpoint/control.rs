@@ -398,26 +398,49 @@ mod test {
         hw::{
             pci,
             usb::{
-                usbdev::endpoint::{
-                    control::{
-                        ControlEndpoint, ControlRequestInfo, NoClassRequestInfo,
+                usbdev::{
+                    descriptor::{Descriptor, StringDescriptor},
+                    endpoint::{
+                        control::{
+                            ControlEndpoint, ControlRequestInfo,
+                            NoClassRequestInfo,
+                        },
+                        test::test_pci_state,
                     },
-                    test::test_pci_state,
+                    requests::{
+                        RequestDirection, RequestType, SetupData,
+                        StandardRequest,
+                    },
                 },
                 xhci::{
-                    bits::ring_data::EventRingSegment,
+                    bits::ring_data::{
+                        EventRingSegment, Trb, TrbControlField,
+                        TrbControlFieldDataStage, TrbStatusField,
+                        TrbStatusFieldTransfer, TrbType,
+                    },
                     controller::XhciPortHandle,
                     device_slots::{EndpointId, SlotId},
                     interrupter::{EventSender, InterruptRegulation},
-                    rings::producer::event::EventRing,
+                    rings::{
+                        consumer::transfer::TransferTrb,
+                        producer::event::EventRing,
+                    },
                 },
             },
         },
     };
 
+    const DIR_OUT: RequestDirection = RequestDirection::HostToDevice;
+    const DIR_IN: RequestDirection = RequestDirection::DeviceToHost;
+
+    // memory layout
+    // 1 KiB: destination for USB data transfers
+    // 6 KiB: the event ring
+    // 7 KiB: the event ring segment table
+    // 8 KiB: the 'transfer ring'
     struct TestScaffold {
         _log: slog::Logger,
-        _pci_state: Arc<pci::DeviceState>,
+        pci_state: Arc<pci::DeviceState>,
         _port_hdl: Arc<XhciPortHandle>,
         _interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
         ctrl_ep: ControlEndpoint<ControlRequestInfo<NoClassRequestInfo>>,
@@ -426,10 +449,11 @@ mod test {
     impl TestScaffold {
         const ERDP: GuestAddr = GuestAddr(6 * 1024);
         const ERSTBA: GuestAddr = GuestAddr(7 * 1024);
+        const TRDP: GuestAddr = GuestAddr(8 * 1024);
         fn new() -> Self {
             let _log = slog::Logger::root(slog::Discard, slog::o!());
-            let _pci_state = test_pci_state();
-            let memctx = _pci_state.acc_mem.access().unwrap();
+            let pci_state = test_pci_state();
+            let memctx = pci_state.acc_mem.access().unwrap();
 
             memctx.write_many(
                 Self::ERSTBA,
@@ -441,12 +465,10 @@ mod test {
             let event_ring =
                 EventRing::new(Self::ERSTBA, 1, Self::ERDP, &memctx).unwrap();
 
-            let event_sender = Arc::new(EventSender::new(&_pci_state));
+            let event_sender = Arc::new(EventSender::new(&pci_state));
             let _interrupts = Arc::new((
                 Mutex::new(InterruptRegulation::new_test(
-                    event_ring,
-                    &_pci_state,
-                    &_log,
+                    event_ring, &pci_state, &_log,
                 )),
                 Condvar::new(),
             ));
@@ -461,13 +483,67 @@ mod test {
                 &_log,
             );
 
-            Self { _log, _interrupts, _port_hdl, _pci_state, ctrl_ep }
+            Self { _log, _interrupts, _port_hdl, pci_state, ctrl_ep }
+        }
+
+        fn data_stage_trb(tgt_addr: GuestAddr, len: usize) -> Trb {
+            Trb {
+                parameter: tgt_addr.0,
+                status: TrbStatusField {
+                    transfer: TrbStatusFieldTransfer(0)
+                        .with_trb_transfer_length(len as u32),
+                },
+                control: TrbControlField {
+                    data_stage: TrbControlFieldDataStage(0)
+                        .with_trb_type(TrbType::DataStage)
+                        .with_interrupt_on_completion(true),
+                },
+            }
         }
     }
 
     #[test]
     fn in_request() {
-        let test = TestScaffold::new();
-        todo!();
+        let mut test = TestScaffold::new();
+
+        let acc_mem = test.pci_state.acc_mem.child(None);
+        let memctx = acc_mem.access().unwrap();
+        let tgt_addr = GuestAddr(1 * 1024);
+
+        let string = "Hey, what can you say?".to_string();
+        let utf16 = string.encode_utf16().collect::<Vec<_>>();
+
+        let desc = StringDescriptor { string };
+
+        let xfer_trbs = [TransferTrb::new(
+            &TestScaffold::data_stage_trb(tgt_addr, 2 * utf16.len() as usize),
+            &TestScaffold::TRDP,
+            None,
+        )
+        .unwrap()];
+
+        test.ctrl_ep
+            .setup_stage(
+                SetupData(0)
+                    .with_request_type(RequestType::Standard)
+                    .with_request(StandardRequest::GetDescriptor as u8)
+                    .with_direction(DIR_IN)
+                    .with_length(2 * utf16.len() as u16)
+                    .with_value(u16::from_be_bytes([
+                        desc.descriptor_type() as u8,
+                        1,
+                    ])),
+            )
+            .unwrap();
+        test.ctrl_ep.set_payload(desc.serialize().collect()).unwrap();
+        test.ctrl_ep.data_stage(&xfer_trbs, DIR_IN, &memctx).unwrap();
+        assert!(test.ctrl_ep.status_stage(DIR_OUT).unwrap().is_none());
+
+        // FIXME: why isn't this matching
+        for (i, c) in utf16.into_iter().enumerate() {
+            let data = memctx.read(tgt_addr.offset::<u16>(i)).unwrap();
+            let tada = u16::from_be(*data);
+            assert_eq!(c, tada, "[{i}]: {c:#x} != {tada:#x}");
+        }
     }
 }

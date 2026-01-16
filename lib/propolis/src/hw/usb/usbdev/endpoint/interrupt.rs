@@ -609,7 +609,7 @@ mod test {
     };
 
     // memory layout
-    // 1 KiB: destination for USB interrupt-in data transfers
+    // 1 KiB: destination for USB data transfers
     // 6 KiB: the event ring
     // 7 KiB: the event ring segment table
     // 8 KiB: the 'transfer ring'

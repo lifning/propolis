@@ -83,6 +83,7 @@ async fn usb_tablet_vnc_pointer_events(ctx: &Framework) {
     let waiting_outer = waiting.clone();
     let mut vnc_client = vm.vnc_client()?;
     std::thread::spawn(move || {
+        // continually generate HID reports until /dev/hidraw0 is opened and read
         while waiting.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(1));
             vnc_client.send_pointer_event(0x01u8, 234, 567).unwrap();
@@ -100,7 +101,7 @@ async fn usb_tablet_vnc_pointer_events(ctx: &Framework) {
     waiting_outer.store(false, Ordering::Relaxed);
 
     assert!(
-        output.contains(" 01"),
+        output.contains("0000000 01"),
         "primary mouse button press (01) not found in raw HID event dump:\n{output}"
     );
 }

@@ -413,7 +413,6 @@ impl UsbDevice for HIDTabletDevice {
         if let Some(req) =
             self.control_ep_mut(endpoint_id)?.setup_stage(setup)?
         {
-            // eprintln!("in {endpoint_id:?}: {req:?}");
             let payload = self.payload_for(req)?;
             self.control_endpoint.as_mut().unwrap().set_payload(payload)?;
         }
@@ -489,7 +488,6 @@ impl UsbDevice for HIDTabletDevice {
         endpoint_id: EndpointId,
         xfer_trbs: Vec<TransferTrb>,
     ) -> Result<()> {
-        // eprintln!("normal {endpoint_id}: {normal_td:x?}");
         match self.interrupt_ep_mut(endpoint_id) {
             Ok(ep) => {
                 ep.normal_transfer(xfer_trbs);
@@ -519,7 +517,6 @@ impl UsbDevice for HIDTabletDevice {
             .status_stage(status_direction)?
         {
             Some(ControlEPStatusStageResult { request, payload: _ }) => {
-                // eprintln!("out {endpoint_id:?}: {req:?}");
                 match request {
                     ControlRequestInfo::SetConfiguration {
                         configuration: _,
