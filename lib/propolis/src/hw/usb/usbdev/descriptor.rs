@@ -530,9 +530,7 @@ impl Descriptor for StringDescriptor {
     // TODO: premature given that it costs an alloc and they're generally small?
     // but also they're requested infrequently enough to not matter either way.
     fn length(&self) -> u8 {
-        (self.header().len()
-            + (self.string.encode_utf16().count() * size_of::<u16>()))
-            as u8
+        (2 + (self.string.encode_utf16().count() * size_of::<u16>())) as u8
     }
 
     /// bDescriptorType. 3 for String Descriptor.
@@ -561,8 +559,7 @@ pub struct StringLanguageIdentifierDescriptor {
 impl Descriptor for StringLanguageIdentifierDescriptor {
     /// bLength.
     fn length(&self) -> u8 {
-        (self.header().len() + (self.language_ids.len() * size_of::<u16>()))
-            as u8
+        (2 + (self.language_ids.len() * size_of::<u16>())) as u8
     }
 
     /// bDescriptorType. 3, as it was with String Descriptor

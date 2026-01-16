@@ -511,12 +511,11 @@ mod test {
         let tgt_addr = GuestAddr(1 * 1024);
 
         let string = "Hey, what can you say?".to_string();
-        let utf16 = string.encode_utf16().collect::<Vec<_>>();
 
         let desc = StringDescriptor { string };
 
         let xfer_trbs = [TransferTrb::new(
-            &TestScaffold::data_stage_trb(tgt_addr, 2 * utf16.len() as usize),
+            &TestScaffold::data_stage_trb(tgt_addr, desc.length() as usize),
             &TestScaffold::TRDP,
             None,
         )
@@ -528,7 +527,7 @@ mod test {
                     .with_request_type(RequestType::Standard)
                     .with_request(StandardRequest::GetDescriptor as u8)
                     .with_direction(DIR_IN)
-                    .with_length(2 * utf16.len() as u16)
+                    .with_length(desc.length() as u16)
                     .with_value(u16::from_be_bytes([
                         desc.descriptor_type() as u8,
                         1,
@@ -539,10 +538,9 @@ mod test {
         test.ctrl_ep.data_stage(&xfer_trbs, DIR_IN, &memctx).unwrap();
         assert!(test.ctrl_ep.status_stage(DIR_OUT).unwrap().is_none());
 
-        // FIXME: why isn't this matching
-        for (i, c) in utf16.into_iter().enumerate() {
-            let data = memctx.read(tgt_addr.offset::<u16>(i)).unwrap();
-            let tada = u16::from_be(*data);
+        for (i, c) in desc.string.encode_utf16().enumerate() {
+            let data = memctx.read(tgt_addr.offset::<u16>(i + 1)).unwrap();
+            let tada = u16::from_le(*data);
             assert_eq!(c, tada, "[{i}]: {c:#x} != {tada:#x}");
         }
     }
