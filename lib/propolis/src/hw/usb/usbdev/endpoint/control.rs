@@ -514,12 +514,29 @@ mod test {
 
         let desc = StringDescriptor { string };
 
-        let xfer_trbs = [TransferTrb::new(
-            &TestScaffold::data_stage_trb(tgt_addr, desc.length() as usize),
-            &TestScaffold::TRDP,
-            None,
-        )
-        .unwrap()];
+        let xfer_trbs = [
+            TransferTrb::new(
+                &TestScaffold::data_stage_trb(tgt_addr, 4),
+                &TestScaffold::TRDP,
+                None,
+            )
+            .unwrap(),
+            TransferTrb::new(
+                &TestScaffold::data_stage_trb(tgt_addr.offset::<u8>(4), 4),
+                &TestScaffold::TRDP,
+                None,
+            )
+            .unwrap(),
+            TransferTrb::new(
+                &TestScaffold::data_stage_trb(
+                    tgt_addr.offset::<u8>(8),
+                    desc.length() as usize - 8,
+                ),
+                &TestScaffold::TRDP,
+                None,
+            )
+            .unwrap(),
+        ];
 
         test.ctrl_ep
             .setup_stage(
@@ -543,5 +560,46 @@ mod test {
             let tada = u16::from_le(*data);
             assert_eq!(c, tada, "[{i}]: {c:#x} != {tada:#x}");
         }
+    }
+
+    #[test]
+    fn out_request() {
+        let mut test = TestScaffold::new();
+
+        test.ctrl_ep
+            .setup_stage(
+                SetupData(0)
+                    .with_request_type(RequestType::Standard)
+                    .with_request(StandardRequest::SetConfiguration as u8)
+                    .with_direction(DIR_OUT)
+                    .with_value(42),
+            )
+            .unwrap();
+        let ControlRequestInfo::SetConfiguration { configuration: 42 } =
+            test.ctrl_ep.status_stage(DIR_IN).unwrap().unwrap().request
+        else {
+            panic!("mismatched wValue for SET_CONFIGURATION request")
+        };
+    }
+
+    #[test]
+    fn wrong_request_direction() {
+        let mut test = TestScaffold::new();
+        let acc_mem = test.pci_state.acc_mem.child(None);
+        let memctx = acc_mem.access().unwrap();
+
+        test.ctrl_ep
+            .setup_stage(
+                SetupData(0)
+                    .with_request_type(RequestType::Standard)
+                    .with_request(StandardRequest::SetConfiguration as u8)
+                    .with_direction(DIR_OUT)
+                    .with_value(42),
+            )
+            .unwrap();
+        // data stage direction must match
+        assert!(test.ctrl_ep.data_stage(&[], DIR_IN, &memctx).is_err());
+        // status stage direction must *not* match
+        assert!(test.ctrl_ep.status_stage(DIR_OUT).is_err());
     }
 }
