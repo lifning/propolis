@@ -1031,13 +1031,15 @@ impl DeviceSlotTable {
         })
     }
 
-    pub fn transfer_ring(
+    pub fn transfer_ring_for_doorbell(
         &mut self,
         slot_id: SlotId,
         endpoint_id: EndpointId,
+        memctx: &MemCtx,
     ) -> Option<&mut TransferRing> {
         let log = self.log.clone();
 
+        let slot_addr = self.dev_context_addr(slot_id, memctx)?;
         match self.slot_mut(slot_id) {
             Ok(slot) => {
                 let Some(endpoint) = slot.endpoints.get_mut(&endpoint_id)
@@ -1045,6 +1047,12 @@ impl DeviceSlotTable {
                     slog::error!(log, "rang Doorbell for {slot_id:?}'s {endpoint_id:?}, which was absent");
                     return None;
                 };
+                // xHCI 1.2 figure 4-5: set state to Running
+                let mut ep_ctx =
+                    Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
+                ep_ctx.mutate(|ctx| {
+                    ctx.set_endpoint_state(EndpointState::Running)
+                });
                 Some(endpoint)
             }
             Err(e) => {

@@ -45,8 +45,10 @@ pub fn process_transfer_ring(
     memctx: &MemCtx,
     log: &slog::Logger,
 ) {
-    while let Some(raw_td) =
-        state.dev_slots.transfer_ring(slot_id, endpoint_id).map(|xfer_ring| {
+    while let Some(raw_td) = state
+        .dev_slots
+        .transfer_ring_for_doorbell(slot_id, endpoint_id, memctx)
+        .map(|xfer_ring| {
             slog::trace!(log, "Transfer Ring at {:#x}", xfer_ring.start_addr.0);
             xfer_ring.dequeue_work_item(&memctx)
         })
