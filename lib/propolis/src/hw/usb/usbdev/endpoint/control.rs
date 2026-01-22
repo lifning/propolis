@@ -583,10 +583,15 @@ mod test {
     }
 
     #[test]
-    fn wrong_request_direction() {
+    fn wrong_request_sequence_and_direction() {
         let mut test = TestScaffold::new();
         let acc_mem = test.pci_state.acc_mem.child(None);
         let memctx = acc_mem.access().unwrap();
+
+        // setup stage must come first
+        assert!(test.ctrl_ep.set_payload(vec![]).is_err());
+        assert!(test.ctrl_ep.data_stage(&[], DIR_OUT, &memctx).is_err());
+        assert!(test.ctrl_ep.status_stage(DIR_IN).is_err());
 
         test.ctrl_ep
             .setup_stage(
@@ -597,8 +602,13 @@ mod test {
                     .with_value(42),
             )
             .unwrap();
+
+        // can't set payload for OUT request
+        assert!(test.ctrl_ep.set_payload(vec![]).is_err());
+
         // data stage direction must match
         assert!(test.ctrl_ep.data_stage(&[], DIR_IN, &memctx).is_err());
+
         // status stage direction must *not* match
         assert!(test.ctrl_ep.status_stage(DIR_OUT).is_err());
     }
