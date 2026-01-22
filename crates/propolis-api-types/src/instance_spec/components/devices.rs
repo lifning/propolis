@@ -192,8 +192,6 @@ pub struct P9fs {
 
 /// Describes a PCI device implementing the eXtensible Host Controller Interface
 /// for the purpose of attaching USB devices.
-///
-/// (Note that at present no functional USB devices have yet been implemented.)
 #[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct XhciController {
@@ -202,9 +200,6 @@ pub struct XhciController {
 }
 
 /// Describes a USB device, requires the presence of an XhciController.
-///
-/// (Note that at present no USB devices have yet been implemented
-/// outside of a null device for testing purposes.)
 #[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UsbDevice {
@@ -222,6 +217,7 @@ pub struct UsbDevice {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum UsbDeviceType {
     Null,
+    /// Human Interface Device tablet for VNC pointer input support.
     HidTablet,
 }
 
