@@ -1047,11 +1047,13 @@ impl DeviceSlotTable {
                     slog::error!(log, "rang Doorbell for {slot_id:?}'s {endpoint_id:?}, which was absent");
                     return None;
                 };
-                // xHCI 1.2 figure 4-5: set state to Running
+                // xHCI 1.2 figure 4-5: transition state to Running from Stopped
                 let mut ep_ctx =
                     Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
                 ep_ctx.mutate(|ctx| {
-                    ctx.set_endpoint_state(EndpointState::Running)
+                    if ctx.endpoint_state() == EndpointState::Stopped {
+                        ctx.set_endpoint_state(EndpointState::Running)
+                    }
                 });
                 Some(endpoint)
             }
