@@ -197,8 +197,9 @@ impl PeriodicTransferPollThread {
                     } else if guard.sufficient_payload_for_current_trb() {
                         guard.phase = InterruptInPhase::Writing;
                     } else if guard.transfers.len() != num_tds {
-                        // abandon and move onto a new transfer if one has been given to us
-                        // XXX (TODO: check spec again for citation, is this correct to do?) XXX
+                        // abandon and move onto a new transfer if one has been given to us.
+                        // (xHCI 1.2 sect 4.9.1: if xHC receives Short Packet from device,
+                        // retire current TD and advance to next TD from the Transfer Ring)
                         guard.transfers.pop_front();
                         if guard.transfers.is_empty() {
                             guard.phase =

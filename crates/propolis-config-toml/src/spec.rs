@@ -266,7 +266,9 @@ impl TryFrom<&super::Config> for SpecConfig {
 
                     spec.components.insert(
                         device_id,
-                        ComponentV0::Xhci(XhciController { pci_path }),
+                        ComponentV0::XhciController(XhciController {
+                            pci_path,
+                        }),
                     );
                 }
                 "usb-dummy" => {

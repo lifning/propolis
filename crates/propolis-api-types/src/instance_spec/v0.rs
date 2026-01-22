@@ -28,14 +28,14 @@ pub enum ComponentV0 {
     SoftNpuPort(components::devices::SoftNpuPort),
     SoftNpuP9(components::devices::SoftNpuP9),
     P9fs(components::devices::P9fs),
-    Xhci(components::devices::XhciController),
-    UsbDevice(components::devices::UsbDevice),
     MigrationFailureInjector(components::devices::MigrationFailureInjector),
     CrucibleStorageBackend(components::backends::CrucibleStorageBackend),
     FileStorageBackend(components::backends::FileStorageBackend),
     BlobStorageBackend(components::backends::BlobStorageBackend),
     VirtioNetworkBackend(components::backends::VirtioNetworkBackend),
     DlpiNetworkBackend(components::backends::DlpiNetworkBackend),
+    XhciController(components::devices::XhciController),
+    UsbDevice(components::devices::UsbDevice),
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug, JsonSchema)]

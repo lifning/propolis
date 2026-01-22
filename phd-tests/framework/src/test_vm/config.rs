@@ -401,8 +401,10 @@ impl<'dr> VmConfig<'dr> {
         }
 
         for (xhc_key, (xhc, usb_devs)) in xhc_usb_devs {
-            spec.components
-                .insert(xhc_key.to_owned(), ComponentV0::Xhci(xhc.to_owned()));
+            spec.components.insert(
+                xhc_key.to_owned(),
+                ComponentV0::XhciController(xhc.to_owned()),
+            );
             for usb_dev in usb_devs {
                 let _old = spec.components.insert(
                     format!("{xhc_key}-{}", usb_dev.root_hub_port_num).into(),

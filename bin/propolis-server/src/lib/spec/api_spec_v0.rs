@@ -131,7 +131,7 @@ impl From<Spec> for InstanceSpecV0 {
         }
 
         for (id, xhc) in xhcs {
-            insert_component(&mut spec, id, ComponentV0::Xhci(xhc));
+            insert_component(&mut spec, id, ComponentV0::XhciController(xhc));
         }
 
         for (id, usb) in usbdevs {
@@ -267,7 +267,7 @@ impl TryFrom<InstanceSpecV0> for Spec {
                 ComponentV0::DlpiNetworkBackend(dlpi) => {
                     dlpi_backends.insert(id, dlpi);
                 }
-                ComponentV0::Xhci(xhc) => {
+                ComponentV0::XhciController(xhc) => {
                     xhci_controllers.insert(id.to_owned());
                     builder.add_xhci_controller(id, xhc)?;
                 }
@@ -387,7 +387,7 @@ impl TryFrom<InstanceSpecV0> for Spec {
                 ComponentV0::P9fs(p9fs) => {
                     builder.set_p9fs(p9fs)?;
                 }
-                ComponentV0::Xhci(xhci) => {
+                ComponentV0::XhciController(xhci) => {
                     builder.add_xhci_controller(device_id, xhci)?;
                 }
                 ComponentV0::UsbDevice(usbdev) => {
