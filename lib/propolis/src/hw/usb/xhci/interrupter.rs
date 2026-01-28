@@ -291,7 +291,7 @@ impl XhciInterrupter {
     // XXX: only call once at PCI dev creation. only want one of these per xhc,
     // but it needs to be able to get at the Mutex<InterruptRegulation>
     // even when it's been swapped out in a reset
-    pub fn update_event_sender(&self, sender: &EventSender) {
+    pub(super) fn update_event_sender(&self, sender: &EventSender) {
         *sender.interrupts.lock().unwrap() = Arc::downgrade(&self.interrupts);
     }
 

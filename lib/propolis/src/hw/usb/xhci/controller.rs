@@ -803,7 +803,8 @@ impl PciXhci {
                             &self.log,
                         );
                     } else if crcr.command_abort() {
-                        // XXX: this doesn't actually abort ongoing processing
+                        // XXX: this doesn't actually abort ongoing command processing,
+                        // since that holds the XhciState mutex too
                         doorbell::command_ring_stop(
                             &mut state,
                             TrbCompletionCode::CommandAborted,

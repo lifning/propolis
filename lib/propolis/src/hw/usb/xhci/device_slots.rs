@@ -127,7 +127,7 @@ impl DeviceSlot {
         Self { endpoints: HashMap::new(), port_address: None }
     }
 
-    fn set_endpoint_tr(
+    fn set_endpoint_transfer_ring(
         &mut self,
         endpoint_id: EndpointId,
         ep_ctx: EndpointContext,
@@ -143,7 +143,7 @@ impl DeviceSlot {
         );
     }
 
-    fn unset_endpoint_tr(&mut self, endpoint_id: EndpointId) {
+    fn unset_endpoint_transfer_ring(&mut self, endpoint_id: EndpointId) {
         self.endpoints.remove(&endpoint_id);
     }
 
@@ -448,7 +448,7 @@ impl DeviceSlotTable {
         let device_slot = self.slot_mut(slot_id).unwrap();
 
         // add default control endpoint to scheduling list
-        device_slot.set_endpoint_tr(EndpointId::from(1), *ep0_ctx);
+        device_slot.set_endpoint_transfer_ring(EndpointId::from(1), *ep0_ctx);
 
         Some(TrbCompletionCode::Success)
     }
@@ -521,8 +521,12 @@ impl DeviceSlotTable {
                         out_ep_ctx.mutate(|ctx| {
                             ctx.set_endpoint_state(EndpointState::Disabled)
                         });
-                        // XXX: is this right?
-                        self.slot_mut(slot_id).unwrap().unset_endpoint_tr(i);
+                        // xHCI 1.2 sect 4.5.3.5: only doorbell enabled when
+                        // slot is in Addressed is control EP 0.
+                        // unwrap: returned early if self.slot(slot_id) was none
+                        self.slot_mut(slot_id)
+                            .unwrap()
+                            .unset_endpoint_transfer_ring(i);
                     }
                 }
                 // set Slot State in output slot context to Addressed
@@ -546,8 +550,10 @@ impl DeviceSlotTable {
                     out_ep_ctx.mutate(|ctx| {
                         ctx.set_endpoint_state(EndpointState::Disabled)
                     });
-                    // XXX: is this right?
-                    self.slot_mut(slot_id).unwrap().unset_endpoint_tr(i);
+                    // drop endpoint from 'pipe scheduling list', in effect
+                    self.slot_mut(slot_id)
+                        .unwrap()
+                        .unset_endpoint_transfer_ring(i);
                 }
             }
 
@@ -585,7 +591,7 @@ impl DeviceSlotTable {
                     // load the xHC enqueue and dequeue pointers with the
                     // value of TR Dequeue Pointer field from Endpoint Context
                     let device_slot = self.slot_mut(slot_id).unwrap();
-                    device_slot.set_endpoint_tr(i, *out_ep_ctx);
+                    device_slot.set_endpoint_transfer_ring(i, *out_ep_ctx);
                 }
 
                 if out_ep_ctx.endpoint_state() != EndpointState::Disabled {
@@ -943,7 +949,12 @@ impl DeviceSlotTable {
                 {
                     // invalidate any cached TDs
                     if let Ok(dev) = self.usbdev_for_slot(slot_id) {
-                        dev.stop_endpoint(endpoint_id);
+                        if let Err(e) = dev.stop_endpoint(endpoint_id) {
+                            slog::error!(
+                                self.log,
+                                "Failed to stop endpoint {slot_id:?} {endpoint_id:?}: {e}"
+                            );
+                        }
                     }
                     // unwrap: self.slot(slot_id).is_ok(), above
                     let slot = self.slot_mut(slot_id).unwrap();

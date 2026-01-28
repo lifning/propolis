@@ -205,6 +205,8 @@ pub enum EndpointState {
     Running = 1,
     Halted = 2,
     Stopped = 3,
+    // xHCI 1.2 sect 4.8.3: "When a Transfer Event reports a TRB Error,
+    // software should update its image of EP State to Error."
     Error = 4,
     Reserved5 = 5,
     Reserved6 = 6,
