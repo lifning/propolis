@@ -514,12 +514,8 @@ impl EventSender {
             _ => 0,
         } as u32;
 
-        // FIXME: interrupting for ShortPacket causes incorrect behavior - why?
-        let should_interrupt = completion_code
-            != TrbCompletionCode::ShortPacket
-            && (trb.interrupt_on_short_packet()
-                || trb.interrupt_on_completion());
-        // eprintln!("trb {trb:?} completion event interrupt: {should_interrupt}");
+        let should_interrupt =
+            trb.interrupt_on_short_packet() || trb.interrupt_on_completion();
         for evt in should_interrupt
             .then_some(TransferEventParams {
                 evt_info: EventInfo::Transfer {
@@ -535,7 +531,6 @@ impl EventSender {
             })
             .into_iter()
             .chain(trb.event_data().and_then(|edtrb| {
-                // XXX: subtly different on purpose, even with the above FIXME in mind
                 let should_interrupt = edtrb.interrupt_on_short_packet()
                     || (completion_code != TrbCompletionCode::ShortPacket
                         && edtrb.interrupt_on_completion());

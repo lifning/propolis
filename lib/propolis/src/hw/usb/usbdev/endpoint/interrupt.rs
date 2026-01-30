@@ -46,14 +46,6 @@ mod probes {
         bytes: usize,
     ) {
     }
-    fn usb_interrupt_xfer_shortpacket(
-        slot_id: u8,
-        endpoint_id: u8,
-        ptr: u64,
-        bytes_requested: usize,
-        bytes_received: usize,
-    ) {
-    }
 }
 
 pub struct InterruptInData {
@@ -162,22 +154,12 @@ impl PeriodicTransferPollThread {
                     } else if !timeout_result.timed_out() {
                         // we have a payload, proceed
                         guard.phase = InterruptInPhase::Writing;
-                    } else if let Some(xfer) = guard.first_trb() {
-                        let Some(port_hdl) = self.port_hdl.upgrade() else {
-                            guard.phase = InterruptInPhase::TerminateLoop;
-                            continue;
-                        };
-                        if let Err(e) =
-                            self.notify_short_packet(&xfer, &port_hdl)
-                        {
-                            slog::error!(
-                                self.log,
-                                "Failed to notify guest of short packet in USB Interrupt-IN transfer: {e}"
-                            );
-                        }
+                    } else if guard.first_trb().is_some() {
+                        // wait for either a payload from device or a new TD from guest
                         guard.phase =
                             InterruptInPhase::WaitForPayloadOrTransfer;
                     } else {
+                        // endpoint was stopped, go back to wait for next doorbell
                         guard.phase =
                             InterruptInPhase::WaitForTransferDescriptors;
                     }
@@ -272,31 +254,6 @@ impl PeriodicTransferPollThread {
             self.log,
             "USB Interrupt-IN Endpoint packet processing loop terminated"
         );
-    }
-
-    fn notify_short_packet(
-        &self,
-        xfer: &TransferTrb,
-        port_hdl: &Arc<XhciPortHandle>,
-    ) -> Result<(), Error> {
-        if let PointerOrImmediate::Pointer(region) = xfer.data_buffer() {
-            probes::usb_interrupt_xfer_shortpacket!(|| (
-                u8::from(self.slot_id),
-                u8::from(self.endpoint_id),
-                region.0 .0,
-                region.1,
-                0,
-            ));
-        };
-        port_hdl
-            .send_completion_events_for_trb(
-                xfer,
-                TrbCompletionCode::ShortPacket,
-                0,
-                self.slot_id,
-                self.endpoint_id,
-            )
-            .map_err(Into::into)
     }
 
     fn complete_transfer(
