@@ -98,22 +98,32 @@ impl TransferDescriptor {
         }
         return true;
     }
-    // TODO: verify EDTRB rules from xHCI 1.2 sect 4.11.7:
-    // """
-    // If Event Data TRBs are defined within a TD, then the IOC or ISP flags shall not be
-    // set in any Transfer TRB of a TD. i.e. the use of Event Data Transfer Events and
-    // normal Transfer Events to report a TD completion are mutually exclusive.
-    // """
     fn to_transfer_trbs(&self) -> Result<Vec<TransferTrb>> {
         let mut xfer_trbs = Vec::with_capacity(self.trbs.len());
         let mut iter = self.trbs.iter().peekable();
+        let mut using_ioc = false;
+        let mut using_edtrb = false;
         while let Some((trb, addr)) = iter.next() {
+            using_ioc |= unsafe {
+                trb.control.normal.interrupt_on_completion()
+                    || trb.control.normal.interrupt_on_short_packet()
+            };
             let edtrb = iter
                 .next_if(|(edtrb, _)| {
                     edtrb.control.trb_type() == TrbType::EventData
                 })
                 // unwrap: only error in TryFrom impl is type not being EventData
                 .map(|(edtrb, _)| EventDataTrb::try_from(edtrb).unwrap());
+            using_edtrb |= edtrb.is_some();
+            if using_ioc && using_edtrb {
+                // per EDTRB rules from xHCI 1.2 sect 4.11.7:
+                // """
+                // If Event Data TRBs are defined within a TD, then the IOC or ISP flags shall not be
+                // set in any Transfer TRB of a TD. i.e. the use of Event Data Transfer Events and
+                // normal Transfer Events to report a TD completion are mutually exclusive.
+                // """
+                return Err(Error::TDWithBothInterruptSchemes);
+            }
             xfer_trbs.push(TransferTrb::new(trb, addr, edtrb)?);
         }
         Ok(xfer_trbs)

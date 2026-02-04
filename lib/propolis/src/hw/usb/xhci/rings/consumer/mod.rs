@@ -64,6 +64,8 @@ pub enum Error {
     SetAddressViaTRB(GuestAddr),
     #[error("Error from USB device while executing TRB: {0}")]
     USBErrorRunningTRB(#[from] usbdev::Error),
+    #[error("Malformed Transfer Descriptor using both IOC/ISP and EDTRB")]
+    TDWithBothInterruptSchemes,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
