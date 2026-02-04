@@ -328,7 +328,7 @@ impl HIDTabletDevice {
         )
     }
 
-    // TODO: not alloc unnecessarily
+    // TODO: not alloc unnecessarily?
     fn payload_for(
         &self,
         req: ControlRequestInfo<HIDRequestInfo>,

@@ -1005,7 +1005,7 @@ impl DeviceSlotTable {
 
     // xHCI 1.2 sect 4.6.11
     pub fn reset_device(
-        &self,
+        &mut self,
         slot_id: SlotId,
         memctx: &MemCtx,
     ) -> Option<TrbCompletionCode> {
@@ -1014,7 +1014,21 @@ impl DeviceSlotTable {
             MemCtxValue::<SlotContext>::new(slot_addr, memctx)?;
         Some(match output_slot_ctx.slot_state() {
             SlotState::Addressed | SlotState::Configured => {
-                // TODO: abort any usb transactions to the device
+                let last_endpoint = output_slot_ctx.context_entries();
+
+                // abort any usb transactions to the device
+                let log = self.log.clone();
+                if let Ok(dev) = self.usbdev_for_slot(slot_id) {
+                    for endpoint_id in (1..last_endpoint).map(EndpointId::from)
+                    {
+                        if let Err(e) = dev.stop_endpoint(endpoint_id) {
+                            slog::error!(
+                                log,
+                                "Failed to abort {endpoint_id:?} while resetting device in {slot_id:?}: {e}"
+                            );
+                        }
+                    }
+                }
 
                 // set slot state to default
                 // set context entries to 1
@@ -1026,14 +1040,15 @@ impl DeviceSlotTable {
                 });
 
                 // for each endpoint context (except the default control endpoint)
-                let last_endpoint = output_slot_ctx.context_entries();
                 for endpoint_id in (1..=last_endpoint).map(EndpointId::from) {
-                    let mut ep_ctx =
-                        Self::endpoint_context(slot_addr, endpoint_id, memctx)?;
-                    // set ep state to disabled
-                    ep_ctx.mutate(|ctx| {
-                        ctx.set_endpoint_state(EndpointState::Disabled)
-                    });
+                    if let Some(mut ep_ctx) =
+                        Self::endpoint_context(slot_addr, endpoint_id, memctx)
+                    {
+                        // set ep state to disabled
+                        ep_ctx.mutate(|ctx| {
+                            ctx.set_endpoint_state(EndpointState::Disabled)
+                        });
+                    }
                 }
 
                 TrbCompletionCode::Success
@@ -1129,7 +1144,6 @@ impl DeviceSlotTable {
                 } else {
                     let port_id =
                         PortId::try_from((port_index_raw + 1) as u8).unwrap();
-                    // FIXME: dedupe
                     let dst_dev = UsbDeviceType::create_from_payload(
                         src_dev,
                         ctx.hid_report,

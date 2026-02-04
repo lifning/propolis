@@ -796,18 +796,14 @@ impl XhciInterrupter {
             number: *number,
             evt_ring_seg_tbl_size: evt_ring_seg_tbl_size.0,
             evt_ring_seg_base_addr: evt_ring_seg_base_addr.0,
-
-            interrupts: migrate::InterruptRegulationV1 {
-                usbcmd_inte: guard.usbcmd_inte,
-                number: guard.number,
-                management: guard.management.0,
-                moderation: guard.moderation.0,
-                evt_ring: guard.evt_ring.as_ref().map(From::from),
-                evt_ring_deq_ptr: guard.evt_ring_deq_ptr.0,
-                intr_pending_enable: guard.intr_pending_enable,
-                imod_allow_at: guard.imod_allow_at,
-                terminate: guard.terminate,
-            },
+            usbcmd_inte: guard.usbcmd_inte,
+            management: guard.management.0,
+            moderation: guard.moderation.0,
+            evt_ring: guard.evt_ring.as_ref().map(From::from),
+            evt_ring_deq_ptr: guard.evt_ring_deq_ptr.0,
+            intr_pending_enable: guard.intr_pending_enable,
+            imod_allow_at: guard.imod_allow_at,
+            terminate: guard.terminate,
         };
         cvar.notify_one();
         Ok(payload)
@@ -821,18 +817,14 @@ impl XhciInterrupter {
             number,
             evt_ring_seg_tbl_size,
             evt_ring_seg_base_addr,
-            interrupts:
-                migrate::InterruptRegulationV1 {
-                    usbcmd_inte,
-                    number: _,
-                    management,
-                    moderation,
-                    evt_ring,
-                    evt_ring_deq_ptr,
-                    intr_pending_enable,
-                    imod_allow_at,
-                    terminate,
-                },
+            usbcmd_inte,
+            management,
+            moderation,
+            evt_ring,
+            evt_ring_deq_ptr,
+            intr_pending_enable,
+            imod_allow_at,
+            terminate,
         } = value;
 
         let mut guard = self.interrupts.0.lock().unwrap();
@@ -863,20 +855,12 @@ pub mod migrate {
     use crate::{hw::usb::xhci::rings::producer::event::migrate::*, vmm::time};
     use serde::{Deserialize, Serialize};
 
-    // TODO: merge (struct fields) before merge (git)
-
     #[derive(Deserialize, Serialize)]
     pub struct XhciInterrupterV1 {
         pub number: u16,
         pub evt_ring_seg_tbl_size: u32,
         pub evt_ring_seg_base_addr: u64,
-        pub interrupts: InterruptRegulationV1,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    pub struct InterruptRegulationV1 {
         pub usbcmd_inte: bool,
-        pub number: u16,
         pub management: u32,
         pub moderation: u32,
         pub evt_ring: Option<EventRingV1>,

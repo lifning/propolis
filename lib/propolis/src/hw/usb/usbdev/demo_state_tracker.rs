@@ -85,12 +85,7 @@ impl UsbDevice for NullUsbDevice {
         {
             Some(ControlEPStatusStageResult { request, payload: _ }) => {
                 match request {
-                    ControlRequestInfo::SetConfiguration {
-                        configuration: _,
-                    } => {
-                        // TODO: check config value
-                        Ok(())
-                    }
+                    ControlRequestInfo::SetConfiguration { .. } => Ok(()),
                     x => Err(Error::UnimplementedRequestBehavior(format!(
                         "{x:?}"
                     ))),

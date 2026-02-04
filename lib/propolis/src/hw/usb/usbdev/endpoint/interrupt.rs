@@ -380,8 +380,7 @@ impl InterruptInEndpoint {
 
     pub fn stop_endpoint(&self) -> Option<TransferTrb> {
         let mut guard = self.data.0.lock().unwrap();
-        // FIXME is this necesssary (vs. just returning to WaitForTransferDescriptors, since a doorbell ring will necessarily have happened for that)
-        // guard.phase = InterruptInPhase::StoppedEndpoint;
+        // a doorbell ring will resume the endpoint as usual in this state
         guard.phase = InterruptInPhase::WaitForTransferDescriptors;
 
         // return the current TRB, whose pointer and cycle state values will be

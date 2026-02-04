@@ -72,7 +72,6 @@ pub fn process_transfer_ring(
                 ) {
                     slog::error!(log, "Error executing Transfer Ring TRB: {e}");
                     if let Some(trb_pointer) = trb_ptr_opt {
-                        // TODO: do we send an error for Event Data TRBs that were part of the TD too?
                         let evt_info = EventInfo::Transfer {
                             trb_pointer,
                             completion_code:

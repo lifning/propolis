@@ -214,8 +214,9 @@ impl XhciPortHandle {
     pub fn port_id(&self) -> PortId {
         self.port_id
     }
+
     /// Wake a port if it is in suspend, generating an Event TRB.
-    pub fn wake_up(&self) {
+    pub fn wake_up(&self) -> Result<(), port::Error> {
         if let Some(state) = self.state_weak.upgrade() {
             let mut state = state.lock().unwrap();
             state.port_regs[self.port_id.as_index()].xhc_update_portsc(
@@ -228,7 +229,9 @@ impl XhciPortHandle {
                     }
                 },
                 self.port_id,
-            );
+            )
+        } else {
+            Ok(())
         }
     }
 
@@ -334,7 +337,6 @@ impl PciXhci {
         let mut state = self.state.lock().unwrap();
         let port_id = PortId::try_from(raw_port)?;
 
-        // TODO: factor this out, used in migrate import too
         let dev = device_type.create(
             hid_report,
             self.port_handles.handle_for_port(port_id),
@@ -569,18 +571,22 @@ impl PciXhci {
                         &mut state.queued_device_connections,
                     );
                     for (port_id, usb_dev) in queued_conns {
-                        state.port_regs[port_id.as_index()].xhc_update_portsc(
-                            &|portsc| {
-                                *portsc = portsc
-                                    .with_current_connect_status(true)
-                                    .with_port_enabled_disabled(false)
-                                    .with_port_reset(false)
-                                    .with_port_link_state(
-                                        bits::PortLinkState::Polling,
-                                    );
-                            },
-                            port_id,
-                        );
+                        if let Err(e) = state.port_regs[port_id.as_index()]
+                            .xhc_update_portsc(
+                                &|portsc| {
+                                    *portsc = portsc
+                                        .with_current_connect_status(true)
+                                        .with_port_enabled_disabled(false)
+                                        .with_port_reset(false)
+                                        .with_port_link_state(
+                                            bits::PortLinkState::Polling,
+                                        );
+                                },
+                                port_id,
+                            )
+                        {
+                            slog::error!(&self.log, "xHC {port_id:?}: {e}");
+                        };
                         state.usbsts.set_port_change_detect(true);
                         if let Err(_) = state
                             .dev_slots
@@ -861,7 +867,7 @@ impl PciXhci {
                         // USB2 ports are specified as being unable
                         // to fail the bus reset sequence.
 
-                        port.xhc_update_portsc(
+                        if let Err(e) = port.xhc_update_portsc(
                             &|portsc| {
                                 *portsc = portsc
                                     .with_port_link_state(
@@ -873,7 +879,12 @@ impl PciXhci {
                                     .with_port_speed(0);
                             },
                             port_id,
-                        );
+                        ) {
+                            slog::error!(
+                                self.log,
+                                "xHC {port_id:?} write to {regs:?}: {e}"
+                            );
+                        };
                     }
                     _ => {}
                 }
@@ -1207,9 +1218,9 @@ impl MigrateMulti for PciXhci {
             ctx,
             &self.port_handles,
             &self.pci_state,
-        )?; // HACK
+        )?;
 
-        // FIXME: overwrites and re-creates all pending devices unconditionally
+        // overwrites and re-creates all pending devices unconditionally
         state.queued_device_connections = queued_device_connections
             .into_iter()
             .map(|(port_id, dev_data)| {

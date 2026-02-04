@@ -360,7 +360,6 @@ impl CommandInfo {
             CommandInfo::EvaluateContext { input_context_ptr, slot_id } => {
                 let completion_code = dev_slots
                     .evaluate_context(slot_id, input_context_ptr, memctx)
-                    // TODO: handle properly. for now just:
                     .unwrap_or(TrbCompletionCode::ContextStateError);
                 EventInfo::CommandCompletion {
                     completion_code,

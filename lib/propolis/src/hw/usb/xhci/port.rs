@@ -15,6 +15,12 @@ use crate::hw::usb::xhci::{
 
 use super::interrupter::EventSender;
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Unable to signal Port Status Change to Event Ring: {0}")]
+    PortStatusChangeEvent(#[from] super::interrupter::Error),
+}
+
 #[must_use]
 pub enum PortWrite {
     NoAction,
@@ -280,7 +286,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         &mut self,
         update: &dyn Fn(&mut bits::PortStatusControl),
         port_id: PortId,
-    ) {
+    ) -> Result<(), Error> {
         let is_usb3 = self.is_usb3();
         let portsc_before = *self.portsc_ref();
 
@@ -330,16 +336,15 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         let psceg_before = portsc_before.port_status_change_event_generation();
         let psceg_after = portsc.port_status_change_event_generation();
         if psceg_after && !psceg_before {
-            if let Err(_e) = self.event_sender().enqueue_event(
+            self.event_sender().enqueue_event(
                 EventInfo::PortStatusChange {
                     port_id,
                     completion_code: TrbCompletionCode::Success,
                 },
                 false,
-            ) {
-                // TODO: slog::error!("unable to signal Port Status Change: {e}")
-            }
+            )?;
         }
+        Ok(())
     }
 
     fn import(
