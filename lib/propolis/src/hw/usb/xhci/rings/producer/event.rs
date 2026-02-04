@@ -117,7 +117,11 @@ impl EventRing {
             self.enqueue_pointer = Some(self.segment_table[0].base_address);
             self.segment_remaining_trbs =
                 self.segment_table[0].segment_trb_count;
-        } // XXX: do we do this even if enqueue_ptr *was* previously set?
+        }
+        // leave enqueue pointer as-is otherwise, per xHCI 1.2 sect 4.9.4.2:
+        // If the EREP is pointing into a segment when the ERSTSZ was written,
+        // the xHC will not stop using the 'deleted' segment until the next
+        // pass through the Event Ring.
 
         Ok(())
     }

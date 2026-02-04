@@ -266,7 +266,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
         portsc.set_wake_on_overcurrent_enable(wo.wake_on_overcurrent_enable());
 
         if is_usb3 && wo.warm_port_reset() {
-            // TODO: initiate USB3 warm port reset sequence
+            // TODO(USB3): initiate warm port reset sequence
             // (implement whenever any USB devices exist)
             portsc.set_port_reset(true);
         }
@@ -303,7 +303,7 @@ pub(super) trait XhciUsbPort: XhciUsbPortPrivate + Send + Sync {
 
         if is_usb3 {
             unimplemented!("USB3 PORTSC controller-side change (no USB3 devices implemented yet)")
-            // TODO: if Hot Reset transitioned to Warm Reset, set WRC to 1
+            // TODO(USB3): if Hot Reset transitioned to Warm Reset, set WRC to 1
         } else {
             // for concise readability
             use bits::PortLinkState::*;

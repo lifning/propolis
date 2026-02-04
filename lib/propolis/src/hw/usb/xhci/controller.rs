@@ -921,7 +921,7 @@ impl PciXhci {
             // xHCI 1.2 section 4.7
             Doorbell(slot_id) => {
                 reg_index = slot_id as i16;
-                // TODO: care about DoorbellRegister::db_stream_id for USB3
+                // TODO(USB3): care about DoorbellRegister::db_stream_id
                 let doorbell_register = bits::DoorbellRegister(wo.read_u32());
                 let endpoint_id = doorbell_register.db_target();
                 slog::trace!(

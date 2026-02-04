@@ -527,7 +527,7 @@ impl Descriptor for StringDescriptor {
     /// UNUSED, but provided for completeness.
     /// To avoid doubling the calls to encode_utf16 in serialize,
     /// this is computed inline.
-    // TODO: premature given that it costs an alloc and they're generally small?
+    // XXX: premature given that it costs an alloc and they're generally small?
     // but also they're requested infrequently enough to not matter either way.
     fn length(&self) -> u8 {
         (2 + (self.string.encode_utf16().count() * size_of::<u16>())) as u8
