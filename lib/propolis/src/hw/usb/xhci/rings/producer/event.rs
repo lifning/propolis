@@ -149,8 +149,9 @@ impl EventRing {
 
     pub fn is_empty(&self) -> bool {
         // XXX: is this actually the way we want to handle Nones?
-        let Some(enq_ptr) = &self.enqueue_pointer else { return false };
-        let Some(deq_ptr) = &self.dequeue_pointer else { return false };
+        // the one place this fn is called is to clear Interrupt Pending Enable when empty
+        let Some(enq_ptr) = &self.enqueue_pointer else { return true };
+        let Some(deq_ptr) = &self.dequeue_pointer else { return true };
         enq_ptr == deq_ptr
     }
 

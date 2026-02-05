@@ -578,9 +578,6 @@ pub mod migrate {
         }
     }
 
-    // XXX: need to further generalize to what Normal TDs can possibly include,
-    // multiple TRBs in the case of scatter-gather (and multple Event Data TRBs)
-
     #[derive(Serialize, Deserialize)]
     pub struct TransferTrbV1 {
         pub trb: TrbV1,

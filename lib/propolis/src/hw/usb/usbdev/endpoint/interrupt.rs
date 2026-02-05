@@ -484,7 +484,7 @@ pub mod migrate {
 
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
-        pub transfers: Vec<Vec<TransferTrbV1>>, // maybe?
+        pub transfers: Vec<Vec<TransferTrbV1>>, // each Vec<TRB> is a TD
         pub payload: Vec<u8>,
         pub period_ticks: f64,
         pub slot_id: u8,

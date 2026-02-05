@@ -2,6 +2,24 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/*!
+## Emulated Universal Serial Bus (USB) devices.
+
+TODO: ascii diagram and further explanation
+
+Implementors of the [UsbDevice] trait can be attached to the xHC.
+
+Abstractions are provided here for defining USB [Descriptor]s and
+HID [ReportDescriptor]s, as well as for implementing [ControlEndpoint]s
+(e.g. the Default Control Endpoint) and [InterruptInEndpoint]s (such as
+the pipe used for HID reports).
+
+[Descriptor]: descriptor::Descriptor
+[ReportDescriptor]: hid::report::ReportDescriptor
+[ControlEndpoint]: endpoint::control::ControlEndpoint
+[InterruptInEndpoint]: endpoint::interrupt::InterruptInEndpoint
+ */
+
 use std::sync::{Arc, Mutex};
 
 use descriptor::DescriptorType;
@@ -131,6 +149,7 @@ impl UsbDeviceType {
     }
 }
 
+/// Trait implemented by all Propolis USB devices handled by the xHC.
 pub trait UsbDevice: Send + Sync + 'static {
     /// Resets EDTLA (xHCI 1.2 sect 4.11.5.2)
     fn new_transfer_descriptor(&self);

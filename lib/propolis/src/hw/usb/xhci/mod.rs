@@ -13,11 +13,17 @@ of the *specification*.
 
 [^xhci-std]: <https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf>
 
-At present, the only USB device supported is a USB 2.0 [NullUsbDevice] with
-no actual functionality, which exists as a proof-of-concept and as a means to
-show that USB [DeviceDescriptor]s are successfully communicated to the guest
-in phd-tests.
+At present, the USB 2.0 devices supported are:
 
+- a [HIDTabletDevice] that provides a pointing device (a 'mouse' with its axes
+  represented by absolute coordinates akin to a drawing tablet) for use with
+  VNC (RFB) clients connected to propolis-server.
+- a [NullUsbDevice] with no function besides communicating [DeviceDescriptor]s
+  to the guest over the default control endpoint.
+
+There are no USB 3.0 (SuperSpeed) devices at this time.
+
+[HIDTabletDevice]: super::usbdev::vnc_tablet::HIDTabletDevice
 [NullUsbDevice]: super::usbdev::demo_state_tracker::NullUsbDevice
 [DeviceDescriptor]: super::usbdev::descriptor::DeviceDescriptor
 
@@ -80,6 +86,14 @@ described in xHCI 1.2 section 4.20)
 [PortId]: port::PortId
 
 ### Implementation
+
+(TODO: notes about mutexes and lifecycle?)
+
+- [PciXhci] runs a thread to increment the Microframe Index (MFINDEX) when
+  the Enable Wrap Event flag is set in the USBCMD register.
+- The [XhciInterrupter] spawns a thread for interrupt rate moderation (IMOD).
+- Each [HIDTabletDevice] has an [InterruptInEndpoint] with a thread for
+  managing transfers within Endpoint Service Interval Time (ESIT).
 
 #### [DeviceSlotTable]
 
