@@ -89,16 +89,6 @@ described in xHCI 1.2 section 4.20)
 
 ### Implementation
 
-(TODO: notes about mutexes and lifecycle?)
-
-- [PciXhci] runs a thread to increment the Microframe Index (MFINDEX) when
-  the Enable Wrap Event flag is set in the USBCMD register.
-- The [XhciInterrupter] spawns a thread for interrupt rate moderation (IMOD).
-- Each [HIDTabletDevice] has an [InterruptInEndpoint] with a thread for
-  managing transfers within Endpoint Service Interval Time (ESIT).
-
-[InterruptInEndpoint]: super::usbdev::endpoint::interrupt::InterruptInEndpoint
-
 #### [DeviceSlotTable]
 
 When a USB device is attached to the xHC, it is enqueued in a list within
@@ -201,6 +191,16 @@ such as [MFINDEX] and the [XhciInterrupter]'s [IMODC], are simulated with
 [MFINDEX]: bits::MicroframeIndex
 [VmGuestInstant]: crate::vmm::time::VmGuestInstant
 [Duration]: std::time::Duration
+
+#### Threads
+
+- [PciXhci] runs a thread to increment the Microframe Index (MFINDEX) when
+  the Enable Wrap Event flag is set in the USBCMD register.
+- The [XhciInterrupter] spawns a thread for interrupt rate moderation (IMOD).
+- Each [HIDTabletDevice] has an [InterruptInEndpoint] with a thread for
+  managing transfers within Endpoint Service Interval Time (ESIT).
+
+[InterruptInEndpoint]: super::usbdev::endpoint::interrupt::InterruptInEndpoint
 
 ### DTrace
 

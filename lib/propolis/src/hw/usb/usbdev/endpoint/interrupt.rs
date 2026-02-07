@@ -121,6 +121,7 @@ impl PeriodicTransferPollThread {
             .unwrap()
     }
 
+    // FIXME: replace wait_timeout_while use with VmGuestInstant
     fn main_loop(self) {
         while let Some(pair) = self.weak_data.upgrade() {
             let (mtx, cvar) = &*pair;
@@ -290,6 +291,11 @@ impl PeriodicTransferPollThread {
     }
 }
 
+/// Implements handling periodic TDs on an Interrupt-IN endpoint.
+/// (USB 2.0 sect 5.7, xHCI 1.2 sect 4.14.2)
+///
+/// Normal TDs are sent to the [PeriodicTransferPollThread], which manages
+/// a state machine with respect to the Event Service Interval Time (ESIT)
 pub struct InterruptInEndpoint {
     data: Arc<(Mutex<InterruptInData>, Condvar)>,
     slot_id: SlotId,
