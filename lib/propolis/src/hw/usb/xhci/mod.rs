@@ -31,27 +31,29 @@ There are no USB 3.0 (SuperSpeed) devices at this time.
    +---------+
    | PciXhci |
    +---------+
-        | has-a
+        |
   +-----------------------------+
   |          XhciState          |
   |-----------------------------|
   | PCI MMIO registers          |
-  | XhciInterrupter             |
-  | DeviceSlotTable             |
   | Usb2Ports + Usb3Ports       |
   | CommandRing                 |
   | newly attached USB devices  |
   +-----------------------------+
-      | has-a               |
-+-------------------+       | has-a
-|  XhciInterrupter  |   +-----------------+
-|-------------------|   | DeviceSlotTable |
-| EventRing         |   |-----------------|
-| MSI-X/INTxPin     |   | DeviceSlot(s)   |___+------------------+
-+-------------------+   | DCBAAP          |   |    DeviceSlot    |
-                        | Active USB devs |   |------------------|
-                        +-----------------+   | TransferRing(s)  |
-                                              +------------------+
+      |                     |
++-------------------+   +-----------------+
+|  XhciInterrupter  |   | DeviceSlotTable |
+|-------------------|   |-----------------|  +-----------------+
+| EventRing         |   | Device contexts |__| TransferRing(s) |+
+| MSI-X/INTxPin     |   | Active USB devs |  |-----------------||
++-------------------+   +-----------------+  | TRBs into TDs   ||
+       ^                   |                 +-----------------+|
+       |                   |                  +-----------------+
+ Event |          +----------------+           |
+ TRBs  |          | impl UsbDevice |           | Transfer
+       |          |----------------|           | Descriptors
+       '----------| Endpoint(s)    |<----------'
+                  +----------------+
 ```
 
 ### Conventions

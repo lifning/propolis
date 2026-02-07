@@ -2,6 +2,38 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/*!
+
+This module implements a USB HID 1.11[^hid-std] pointing device for Propolis
+guests, reporting pointer state events provided by VNC clients connected to
+propolis-server.
+
+[^hid-std]: <https://www.usb.org/sites/default/files/hid1_11.pdf>
+
+```text
+      +--------------------------+
+      |      HIDTabletDevice     |
+      +--------------------------+
+         |               |     |
+ +--------------------+  |     |
+ |  ControlEndpoint   |  |  +-----------------+
+ |--------------------|  |  | HIDTabletReport |
+ | GET_DESCRIPTOR     |  |  |-----------------|    +--------------------+
+ | SET_CONFIGURATION  |  |  | Pointer state   |<---| VNC pointer events |
+ | HID class-specific |  |  +-----------------+    +--------------------+
+ |  (Set Idle,        |  |       |
+ |   Get Report)      |  |       |
+ +--------------------+  |       |
+                         |       v
+              +---------------------+
+              | InterruptInEndpoint |
+              |---------------------|
+              | Receive Normal TRBs |
+              | Write HID Report    |
+              +---------------------+
+```
+ */
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, Condvar, Mutex, Weak},
@@ -354,7 +386,7 @@ impl HIDTabletDevice {
                     x => return Err(Error::UnimplementedDescriptor(x)),
                 };
                 probes::usb_get_descriptor!(|| (descriptor_type as u8, index));
-                // slog::debug!(log, "usb: GET_DESCRIPTOR({descriptor:?})");
+                slog::trace!(self.log, "usb: GET_DESCRIPTOR({descriptor:?})");
                 descriptor.serialize().collect()
             }
             ControlRequestInfo::GetStatus => {

@@ -5,9 +5,14 @@
 /*!
 ## Emulated Universal Serial Bus (USB) devices.
 
-TODO: ascii diagram and further explanation
-
 Implementors of the [UsbDevice] trait can be attached to the xHC.
+
+When [Transfer Descriptors] are executed from an endpoint's [TransferRing],
+the appropriate trait function is called (i.e. a Normal TRB calls
+[UsbDevice::normal_transfer], a Data Stage TRB calls [UsbDevice::data_stage])
+
+[Transfer Descriptors]: super::xhci::rings::consumer::transfer::TransferInfo
+[TransferRing]: super::xhci::rings::consumer::transfer::TransferRing
 
 Abstractions are provided here for defining USB [Descriptor]s and
 HID [ReportDescriptor]s, as well as for implementing [ControlEndpoint]s

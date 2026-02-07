@@ -240,8 +240,7 @@ impl PeriodicTransferPollThread {
                             x.phase == InterruptInPhase::StoppedEndpoint
                         })
                         .unwrap();
-                    // TODO:
-                    // need we handle anything else here about reset/stopping the endpoint with a transction in flight?
+                    // XXX: double check, need we handle anything else here about reset/stopping the endpoint with a transction in flight?
                 }
                 InterruptInPhase::TerminateLoop => {
                     cvar.notify_one();

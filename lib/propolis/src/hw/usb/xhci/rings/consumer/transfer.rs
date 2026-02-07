@@ -203,7 +203,7 @@ impl EventDataTrb {
     }
 }
 
-// WIP: making sure we can serialize scatter-gather properly in the future,
+// WIP: test that we can serialize scatter-gather properly in the future,
 // i.e. multiple normal TRBs and event data TRBs
 #[derive(Debug, Copy, Clone)]
 pub struct TransferTrb {
