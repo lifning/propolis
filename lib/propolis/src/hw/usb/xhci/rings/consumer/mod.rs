@@ -2,6 +2,19 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! [ConsumerRing], specialized as [TransferRing] and [CommandRing], is an
+//! implementation of these TRB rings as described in sections 4.9 - 4.9.3
+//! of the xHCI specification.
+//!
+//! That [CommandDescriptor]s consist of one TRB each, while
+//! [TransferDescriptor]s may consist of many, is represented in their
+//! respective implementations of the [WorkItem] trait.
+//!
+//! [CommandRing]: command::CommandRing
+//! [CommandDescriptor]: command::CommandDescriptor
+//! [TransferRing]: transfer::TransferRing
+//! [TransferDescriptor]: transfer::TransferDescriptor
+
 use std::marker::PhantomData;
 
 use crate::common::GuestAddr;

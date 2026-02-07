@@ -38,6 +38,12 @@ pub fn command_ring_stop(
     }
 }
 
+/// Called when a doorbell corresponding to an assigned device slot is rung by
+/// the guest. Dequeues and executes any available [TransferDescriptor]s from
+/// the [TransferRing].
+///
+/// [TransferDescriptor]: super::transfer::TransferDescriptor
+/// [TransferRing]: super::transfer::TransferRing
 pub fn process_transfer_ring(
     state: &mut XhciState,
     slot_id: SlotId,
@@ -107,63 +113,54 @@ pub fn process_transfer_ring(
     }
 }
 
+/// Called when doorbell 0 is rung by the guest. Dequeues and executes any
+/// available [CommandDescriptor]s from the [CommandRing].
+///
+/// [CommandDescriptor]: super::command::CommandDescriptor
+/// [CommandRing]: super::command::CommandRing
 pub fn process_command_ring(
     state: &mut XhciState,
     memctx: &MemCtx,
     log: &slog::Logger,
 ) {
-    loop {
-        if !state.crcr.command_ring_running() {
-            break;
-        }
-
-        let cmd_opt = if let Some(ref mut cmd_ring) = state.command_ring {
-            slog::trace!(
-                log,
-                "executing Command Ring from {:#x}",
-                cmd_ring.start_addr.0,
-            );
-            match cmd_ring.dequeue_work_item(&memctx) {
-                Ok(work_item) => Some(work_item),
-                Err(consumer::Error::CommandDescriptorSize) => {
-                    // HACK - matching cycle bits in uninitialized memory trips this,
-                    // should do away with this error entirely
-                    None
-                }
-                Err(e) => {
-                    slog::error!(
-                        log,
-                        "Failed to dequeue item from Command Ring: {e}"
-                    );
-                    None
-                }
-            }
-        } else {
-            slog::error!(log, "Command Ring not initialized via CRCR yet");
-            None
-        };
-        if let Some(cmd_desc) = cmd_opt {
-            let cmd_trb_addr = cmd_desc.1;
-            match CommandInfo::try_from(cmd_desc) {
-                Ok(cmd) => {
-                    slog::trace!(log, "Command TRB running: {cmd:?}");
-                    if let Err(e) = cmd.run(
-                        cmd_trb_addr,
-                        &mut state.dev_slots,
-                        memctx,
-                        &state.event_sender,
-                    ) {
-                        slog::error!(
-                            log,
-                            "couldn't signal Command TRB completion: {e}"
-                        );
+    let Some(ref mut cmd_ring) = state.command_ring else {
+        slog::error!(log, "Command Ring not initialized via CRCR yet");
+        return;
+    };
+    while state.crcr.command_ring_running() {
+        match cmd_ring.dequeue_work_item(&memctx) {
+            Ok(cmd_desc) => {
+                let cmd_trb_addr = cmd_desc.1;
+                match CommandInfo::try_from(cmd_desc) {
+                    Ok(cmd) => {
+                        slog::trace!(log, "Command TRB running: {cmd:?}");
+                        if let Err(e) = cmd.run(
+                            cmd_trb_addr,
+                            &mut state.dev_slots,
+                            memctx,
+                            &state.event_sender,
+                        ) {
+                            slog::error!(
+                                log,
+                                "couldn't signal Command TRB completion: {e}"
+                            );
+                        }
                     }
+                    Err(e) => slog::error!(log, "Command Ring processing: {e}"),
                 }
-                Err(e) => slog::error!(log, "Command Ring processing: {e}"),
             }
-        } else {
-            // command ring absent or empty
-            break;
+            Err(consumer::Error::CommandDescriptorSize) => {
+                // HACK - matching cycle bits in uninitialized memory trips this,
+                // should perhaps do away with this error entirely?
+                break;
+            }
+            Err(e) => {
+                slog::error!(
+                    log,
+                    "Failed to dequeue item from Command Ring: {e}"
+                );
+                break;
+            }
         }
     }
 }

@@ -2,6 +2,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! The [TransferRing] is a consumer ring that constructs [TransferDescriptor]s
+//! from continuous chains of consumed TRBs, which are in turn validated and
+//! converted into instances of the [TransferInfo] enum for proper handling.
+//!
+//! [TransferInfo::run] is responsible for calling the appropriate [UsbDevice]
+//! function for the transfer it represents.
+//!
+//! [UsbDevice]: crate::hw::usb::usbdev::UsbDevice
+
 use crate::common::{GuestAddr, GuestRegion};
 use crate::hw::usb::usbdev::requests::{
     RequestDirection, RequestType, SetupData, StandardRequest,

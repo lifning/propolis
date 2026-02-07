@@ -9,7 +9,9 @@ Implementors of the [UsbDevice] trait can be attached to the xHC.
 
 When [Transfer Descriptors] are executed from an endpoint's [TransferRing],
 the appropriate trait function is called (i.e. a Normal TRB calls
-[UsbDevice::normal_transfer], a Data Stage TRB calls [UsbDevice::data_stage])
+[UsbDevice::normal_transfer], a Data Stage TRB calls [UsbDevice::data_stage]).
+Note that to reduce boilerplate, TRBs as defined in the xHCI implementation
+are handled directly, rather than being converted into URBs.
 
 [Transfer Descriptors]: super::xhci::rings::consumer::transfer::TransferInfo
 [TransferRing]: super::xhci::rings::consumer::transfer::TransferRing

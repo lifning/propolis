@@ -2,6 +2,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! The [CommandRing] is a consumer ring that constructs [CommandDescriptor]s
+//! from individual consumed TRBs, which are in turn validated and converted
+//! into instances of the [CommandInfo] enum for proper handling.
+//!
+//! [CommandInfo::run] is responsible for calling the appropriate
+//! [DeviceSlotTable] function for the command it represents.
+//!
+//! [DeviceSlotTable]: crate::hw::usb::xhci::device_slots::DeviceSlotTable
+
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::bits::ring_data::{Trb, TrbCompletionCode, TrbType};
 use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, EndpointId, SlotId};

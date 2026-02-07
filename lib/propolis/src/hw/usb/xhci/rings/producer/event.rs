@@ -2,6 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! [EventRing] is an implementation of the TRB ring management behavior
+//! described in section 4.9.4 of the xHCI specification.
+//!
+//! The rest of the xHC's implementation interacts with this via the
+//! [EventInfo] enum, which is converted down to raw TRBs here before
+//! writing to guest memory.
+
 use crate::common::{GuestAddr, GuestData};
 use crate::hw::usb::xhci::bits::ring_data::*;
 use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
