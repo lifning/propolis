@@ -49,7 +49,7 @@ mod probes {
 }
 
 pub struct InterruptInData {
-    /// Each VecDeque<TransferTrb> within the outer VecDeque is a TD.
+    /// Each `VecDeque<TransferTrb>` within the outer VecDeque is a TD.
     transfers: VecDeque<VecDeque<TransferTrb>>,
     /// Data from the USB device to write into the transfers
     payload: VecDeque<u8>,

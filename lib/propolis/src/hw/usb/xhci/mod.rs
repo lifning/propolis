@@ -97,6 +97,8 @@ described in xHCI 1.2 section 4.20)
 - Each [HIDTabletDevice] has an [InterruptInEndpoint] with a thread for
   managing transfers within Endpoint Service Interval Time (ESIT).
 
+[InterruptInEndpoint]: super::usbdev::endpoint::interrupt::InterruptInEndpoint
+
 #### [DeviceSlotTable]
 
 When a USB device is attached to the xHC, it is enqueued in a list within
