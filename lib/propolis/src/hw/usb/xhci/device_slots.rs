@@ -12,7 +12,7 @@ use crate::hw::pci;
 use crate::hw::usb::usbdev::{UsbDevice, UsbDeviceType};
 use crate::hw::usb::xhci::interrupter::EventSender;
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
-use crate::vmm::MemCtx;
+use crate::vmm::{MemCtx, VmmHdl};
 
 use super::bits::device_context::{
     EndpointContext, EndpointState, InputControlContext, SlotContext,
@@ -1119,6 +1119,7 @@ impl DeviceSlotTable {
         ctx: &crate::migrate::MigrateCtx,
         port_handles: &super::controller::XhciPortHandleCollection,
         pci_state: &Arc<pci::DeviceState>,
+        vmm_hdl: &Arc<VmmHdl>,
     ) -> Result<(), crate::migrate::MigrateStateError> {
         let migrate::DeviceSlotTableV1 { dcbaap, slots, port_devs } = value;
         self.dcbaap = dcbaap.map(GuestAddr);
@@ -1149,6 +1150,7 @@ impl DeviceSlotTable {
                         ctx.hid_report,
                         port_handles.handle_for_port(port_id),
                         pci_state,
+                        vmm_hdl,
                         &self.log,
                     )?;
                     *dst = Some(dst_dev);

@@ -61,7 +61,7 @@ use crate::{
             },
         },
     },
-    vmm::MemCtx,
+    vmm::{MemCtx, VmmHdl},
 };
 
 use super::{
@@ -150,6 +150,7 @@ pub struct HIDTabletDevice {
     report: Arc<Mutex<HIDTabletReport>>,
     port_hdl: Arc<XhciPortHandle>,
     pci_state: Arc<pci::DeviceState>,
+    vmm_hdl: Arc<VmmHdl>,
     log: slog::Logger,
 }
 
@@ -163,7 +164,8 @@ impl HIDTabletDevice {
     pub fn new(
         report: Arc<Mutex<HIDTabletReport>>,
         port_hdl: Arc<XhciPortHandle>,
-        pci_state: &Arc<pci::DeviceState>,
+        pci_state: Arc<pci::DeviceState>,
+        vmm_hdl: Arc<VmmHdl>,
         log: slog::Logger,
     ) -> Self {
         Self {
@@ -173,7 +175,8 @@ impl HIDTabletDevice {
             idle_duration_4ms: 0,
             report,
             port_hdl,
-            pci_state: pci_state.to_owned(),
+            pci_state,
+            vmm_hdl,
             log,
         }
     }
@@ -494,8 +497,9 @@ impl UsbDevice for HIDTabletDevice {
             3 => {
                 let interrupt_in_endpoint = InterruptInEndpoint::new(
                     ep_ctx.interval_as_duration(),
-                    Arc::downgrade(&self.port_hdl),
-                    &self.pci_state,
+                    Arc::clone(&self.port_hdl),
+                    Arc::clone(&self.pci_state),
+                    Arc::clone(&self.vmm_hdl),
                     slot_id,
                     endpoint_id,
                     &self.log,
@@ -621,10 +625,11 @@ impl UsbDevice for HIDTabletDevice {
             } else {
                 let interrupt_in_endpoint = InterruptInEndpoint::new_migrated(
                     intr_in_ep_payload,
-                    Arc::downgrade(&self.port_hdl),
-                    &self.pci_state,
+                    Arc::clone(&self.port_hdl),
+                    Arc::clone(&self.pci_state),
+                    Arc::clone(&self.vmm_hdl),
                     &self.log,
-                );
+                )?;
                 self.report
                     .lock()
                     .unwrap()

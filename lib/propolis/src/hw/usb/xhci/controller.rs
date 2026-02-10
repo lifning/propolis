@@ -341,6 +341,7 @@ impl PciXhci {
             hid_report,
             self.port_handles.handle_for_port(port_id),
             &self.pci_state,
+            &state.vmm_hdl,
             &self.log,
         );
 
@@ -1213,11 +1214,13 @@ impl MigrateMulti for PciXhci {
                 })
             })
             .transpose()?;
+        let vmm_hdl = Arc::clone(&state.vmm_hdl);
         state.dev_slots.import(
             &dev_slots,
             ctx,
             &self.port_handles,
             &self.pci_state,
+            &vmm_hdl,
         )?;
 
         // overwrites and re-creates all pending devices unconditionally
@@ -1231,6 +1234,7 @@ impl MigrateMulti for PciXhci {
                     ctx.hid_report,
                     self.port_handles.handle_for_port(port_id),
                     &self.pci_state,
+                    &state.vmm_hdl,
                     &self.log,
                 )?;
                 Ok::<_, crate::migrate::MigrateStateError>((port_id, dev))

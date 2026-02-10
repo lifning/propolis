@@ -33,7 +33,10 @@ use descriptor::DescriptorType;
 use requests::{RequestDirection, RequestType, SetupData};
 use vnc_tablet::HIDTabletReport;
 
-use crate::{hw::pci, vmm::MemCtx};
+use crate::{
+    hw::pci,
+    vmm::{MemCtx, VmmHdl},
+};
 
 use super::xhci::{
     bits::device_context::EndpointContext,
@@ -114,6 +117,7 @@ impl UsbDeviceType {
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        vmm_hdl: &Arc<VmmHdl>,
         log: &slog::Logger,
     ) -> Box<dyn UsbDevice> {
         let log = log.new(slog::o!("component" => "usbdev", "port_id" => port_hdl.port_id().as_raw_id()));
@@ -125,7 +129,8 @@ impl UsbDeviceType {
                 Box::new(vnc_tablet::HIDTabletDevice::new(
                     hid_report.clone(),
                     port_hdl,
-                    pci_state,
+                    Arc::clone(pci_state),
+                    Arc::clone(vmm_hdl),
                     log,
                 ))
             }
@@ -137,6 +142,7 @@ impl UsbDeviceType {
         hid_report: &Arc<Mutex<HIDTabletReport>>,
         port_hdl: Arc<XhciPortHandle>,
         pci_state: &Arc<pci::DeviceState>,
+        vmm_hdl: &Arc<VmmHdl>,
         log: &slog::Logger,
     ) -> core::result::Result<
         Box<dyn UsbDevice>,
@@ -144,12 +150,11 @@ impl UsbDeviceType {
     > {
         let mut dev = match &payload.device_type {
             migrate::UsbDeviceTypeV1::Null => {
-                Self::Null.create(hid_report, port_hdl, pci_state, log)
+                Self::Null.create(hid_report, port_hdl, pci_state, vmm_hdl, log)
             }
             // specifics imported below this match
-            migrate::UsbDeviceTypeV1::Tablet(_specifics) => {
-                Self::HidTablet.create(hid_report, port_hdl, pci_state, log)
-            }
+            migrate::UsbDeviceTypeV1::Tablet(_specifics) => Self::HidTablet
+                .create(hid_report, port_hdl, pci_state, vmm_hdl, log),
         };
         dev.import(&payload)?;
         Ok(dev)

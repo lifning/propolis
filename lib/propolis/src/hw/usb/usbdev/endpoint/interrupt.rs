@@ -20,6 +20,7 @@ use crate::{
             rings::consumer::transfer::{PointerOrImmediate, TransferTrb},
         },
     },
+    vmm::{time::VmGuestInstant, VmmHdl},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -56,8 +57,9 @@ pub struct InterruptInData {
     payload: VecDeque<u8>,
     period: Duration,
     phase: InterruptInPhase,
-    pci_state: Weak<pci::DeviceState>,
-    port_hdl: Weak<XhciPortHandle>,
+    port_hdl: Arc<XhciPortHandle>,
+    pci_state: Arc<pci::DeviceState>,
+    vmm_hdl: Arc<VmmHdl>,
     slot_id: SlotId,
     endpoint_id: EndpointId,
     log: slog::Logger,
@@ -91,20 +93,30 @@ impl InterruptInData {
             match self.phase {
                 InterruptInPhase::WaitForTransferDescriptors => {
                     if !self.transfers.is_empty() {
-                        self.phase = InterruptInPhase::WaitForPayload;
+                        if let Ok(now) = VmGuestInstant::now(&self.vmm_hdl) {
+                            self.phase =
+                                InterruptInPhase::WaitForPayload { since: now };
+                        } else {
+                            return;
+                        }
                     }
                 }
-                InterruptInPhase::WaitForPayload => {
-                    // TODO: care about whether ESIT has elapsed w/ VmGuestInstants
-                    // taken before/after state change, if we implement a device
-                    // sensitive to such.
-                    // (should have no more than one TD consumed per ESIT if guest
-                    // gives us too many at once (xHCI 1.2 sect 4.14.3))
-                    if self.transfers.len() > 1 {
+                InterruptInPhase::WaitForPayload { since: then } => {
+                    let Ok(now) = VmGuestInstant::now(&self.vmm_hdl) else {
+                        return;
+                    };
+
+                    let elapsed = now.saturating_duration_since(then);
+                    if !self.period.is_zero()
+                        && elapsed > self.period
+                        && self.transfers.len() > 1
+                    {
                         // abandon and move onto a new transfer if one has been given to us.
                         // (xHCI 1.2 sect 4.9.1: if xHC receives Short Packet from device,
                         // retire current TD and advance to next TD from the Transfer Ring)
                         self.transfers.pop_front();
+                        self.phase =
+                            InterruptInPhase::WaitForPayload { since: now };
                     } else if self.transfers.is_empty() {
                         // endpoint was stopped, go back to wait for next doorbell
                         self.phase =
@@ -113,6 +125,8 @@ impl InterruptInData {
                         self.phase = InterruptInPhase::Writing;
                     }
                 }
+                // TODO: no more than one TD consumed per ESIT if guest
+                // gives us too many at once (xHCI 1.2 sect 4.14.3)
                 InterruptInPhase::Writing => {
                     if let Some(td) = self.transfers.front_mut() {
                         if let Some(trb) = td.pop_front() {
@@ -160,13 +174,7 @@ impl InterruptInData {
             return Err(Error::ImmediateDataInTransfer(xfer.trb_pointer()));
         };
         let bytes_transferred = data.len().min(region.1);
-        let Some(port_hdl) = self.port_hdl.upgrade() else {
-            return Err(Error::PortHandleGone);
-        };
-        let Some(pci_state) = self.pci_state.upgrade() else {
-            return Err(Error::PciDeviceReferenceGone);
-        };
-        let Some(memctx) = pci_state.acc_mem.access() else {
+        let Some(memctx) = self.pci_state.acc_mem.access() else {
             return Err(Error::MemAccessorFail);
         };
         memctx.write_many(region.0, &data[..bytes_transferred]);
@@ -176,7 +184,7 @@ impl InterruptInData {
             region.0 .0,
             region.1,
         ));
-        port_hdl
+        self.port_hdl
             .send_completion_events_for_trb(
                 &xfer,
                 TrbCompletionCode::Success,
@@ -191,15 +199,16 @@ impl InterruptInData {
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum InterruptInPhase {
     WaitForTransferDescriptors,
-    WaitForPayload,
+    WaitForPayload { since: VmGuestInstant },
     Writing,
 }
 
 /// Implements handling periodic TDs on an Interrupt-IN endpoint.
 /// (USB 2.0 sect 5.7, xHCI 1.2 sect 4.14.2)
 ///
-/// Normal TDs are sent to the [PeriodicTransferPollThread], which manages
-/// a state machine with respect to the Event Service Interval Time (ESIT)
+/// Normal TDs are fed to the inner [InterruptInData], which manages
+/// a state machine with respect to the externally-received payload data
+/// and the Event Service Interval Time (ESIT)
 pub struct InterruptInEndpoint {
     inner: Arc<Mutex<InterruptInData>>,
 }
@@ -207,8 +216,9 @@ pub struct InterruptInEndpoint {
 impl InterruptInEndpoint {
     pub fn new(
         period: Duration,
-        port_hdl: Weak<XhciPortHandle>,
-        pci_state: &Arc<pci::DeviceState>,
+        port_hdl: Arc<XhciPortHandle>,
+        pci_state: Arc<pci::DeviceState>,
+        vmm_hdl: Arc<VmmHdl>,
         slot_id: SlotId,
         endpoint_id: EndpointId,
         log: &slog::Logger,
@@ -219,8 +229,9 @@ impl InterruptInEndpoint {
             payload: VecDeque::new(),
             period,
             phase: InterruptInPhase::WaitForTransferDescriptors,
-            pci_state: Arc::downgrade(pci_state),
             port_hdl,
+            pci_state,
+            vmm_hdl,
             slot_id,
             endpoint_id,
             log,
@@ -230,10 +241,11 @@ impl InterruptInEndpoint {
 
     pub fn new_migrated(
         value: &migrate::InterruptInEndpointV1,
-        port_hdl: Weak<XhciPortHandle>,
-        pci_state: &Arc<pci::DeviceState>,
+        port_hdl: Arc<XhciPortHandle>,
+        pci_state: Arc<pci::DeviceState>,
+        vmm_hdl: Arc<VmmHdl>,
         log: &slog::Logger,
-    ) -> Self {
+    ) -> Result<Self, crate::migrate::MigrateStateError> {
         let migrate::InterruptInEndpointV1 {
             transfers,
             payload,
@@ -241,10 +253,14 @@ impl InterruptInEndpoint {
             slot_id,
             endpoint_id,
             phase,
+            phase_since,
         } = value;
         let slot_id = SlotId::from(*slot_id);
         let endpoint_id = EndpointId::from(*endpoint_id);
         let log = log.new(slog::o!("endpoint_type" => "interrupt_in", "endpoint_id" => u8::from(endpoint_id)));
+
+        let phase = InterruptInPhase::try_from((phase, *phase_since))?;
+
         let inner = Arc::new(Mutex::new(InterruptInData {
             transfers: transfers
                 .into_iter()
@@ -252,14 +268,15 @@ impl InterruptInEndpoint {
                 .collect(),
             payload: payload.iter().copied().collect(),
             period: MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks),
-            phase: phase.into(),
+            phase,
             port_hdl,
-            pci_state: Arc::downgrade(pci_state),
+            pci_state,
+            vmm_hdl,
             slot_id,
             endpoint_id,
             log,
         }));
-        Self { inner }
+        Ok(Self { inner })
     }
 
     pub fn normal_transfer(&self, td_trbs: Vec<TransferTrb>) {
@@ -301,6 +318,7 @@ impl InterruptInEndpoint {
             slot_id,
             endpoint_id,
             phase,
+            phase_since,
         } = ep;
         let mut guard = self.inner.lock().unwrap();
         let InterruptInData {
@@ -310,6 +328,7 @@ impl InterruptInEndpoint {
             phase: phase_mut,
             port_hdl: _,
             pci_state: _,
+            vmm_hdl: _,
             slot_id: slot_id_mut,
             endpoint_id: endpoint_id_mut,
             log: _,
@@ -322,7 +341,7 @@ impl InterruptInEndpoint {
             .collect();
         *payload_mut = payload.iter().copied().collect();
         *period = MINIMUM_INTERVAL_TIME.mul_f64(*period_ticks);
-        *phase_mut = phase.into();
+        *phase_mut = InterruptInPhase::try_from((phase, *phase_since))?;
         Ok(())
     }
 
@@ -338,12 +357,14 @@ impl InterruptInEndpoint {
             phase,
             port_hdl: _,
             pci_state: _,
+            vmm_hdl: _,
             slot_id,
             endpoint_id,
             log: _,
         } = &*guard;
         let period_ticks =
             period.as_secs_f64() / MINIMUM_INTERVAL_TIME.as_secs_f64();
+        let (phase, phase_since) = From::from(phase);
         Ok(super::migrate::EndpointV1::InterruptIn(
             migrate::InterruptInEndpointV1 {
                 transfers: transfers
@@ -354,7 +375,8 @@ impl InterruptInEndpoint {
                 period_ticks,
                 slot_id: u8::from(*slot_id),
                 endpoint_id: u8::from(*endpoint_id),
-                phase: phase.into(),
+                phase,
+                phase_since,
             },
         ))
     }
@@ -363,7 +385,10 @@ impl InterruptInEndpoint {
 pub mod migrate {
     use serde::{Deserialize, Serialize};
 
-    use crate::hw::usb::xhci::rings::consumer::transfer::migrate::TransferTrbV1;
+    use crate::{
+        hw::usb::xhci::rings::consumer::transfer::migrate::TransferTrbV1,
+        vmm::time::VmGuestInstant,
+    };
 
     #[derive(Serialize, Deserialize)]
     pub struct InterruptInEndpointV1 {
@@ -373,33 +398,54 @@ pub mod migrate {
         pub slot_id: u8,
         pub endpoint_id: u8,
         pub phase: InterruptInPhaseV1,
+        pub phase_since: Option<VmGuestInstant>,
     }
 
     #[derive(Serialize, Deserialize)]
     pub enum InterruptInPhaseV1 {
         WaitForTransferDescriptors,
-        WaitForPayloadOrTransfer,
+        WaitForPayload,
         Writing,
     }
 
-    impl From<&super::InterruptInPhase> for InterruptInPhaseV1 {
+    impl From<&super::InterruptInPhase>
+        for (InterruptInPhaseV1, Option<VmGuestInstant>)
+    {
         fn from(value: &super::InterruptInPhase) -> Self {
             use super::InterruptInPhase::*;
             match value {
-                WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
-                WaitForPayload => Self::WaitForPayloadOrTransfer,
-                Writing => Self::Writing,
+                WaitForTransferDescriptors => {
+                    (InterruptInPhaseV1::WaitForTransferDescriptors, None)
+                }
+                WaitForPayload { since } => {
+                    (InterruptInPhaseV1::WaitForPayload, Some(*since))
+                }
+                Writing => (InterruptInPhaseV1::Writing, None),
             }
         }
     }
-    impl From<&InterruptInPhaseV1> for super::InterruptInPhase {
-        fn from(value: &InterruptInPhaseV1) -> Self {
+    impl TryFrom<(&InterruptInPhaseV1, Option<VmGuestInstant>)>
+        for super::InterruptInPhase
+    {
+        type Error = crate::migrate::MigrateStateError;
+
+        fn try_from(
+            (value, since): (&InterruptInPhaseV1, Option<VmGuestInstant>),
+        ) -> Result<Self, Self::Error> {
             use InterruptInPhaseV1::*;
-            match value {
-                WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
-                WaitForPayloadOrTransfer => Self::WaitForPayload,
-                Writing => Self::Writing,
-            }
+            Ok(match (value, since) {
+                (WaitForTransferDescriptors, None) => {
+                    Self::WaitForTransferDescriptors
+                }
+                (WaitForPayload, Some(since)) => Self::WaitForPayload { since },
+                (Writing, None) => Self::Writing,
+                _ => {
+                    return Err(Self::Error::DeserializationFailed(
+                        "USB Interrupt IN endpoint phase vs. timing mismatch"
+                            .to_string(),
+                    ))
+                }
+            })
         }
     }
 }
@@ -434,7 +480,7 @@ mod test {
                 },
             },
         },
-        vmm::MemAccessed,
+        vmm::{MemAccessed, VmmHdl},
     };
 
     // memory layout
@@ -446,7 +492,6 @@ mod test {
         _log: slog::Logger,
         pci_state: Arc<pci::DeviceState>,
         _interrupts: Arc<(Mutex<InterruptRegulation>, Condvar)>,
-        _port_hdl: Arc<XhciPortHandle>,
         int_in_ep: super::InterruptInEndpoint,
         data_ref: Arc<Mutex<super::InterruptInData>>,
     }
@@ -479,12 +524,15 @@ mod test {
             ));
             event_sender.set_interrupts(&_interrupts);
 
-            let _port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
+            let port_hdl = Arc::new(XhciPortHandle::new_test(event_sender));
+
+            let vmm_hdl = Arc::new(VmmHdl::new_test(0).unwrap());
 
             let int_in_ep = super::InterruptInEndpoint::new(
                 Duration::from_millis(10),
-                Arc::downgrade(&_port_hdl),
-                &pci_state,
+                port_hdl,
+                pci_state.to_owned(),
+                vmm_hdl,
                 SlotId::from(1),
                 EndpointId::from(3),
                 &_log,
@@ -492,14 +540,7 @@ mod test {
 
             let data_ref = int_in_ep.data_ref().upgrade().unwrap();
 
-            Self {
-                _log,
-                pci_state,
-                _interrupts,
-                _port_hdl,
-                int_in_ep,
-                data_ref,
-            }
+            Self { _log, pci_state, _interrupts, int_in_ep, data_ref }
         }
         fn memctx(&self) -> Guard<'_, MemAccessed> {
             self.pci_state.acc_mem.access().unwrap()
