@@ -36,7 +36,7 @@ propolis-server.
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Condvar, Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 use bitstruct::bitstruct;
@@ -83,7 +83,7 @@ pub struct HIDTabletReport {
     // for control-endpoint Get_Report requests
     last_data: [u8; REPORT_SIZE],
     // where the unanswered transfer lives
-    xfer_dataref: Option<Weak<(Mutex<InterruptInData>, Condvar)>>,
+    xfer_dataref: Option<Weak<Mutex<InterruptInData>>>,
 }
 
 bitstruct! {
@@ -132,16 +132,12 @@ impl HIDTabletReport {
 
         if let Some(dataref) = &self.xfer_dataref {
             if let Some(dataref) = dataref.upgrade() {
-                dataref.0.lock().unwrap().set_payload(data.to_vec());
-                dataref.1.notify_one();
+                dataref.lock().unwrap().set_payload(data.to_vec());
             }
         }
     }
 
-    fn set_ep_data(
-        &mut self,
-        ep_data: Weak<(Mutex<InterruptInData>, Condvar)>,
-    ) {
+    fn set_ep_data(&mut self, ep_data: Weak<Mutex<InterruptInData>>) {
         self.xfer_dataref = Some(ep_data);
     }
 }
