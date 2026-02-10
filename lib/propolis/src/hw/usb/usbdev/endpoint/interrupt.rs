@@ -77,9 +77,7 @@ impl InterruptInData {
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum InterruptInPhase {
     WaitForTransferDescriptors,
-    WaitForPayloadPeriod,
-    // wait indefinitely after a short-packet (i.e. missing a periodic transfer due to no data from usb dev)
-    WaitForPayloadOrTransfer,
+    WaitForPayload,
     StoppedEndpoint,
     Writing,
     TerminateLoop,
@@ -121,7 +119,6 @@ impl PeriodicTransferPollThread {
             .unwrap()
     }
 
-    // FIXME: replace wait_timeout_while use with VmGuestInstant
     fn main_loop(self) {
         while let Some(pair) = self.weak_data.upgrade() {
             let (mtx, cvar) = &*pair;
@@ -137,60 +134,37 @@ impl PeriodicTransferPollThread {
                     if guard.phase
                         == InterruptInPhase::WaitForTransferDescriptors
                     {
-                        guard.phase = InterruptInPhase::WaitForPayloadPeriod;
+                        guard.phase = InterruptInPhase::WaitForPayload;
                     }
                 }
-                InterruptInPhase::WaitForPayloadPeriod => {
-                    let timeout = guard.period;
-                    let (mut guard, timeout_result) = cvar
-                        .wait_timeout_while(guard, timeout, |guard| {
-                            !guard.sufficient_payload_for_current_trb()
-                                && guard.phase
-                                    == InterruptInPhase::WaitForPayloadPeriod
-                        })
-                        .unwrap();
-
-                    if guard.phase != InterruptInPhase::WaitForPayloadPeriod {
-                        // if phase was changed out-of-band, loop around to match again
-                    } else if !timeout_result.timed_out() {
-                        // we have a payload, proceed
-                        guard.phase = InterruptInPhase::Writing;
-                    } else if guard.first_trb().is_some() {
-                        // wait for either a payload from device or a new TD from guest
-                        guard.phase =
-                            InterruptInPhase::WaitForPayloadOrTransfer;
-                    } else {
-                        // endpoint was stopped, go back to wait for next doorbell
-                        guard.phase =
-                            InterruptInPhase::WaitForTransferDescriptors;
-                    }
-                }
-                InterruptInPhase::WaitForPayloadOrTransfer => {
+                InterruptInPhase::WaitForPayload => {
                     let num_tds = guard.transfers.len();
+                    // wait for either a payload from device or a new TD from guest
                     let mut guard = cvar
                         .wait_while(guard, |guard| {
                             !guard.sufficient_payload_for_current_trb()
                                 && guard.transfers.len() == num_tds
-                                && guard.phase == InterruptInPhase::WaitForPayloadOrTransfer
+                                && guard.phase
+                                    == InterruptInPhase::WaitForPayload
                         })
                         .unwrap();
-                    if guard.phase != InterruptInPhase::WaitForPayloadOrTransfer
-                    {
+                    // TODO: care about whether guard.period has elapsed w/
+                    // VmGuestInstants taken before/after wait, if we implement
+                    // a device sensitive to such.
+                    if guard.phase != InterruptInPhase::WaitForPayload {
                         // if phase was changed out-of-band, loop around to match again
-                    } else if guard.sufficient_payload_for_current_trb() {
-                        guard.phase = InterruptInPhase::Writing;
                     } else if guard.transfers.len() != num_tds {
                         // abandon and move onto a new transfer if one has been given to us.
                         // (xHCI 1.2 sect 4.9.1: if xHC receives Short Packet from device,
                         // retire current TD and advance to next TD from the Transfer Ring)
                         guard.transfers.pop_front();
                         if guard.transfers.is_empty() {
+                            // endpoint was stopped, go back to wait for next doorbell
                             guard.phase =
                                 InterruptInPhase::WaitForTransferDescriptors;
-                        } else {
-                            guard.phase =
-                                InterruptInPhase::WaitForPayloadPeriod;
                         }
+                    } else if guard.sufficient_payload_for_current_trb() {
+                        guard.phase = InterruptInPhase::Writing;
                     }
                 }
                 // TODO: no more than one TD consumed per ESIT if software gives us
@@ -500,7 +474,6 @@ pub mod migrate {
     #[derive(Serialize, Deserialize)]
     pub enum InterruptInPhaseV1 {
         WaitForTransferDescriptors,
-        WaitForPayloadPeriod,
         WaitForPayloadOrTransfer,
         StoppedEndpoint,
         Writing,
@@ -512,8 +485,7 @@ pub mod migrate {
             use super::InterruptInPhase::*;
             match value {
                 WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
-                WaitForPayloadPeriod => Self::WaitForPayloadPeriod,
-                WaitForPayloadOrTransfer => Self::WaitForPayloadOrTransfer,
+                WaitForPayload => Self::WaitForPayloadOrTransfer,
                 StoppedEndpoint => Self::StoppedEndpoint,
                 Writing => Self::Writing,
                 TerminateLoop => Self::TerminateLoop,
@@ -525,8 +497,7 @@ pub mod migrate {
             use InterruptInPhaseV1::*;
             match value {
                 WaitForTransferDescriptors => Self::WaitForTransferDescriptors,
-                WaitForPayloadPeriod => Self::WaitForPayloadPeriod,
-                WaitForPayloadOrTransfer => Self::WaitForPayloadOrTransfer,
+                WaitForPayloadOrTransfer => Self::WaitForPayload,
                 StoppedEndpoint => Self::StoppedEndpoint,
                 Writing => Self::Writing,
                 TerminateLoop => Self::TerminateLoop,
