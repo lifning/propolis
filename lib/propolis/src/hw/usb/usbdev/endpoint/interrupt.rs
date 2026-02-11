@@ -27,10 +27,6 @@ use crate::{
 pub enum Error {
     #[error("Immediate data (rather than pointer) given in Interrupt-IN endpoint transfer TRB at {0:x?}")]
     ImmediateDataInTransfer(GuestAddr),
-    #[error("Reference to xHCI PCI device dropped")]
-    PciDeviceReferenceGone,
-    #[error("Reference to xHC Port dropped")]
-    PortHandleGone,
     #[error("Failed to get MemAccessor")]
     MemAccessorFail,
     #[error(
@@ -87,7 +83,7 @@ impl InterruptInData {
         }
     }
     fn now(&self) -> Option<VmGuestInstant> {
-        // annoying consturction to avoid duality of linter errors
+        // annoying consturction to avoid duality of linter warnings
         if cfg!(test) {
             #[cfg(test)]
             {
@@ -106,8 +102,6 @@ impl InterruptInData {
                         if let Some(now) = self.now() {
                             self.phase =
                                 InterruptInPhase::WaitForPayload { since: now };
-                        } else {
-                            return;
                         }
                     }
                 }
@@ -138,13 +132,6 @@ impl InterruptInData {
                 InterruptInPhase::Writing => {
                     if let Some(td) = self.transfers.front_mut() {
                         if let Some(trb) = td.pop_front() {
-                            let PointerOrImmediate::Pointer(_) =
-                                trb.data_buffer()
-                            else {
-                                slog::error!(self.log, "Immediate data found in USB Interrupt-IN endpoint at {:x?}", trb.trb_pointer());
-                                return;
-                            };
-
                             let data = self
                                 .payload
                                 .drain(..trb.data_buffer().len())
@@ -442,11 +429,11 @@ pub mod migrate {
         ) -> Result<Self, Self::Error> {
             use InterruptInPhaseV1::*;
             Ok(match (value, since) {
-                (WaitForTransferDescriptors, None) => {
+                (WaitForTransferDescriptors, _) => {
                     Self::WaitForTransferDescriptors
                 }
                 (WaitForPayload, Some(since)) => Self::WaitForPayload { since },
-                (Writing, None) => Self::Writing,
+                (Writing, _) => Self::Writing,
                 _ => {
                     return Err(Self::Error::DeserializationFailed(
                         "USB Interrupt IN endpoint phase vs. timing mismatch"
