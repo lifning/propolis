@@ -2,6 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! This module provides a structured, human-readable method of defining
+//! valid USB HID Report Descriptors with enum variants (as opposed to static
+//! byte arrays with sidecar comments, or a proc-macro with bespoke syntax)
+//!
+//! USB HID 1.11: https://www.usb.org/sites/default/files/hid1_11.pdf
+//! HID Usage Tables 1.6: https://www.usb.org/sites/default/files/hut1_6.pdf
+
 use bitstruct::bitstruct;
 
 use crate::hw::usb::usbdev::descriptor::{Descriptor, DescriptorType};
