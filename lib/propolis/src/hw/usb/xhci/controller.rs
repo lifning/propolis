@@ -1107,7 +1107,7 @@ impl MigrateMulti for PciXhci {
             mfindex_wrap_thread_generation,
             interrupters,
             event_sender: _,
-            any_interrupt_pending_raised,
+            any_interrupt_pending_raised: _, // handled above
             command_ring,
             crcr,
             dev_slots,

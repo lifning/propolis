@@ -6,8 +6,8 @@
 //! valid USB HID Report Descriptors with enum variants (as opposed to static
 //! byte arrays with sidecar comments, or a proc-macro with bespoke syntax)
 //!
-//! USB HID 1.11: https://www.usb.org/sites/default/files/hid1_11.pdf
-//! HID Usage Tables 1.6: https://www.usb.org/sites/default/files/hut1_6.pdf
+//! USB HID 1.11: <https://www.usb.org/sites/default/files/hid1_11.pdf>
+//! HID Usage Tables 1.6: <https://www.usb.org/sites/default/files/hut1_6.pdf>
 
 use bitstruct::bitstruct;
 

@@ -2,6 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! Definitions for USB descriptors.
+//!
+//! USB 2.0: <https://www.usb.org/document-library/usb-20-specification>
+
 use bitstruct::bitstruct;
 use strum::FromRepr;
 

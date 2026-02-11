@@ -87,6 +87,8 @@ impl From<EndpointId> for u8 {
     }
 }
 
+/// Guard around an guest address to ensure modifications are written
+/// back to guest memory after modification.
 struct MemCtxValue<'a, T: Copy + FromBytes> {
     value: T,
     addr: GuestAddr,
@@ -188,6 +190,8 @@ impl DeviceSlot {
     }
 }
 
+/// Contains the attached [UsbDevice]s, and is responsible for assigning
+/// them [SlotId]s. Implements the execution of Command Ring TRBs.
 pub struct DeviceSlotTable {
     /// Device Context Base Address Array Pointer (DCBAAP)
     ///
