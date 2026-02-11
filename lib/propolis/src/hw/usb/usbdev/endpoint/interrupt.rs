@@ -86,6 +86,16 @@ impl InterruptInData {
             false
         }
     }
+    fn now(&self) -> Option<VmGuestInstant> {
+        // annoying consturction to avoid duality of linter errors
+        if cfg!(test) {
+            #[cfg(test)]
+            {
+                return Some(VmGuestInstant::zero_test());
+            }
+        }
+        VmGuestInstant::now(&self.vmm_hdl).ok()
+    }
 
     fn advance(&mut self) {
         loop {
@@ -93,7 +103,7 @@ impl InterruptInData {
             match self.phase {
                 InterruptInPhase::WaitForTransferDescriptors => {
                     if !self.transfers.is_empty() {
-                        if let Ok(now) = VmGuestInstant::now(&self.vmm_hdl) {
+                        if let Some(now) = self.now() {
                             self.phase =
                                 InterruptInPhase::WaitForPayload { since: now };
                         } else {
@@ -102,12 +112,14 @@ impl InterruptInData {
                     }
                 }
                 InterruptInPhase::WaitForPayload { since: then } => {
-                    let Ok(now) = VmGuestInstant::now(&self.vmm_hdl) else {
-                        return;
-                    };
+                    let Some(now) = self.now() else { return };
 
                     let elapsed = now.saturating_duration_since(then);
-                    if !self.period.is_zero()
+                    if self.transfers.is_empty() {
+                        // endpoint was stopped, go back to wait for next doorbell
+                        self.phase =
+                            InterruptInPhase::WaitForTransferDescriptors;
+                    } else if !self.period.is_zero()
                         && elapsed > self.period
                         && self.transfers.len() > 1
                     {
@@ -117,10 +129,6 @@ impl InterruptInData {
                         self.transfers.pop_front();
                         self.phase =
                             InterruptInPhase::WaitForPayload { since: now };
-                    } else if self.transfers.is_empty() {
-                        // endpoint was stopped, go back to wait for next doorbell
-                        self.phase =
-                            InterruptInPhase::WaitForTransferDescriptors;
                     } else if self.sufficient_payload_for_current_trb() {
                         self.phase = InterruptInPhase::Writing;
                     }
