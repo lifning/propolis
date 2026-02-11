@@ -16,7 +16,7 @@ use propolis_client::instance_spec::{
 };
 
 #[phd_testcase]
-async fn usb_device_enumerates(ctx: &Framework) {
+async fn usb_device_enumerates(ctx: &TestCtx) {
     let mut config = ctx.vm_config_builder("xhci_usb_device_enumerates_test");
     let xhc_name: SpecKey = "xhc0".into();
     const PCI_DEV: u8 = 3;
@@ -52,7 +52,7 @@ async fn usb_device_enumerates(ctx: &Framework) {
 }
 
 #[phd_testcase]
-async fn usb_tablet_vnc_pointer_events(ctx: &Framework) {
+async fn usb_tablet_vnc_pointer_events(ctx: &TestCtx) {
     let mut config =
         ctx.vm_config_builder("xhci_usb_tablet_vnc_pointer_events_test");
     let xhc_name: SpecKey = "xhc0".into();
