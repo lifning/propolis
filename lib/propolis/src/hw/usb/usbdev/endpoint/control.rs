@@ -509,7 +509,7 @@ mod test {
 
         let acc_mem = test.pci_state.acc_mem.child(None);
         let memctx = acc_mem.access().unwrap();
-        let tgt_addr = GuestAddr(1 * 1024);
+        let tgt_addr = GuestAddr(1024);
 
         let string = "Hey, what can you say?".to_string();
 

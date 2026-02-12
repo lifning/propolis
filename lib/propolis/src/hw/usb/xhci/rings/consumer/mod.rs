@@ -97,7 +97,7 @@ pub trait WorkItem: Sized + IntoIterator<Item = (Trb, GuestAddr)> {
 }
 
 fn check_aligned_addr(addr: GuestAddr) -> Result<()> {
-    if addr.0 as usize % size_of::<Trb>() != 0 {
+    if !(addr.0 as usize).is_multiple_of(size_of::<Trb>()) {
         Err(Error::InvalidDequeuePointer(addr))
     } else {
         Ok(())

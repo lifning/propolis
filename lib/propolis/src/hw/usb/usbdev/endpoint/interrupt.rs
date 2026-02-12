@@ -305,7 +305,6 @@ impl InterruptInEndpoint {
         &mut self,
         ep: &migrate::InterruptInEndpointV1,
     ) -> Result<(), crate::migrate::MigrateStateError> {
-        // TODO: can we unify the way this is represented for periodic / bulk / control
         let migrate::InterruptInEndpointV1 {
             transfers,
             payload,
@@ -562,7 +561,7 @@ mod test {
     #[test]
     fn single_trb_transfer() {
         let test = TestScaffold::new();
-        let tgt_addr = GuestAddr(1 * 1024);
+        let tgt_addr = GuestAddr(1024);
         const TGT_LEN: usize = 7;
 
         test.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
@@ -596,7 +595,7 @@ mod test {
     #[test]
     fn stop_resume_endpoint() {
         let test = TestScaffold::new();
-        let tgt_addr = GuestAddr(1 * 1024);
+        let tgt_addr = GuestAddr(1024);
         const TGT_LEN: usize = 7;
 
         test.memctx().write(tgt_addr, &[0u8; TGT_LEN]);
