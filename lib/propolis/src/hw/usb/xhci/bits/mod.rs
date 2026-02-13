@@ -549,7 +549,7 @@ bitstruct! {
 /// when a Device Notification Transaction Packet matching the set bit is received.
 ///
 /// See xHCI 1.2 Sections 5.4.4, 6.4.2.7
-pub type DeviceNotificationControl = bitvec::BitArr!(for 16, in u32);
+pub struct DeviceNotificationControl(pub u32);
 
 bitstruct! {
     /// Representation of the Command Ring Control (CRCR) register.

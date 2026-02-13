@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use bitvec::field::BitField;
 use device_slots::SlotId;
 
 use crate::common::{GuestAddr, Lifecycle, RWOp, ReadOp, WriteOp};
@@ -132,7 +131,7 @@ impl XhciState {
             vmm_hdl,
             usbcmd: bits::UsbCommand(0),
             usbsts,
-            dnctrl: bits::DeviceNotificationControl::new([0]),
+            dnctrl: bits::DeviceNotificationControl(0),
             dev_slots: DeviceSlotTable::new(log.clone()),
             config: bits::Configure(0),
             mfindex: bits::MicroframeIndex(0),
@@ -426,7 +425,7 @@ impl PciXhci {
             Op(PageSize) => U32(PAGESIZE_XHCI),
 
             Op(DeviceNotificationControl) => {
-                U32(self.state.lock().unwrap().dnctrl.data[0])
+                U32(self.state.lock().unwrap().dnctrl.0)
             }
 
             Op(CommandRingControlRegister1) => {
@@ -685,12 +684,13 @@ impl PciXhci {
                 // xHCI 1.2 Section 4.23.2.1
                 if cmd.controller_save_state() {
                     if state.usbsts.save_state_status() {
-                        slog::error!(
+                        slog::warn!(
                             self.log,
                             "save state while saving: undefined behavior!"
                         );
                     }
                     if state.usbsts.host_controller_halted() {
+                        // FIXME
                         slog::error!(
                             self.log,
                             "unimplemented USBCMD: Save State"
@@ -700,12 +700,13 @@ impl PciXhci {
                 // xHCI 1.2 Section 4.23.2
                 if cmd.controller_restore_state() {
                     if state.usbsts.save_state_status() {
-                        slog::error!(
+                        slog::warn!(
                             self.log,
                             "restore state while saving: undefined behavior!"
                         );
                     }
                     if state.usbsts.host_controller_halted() {
+                        // FIXME
                         slog::error!(
                             self.log,
                             "unimplemented USBCMD: Restore State"
@@ -793,7 +794,7 @@ impl PciXhci {
             Op(DeviceNotificationControl) => {
                 let mut state = self.state.lock().unwrap();
                 let val = wo.read_u32();
-                state.dnctrl.data[0] = val & 0xFFFFu32;
+                state.dnctrl.0 = val & 0xFFFFu32;
                 U32(val)
             }
             Op(CommandRingControlRegister1) => {
@@ -1121,7 +1122,7 @@ impl MigrateMulti for PciXhci {
         let mstate = migrate::XhciStateV1 {
             usbcmd: usbcmd.0,
             usbsts: usbsts.0,
-            dnctrl: dnctrl.load_le(),
+            dnctrl: dnctrl.0,
             crcr: crcr.0,
             mfindex: mfindex.0,
             config: config.0,
@@ -1198,7 +1199,7 @@ impl MigrateMulti for PciXhci {
 
         state.usbcmd = bits::UsbCommand(usbcmd);
         state.usbsts = bits::UsbStatus(usbsts);
-        state.dnctrl.store_le(dnctrl);
+        state.dnctrl = bits::DeviceNotificationControl(dnctrl);
         state.crcr = bits::CommandRingControl(crcr);
         state.mfindex = bits::MicroframeIndex(mfindex);
         state.config = bits::Configure(config);

@@ -10,7 +10,6 @@ libc.workspace = true
 bit_field.workspace = true
 bitflags.workspace = true
 bitstruct.workspace = true
-bitvec.workspace = true
 byteorder.workspace = true
 lazy_static.workspace = true
 thiserror.workspace = true
