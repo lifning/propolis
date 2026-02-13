@@ -34,7 +34,7 @@ pub fn command_ring_stop(
     if let Err(e) = state.event_sender.enqueue_event(event_info, false) {
         slog::error!(log, "couldn't inform xHCD of stopped Control Ring: {e}");
     } else {
-        slog::debug!(log, "stopped Command Ring with {completion_code:?}");
+        slog::trace!(log, "stopped Command Ring with {completion_code:?}");
     }
 }
 

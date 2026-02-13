@@ -23,6 +23,7 @@ use super::rings::consumer::transfer::{TransferEventParams, TransferTrb};
 mod probes {
     fn xhci_interrupter_pending(intr_num: u16) {}
     fn xhci_interrupter_fired(intr_num: u16) {}
+    fn xhci_pci_interrupt_mode(mode: &str) {}
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -339,7 +340,13 @@ impl XhciPciIntr {
         mode: pci::IntrMode,
         pci_state: &pci::DeviceState,
     ) {
-        slog::trace!(self.log, "xHC set interrupt mode to {mode:?}");
+        if mode != self.pci_intr_mode {
+            probes::xhci_pci_interrupt_mode!(|| match mode {
+                pci::IntrMode::Disabled => "disabled",
+                pci::IntrMode::INTxPin => "INTxPin",
+                pci::IntrMode::Msix => "MSI-X",
+            });
+        }
         self.pci_intr_mode = mode;
         self.msix_hdl = pci_state.msix_hdl();
         self.pin = pci_state.lintr_pin();

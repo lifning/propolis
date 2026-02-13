@@ -288,7 +288,6 @@ impl NullUsbDevice {
                     x => return Err(Error::UnimplementedDescriptor(x)),
                 };
                 probes::usb_get_descriptor!(|| (descriptor_type as u8, index));
-                // slog::debug!(log, "usb: GET_DESCRIPTOR({descriptor:?})");
                 descriptor.serialize().collect()
             }
             ControlRequestInfo::GetStatus => {

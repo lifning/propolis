@@ -558,7 +558,7 @@ impl PciXhci {
                 // xHCI 1.2 Section 5.4.1.1
                 if cmd.run_stop() && !state.usbcmd.run_stop() {
                     if !state.usbsts.host_controller_halted() {
-                        slog::error!(
+                        slog::warn!(
                             self.log,
                             "USBCMD Run while not Halted: undefined behavior!"
                         );

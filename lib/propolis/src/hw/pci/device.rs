@@ -736,7 +736,7 @@ impl MigrateMulti for DeviceState {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum IntrMode {
     Disabled,
     INTxPin,

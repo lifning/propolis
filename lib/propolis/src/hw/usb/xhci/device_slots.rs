@@ -648,7 +648,7 @@ impl DeviceSlotTable {
             SlotState::Default
             | SlotState::Addressed
             | SlotState::Configured => {
-                slog::debug!(
+                slog::trace!(
                     self.log,
                     "input_ctx: {:#x} {input_ctx:?}",
                     input_context_ptr.0
@@ -673,7 +673,7 @@ impl DeviceSlotTable {
                             in_slot_ctx.max_exit_latency_micros(),
                         );
                     });
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "out_slot_ctx: in@{:#x} out@{:#x} {out_slot_ctx:?}",
                         in_slot_addr.0,
@@ -697,12 +697,12 @@ impl DeviceSlotTable {
                         ctx.set_max_packet_size(in_ep0_ctx.max_packet_size())
                     });
 
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "out_slot_ctx: {:#x} {out_slot_ctx:?}",
                         out_slot_addr.0
                     );
-                    slog::debug!(
+                    slog::trace!(
                         self.log,
                         "out_ep0_ctx: in@{:#x} out@{:#x} {out_ep0_ctx:?}",
                         in_ep0_addr.0,

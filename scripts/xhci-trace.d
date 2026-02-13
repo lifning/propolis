@@ -151,6 +151,11 @@ propolis$target:::xhci_interrupter_fired /* (intr_num) */
     printf("[%Y] Interrupter %d fired\n", walltimestamp, arg0);
 }
 
+propolis$target:::xhci_pci_interrupt_mode /* (mode) */
+{
+    printf("[%Y] xHC PCI Interrupt mode set to %s\n", walltimestamp, arg0);
+}
+
 propolis$target:::xhci_reset /* () */
 {
     printf("\n[%Y] xHC reset\n\n", walltimestamp);
