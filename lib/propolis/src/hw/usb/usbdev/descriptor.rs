@@ -196,7 +196,9 @@ pub trait NestedDescriptor: Descriptor {
     fn serialize_all(&self) -> Box<dyn Iterator<Item = u8> + '_>;
 }
 
-/// Device Descriptor.
+/// General information about a USB device that applies irrespective of active
+/// configuration or interface.
+/// (USB 2.0 sect 9.6.1)
 #[derive(Debug)]
 pub struct DeviceDescriptor {
     /// bcdUSB. USB version in binary-coded decimal.
@@ -265,6 +267,12 @@ impl Descriptor for DeviceDescriptor {
     }
 }
 
+/// Describes information about a specific device configuration.
+/// When a given `config_value` is used as a parameter to a SET_CONFIGURATION
+/// request, the device assumes the matching configuration.
+/// When requested by GET_DESCRIPTOR, the device provides all interface
+/// and endpoint descriptors associated with the requested configuration.
+/// (USB 2.0 sect 9.6.3)
 #[derive(Debug)]
 pub struct ConfigurationDescriptor {
     /// wTotalLength (u16) is calculated based on serialization of,
@@ -328,6 +336,10 @@ impl Descriptor for ConfigurationDescriptor {
     }
 }
 
+/// Defines a specific interface within a configuration, with zero or more
+/// [EndpointDescriptor]s describing a unique set of endpoints within the
+/// configuration.
+/// (USB 2.0 sect 9.6.5)
 #[derive(Debug)]
 pub struct InterfaceDescriptor {
     /// bInterfaceNumber
@@ -416,6 +428,9 @@ impl NestedDescriptor for InterfaceDescriptor {
     }
 }
 
+/// Information required by the host to determine the transfer type and
+/// bandwidth requirements of each endpoint.
+/// (USB 2.0 sect 9.6.6)
 #[derive(Debug)]
 pub struct EndpointDescriptor {
     /// bEndpointAddress.
@@ -488,6 +503,7 @@ impl NestedDescriptor for EndpointDescriptor {
     }
 }
 
+/// Class-specific descriptors
 #[derive(Debug)]
 pub enum AugmentedDescriptor {
     HID(HIDDescriptor),
@@ -521,6 +537,8 @@ impl NestedDescriptor for AugmentedDescriptor {
     }
 }
 
+/// UTF-16-encoded strings, such as device and vendor name.
+/// (USB 2.0 sect 9.6.7)
 #[derive(Debug)]
 pub struct StringDescriptor {
     /// bString. Uses UTF-16 encoding in payloads.
@@ -582,7 +600,9 @@ impl Descriptor for StringLanguageIdentifierDescriptor {
     }
 }
 
-// USB 2.0 sect 11.23.1
+/// Information about what would change in a device capable of operating at
+/// different speeds, were it to do so.
+/// (USB 2.0 sect 9.6.2)
 #[derive(Debug)]
 pub struct DeviceQualifierDescriptor {
     /// bcdUSB. USB version in binary-coded decimal.
