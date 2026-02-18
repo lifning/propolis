@@ -26,7 +26,11 @@ use super::{
     Error, Result, UsbDevice,
 };
 
-/// This is a hard-coded faux-device that purely exists to test the xHCI implementation.
+/// This is a trivial device purely for testing the USB+xHCI implementation.
+/// It implements the minimal feature set (i.e. answering GET_DESCRIPTOR)
+/// to appear valid in the guest OS.
+/// Its descriptors define a single configuration and interface, containing
+/// only the default control endpoint.
 pub struct NullUsbDevice {
     control_endpoint: Option<ControlEndpoint<NoClassRequestInfo>>,
     port_hdl: Arc<XhciPortHandle>,
@@ -250,8 +254,8 @@ impl NullUsbDevice {
             Self::MANUFACTURER_NAME_INDEX => "Oxide Computer Company",
             Self::PRODUCT_NAME_INDEX => "Generic USB 2.0 Encabulator",
             Self::SERIAL_INDEX => "9001",
-            Self::CONFIG_NAME_INDEX => "MyCoolConfiguration",
-            Self::INTERFACE_NAME_INDEX => "MyNotQuiteAsCoolInterface",
+            Self::CONFIG_NAME_INDEX => "Configuration",
+            Self::INTERFACE_NAME_INDEX => "Interface",
             _ => "weird index but ok",
         };
         StringDescriptor { string: s.to_string() }

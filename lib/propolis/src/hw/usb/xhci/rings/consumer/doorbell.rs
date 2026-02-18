@@ -2,6 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use std::sync::Mutex;
+
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::controller::XhciState;
 use crate::hw::usb::xhci::device_slots::{EndpointId, SlotId};
@@ -95,10 +97,8 @@ pub fn process_transfer_ring(
                     }
                 }
             }
-            Err(consumer::Error::EmptyTransferDescriptor) => {
-                slog::trace!(log, "Transfer Ring empty");
-                break;
-            }
+            // Transfer Ring empty
+            Err(consumer::Error::EmptyTransferDescriptor) => break,
             Err(consumer::Error::IncompleteWorkItem(trbs)) => {
                 // TODO: special-case handling for storing them and completing it
                 // (would need adjustment to command trb impls as well)
@@ -119,41 +119,54 @@ pub fn process_transfer_ring(
 /// [CommandDescriptor]: super::command::CommandDescriptor
 /// [CommandRing]: super::command::CommandRing
 pub fn process_command_ring(
-    state: &mut XhciState,
+    state: &Mutex<XhciState>,
     memctx: &MemCtx,
     log: &slog::Logger,
 ) {
-    let Some(ref mut cmd_ring) = state.command_ring else {
-        slog::error!(log, "Command Ring not initialized via CRCR yet");
-        return;
-    };
-    while state.crcr.command_ring_running() {
+    loop {
+        let mut state = state.lock().unwrap();
+        let XhciState {
+            event_sender,
+            command_ring: Some(cmd_ring),
+            crcr,
+            dev_slots,
+            ..
+        } = &mut *state
+        else {
+            slog::error!(log, "Command Ring not initialized via CRCR");
+            break;
+        };
+        if !crcr.command_ring_running() {
+            break;
+        }
         match cmd_ring.dequeue_work_item(&memctx) {
             Ok(cmd_desc) => {
                 let cmd_trb_addr = cmd_desc.1;
                 match CommandInfo::try_from(cmd_desc) {
                     Ok(cmd) => {
                         slog::trace!(log, "Command TRB running: {cmd:?}");
-                        if let Err(e) = cmd.run(
+                        let evt = cmd.run(
                             cmd_trb_addr,
-                            &mut state.dev_slots,
+                            dev_slots,
                             memctx,
-                            &state.event_sender,
-                        ) {
+                            event_sender,
+                        );
+                        if let Err(e) = event_sender.enqueue_event(evt, false) {
                             slog::error!(
                                 log,
                                 "couldn't signal Command TRB completion: {e}"
                             );
                         }
                     }
-                    Err(e) => slog::error!(log, "Command Ring processing: {e}"),
+                    Err(e) => {
+                        slog::error!(log, "Command Descriptor decoding: {e}");
+                    }
                 }
             }
-            Err(consumer::Error::CommandDescriptorSize) => {
-                // HACK - matching cycle bits in uninitialized memory trips this,
-                // should perhaps do away with this error entirely?
-                break;
-            }
+            Err(consumer::Error::EmptyCommandDescriptor) => break,
+            // HACK - matching cycle bits in uninitialized memory trips this,
+            // should perhaps do away with this error entirely?
+            Err(consumer::Error::CommandDescriptorSize) => break,
             Err(e) => {
                 slog::error!(
                     log,

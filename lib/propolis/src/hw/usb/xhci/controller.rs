@@ -42,7 +42,7 @@ pub struct XhciState {
     usbcmd: bits::UsbCommand,
 
     /// USB Status Register
-    pub(super) usbsts: bits::UsbStatus,
+    usbsts: bits::UsbStatus,
 
     /// Device Notification Control Register
     dnctrl: bits::DeviceNotificationControl,
@@ -60,7 +60,7 @@ pub struct XhciState {
     mfindex_wrap_thread_generation: u32,
 
     /// Interrupters, including registers and the Event Ring
-    pub(super) interrupters: [interrupter::XhciInterrupter; NUM_INTRS as usize],
+    interrupters: [interrupter::XhciInterrupter; NUM_INTRS as usize],
 
     /// Sends Event TRBs to the default Event Ring on behalf of *the controller itself*
     /// (not a specific device)
@@ -83,11 +83,10 @@ pub struct XhciState {
 
     port_regs: [Box<dyn port::XhciUsbPort>; MAX_PORTS as usize],
 
-    /// Event Data Transfer Length Accumulator (EDTLA).
-    pub(super) evt_data_xfer_len_accum: u32,
-
     /// USB devices to attach
     queued_device_connections: Vec<(PortId, Box<dyn UsbDevice>)>,
+
+    /// for corrected timestamps
     vmm_hdl: Arc<VmmHdl>,
 }
 
@@ -144,7 +143,6 @@ impl XhciState {
             command_ring: None,
             crcr: bits::CommandRingControl(0),
             port_regs,
-            evt_data_xfer_len_accum: 0,
             queued_device_connections: vec![],
         }
     }
@@ -690,8 +688,10 @@ impl PciXhci {
                         );
                     }
                     if state.usbsts.host_controller_halted() {
-                        // FIXME
-                        slog::error!(
+                        // akin to how qemu handles this,
+                        // clear USBSTS SRE when 'saving'...
+                        state.usbsts.set_save_restore_error(false);
+                        slog::debug!(
                             self.log,
                             "unimplemented USBCMD: Save State"
                         );
@@ -706,8 +706,9 @@ impl PciXhci {
                         );
                     }
                     if state.usbsts.host_controller_halted() {
-                        // FIXME
-                        slog::error!(
+                        // ...and set it when trying to restore.
+                        state.usbsts.set_save_restore_error(true);
+                        slog::debug!(
                             self.log,
                             "unimplemented USBCMD: Restore State"
                         );
@@ -908,14 +909,18 @@ impl PciXhci {
                 // xHCI 1.2 section 4.9.3, table 5-43
                 let doorbell_register = bits::DoorbellRegister(wo.read_u32());
                 if doorbell_register.db_target() == 0 {
-                    let mut state = self.state.lock().unwrap();
-                    // xHCI 1.2 table 5-24: only set to 1 if R/S is 1
-                    if state.usbcmd.run_stop() {
-                        state.crcr.set_command_ring_running(true);
+                    {
+                        let mut state = self.state.lock().unwrap();
+                        // xHCI 1.2 table 5-24: only set to 1 if R/S is 1
+                        if state.usbcmd.run_stop() {
+                            state.crcr.set_command_ring_running(true);
+                        }
                     }
                     let memctx = self.pci_state.acc_mem.access().unwrap();
                     doorbell::process_command_ring(
-                        &mut state, &memctx, &self.log,
+                        &self.state,
+                        &memctx,
+                        &self.log,
                     );
                 }
                 U32(doorbell_register.0)
@@ -1114,7 +1119,6 @@ impl MigrateMulti for PciXhci {
             dev_slots,
             config,
             port_regs,
-            evt_data_xfer_len_accum,
             queued_device_connections,
             vmm_hdl: _,
         } = &*state;
@@ -1126,7 +1130,6 @@ impl MigrateMulti for PciXhci {
             crcr: crcr.0,
             mfindex: mfindex.0,
             config: config.0,
-            evt_data_xfer_len_accum: *evt_data_xfer_len_accum,
             run_start: run_start.as_ref().map(|x| **x),
             mfindex_wrap_thread: mfindex_wrap_thread.is_some(),
             mfindex_wrap_thread_generation: *mfindex_wrap_thread_generation,
@@ -1165,7 +1168,6 @@ impl MigrateMulti for PciXhci {
             crcr,
             mfindex,
             config,
-            evt_data_xfer_len_accum,
             run_start,
             mfindex_wrap_thread,
             mfindex_wrap_thread_generation,
@@ -1203,7 +1205,6 @@ impl MigrateMulti for PciXhci {
         state.crcr = bits::CommandRingControl(crcr);
         state.mfindex = bits::MicroframeIndex(mfindex);
         state.config = bits::Configure(config);
-        state.evt_data_xfer_len_accum = evt_data_xfer_len_accum;
         state.run_start = run_start.map(|x| Arc::new(x));
 
         state.command_ring = command_ring
@@ -1295,7 +1296,6 @@ pub mod migrate {
         pub crcr: u64,
         pub mfindex: u32,
         pub config: u32,
-        pub evt_data_xfer_len_accum: u32,
         pub run_start: Option<crate::vmm::time::VmGuestInstant>,
         pub mfindex_wrap_thread: bool,
         pub mfindex_wrap_thread_generation: u32,

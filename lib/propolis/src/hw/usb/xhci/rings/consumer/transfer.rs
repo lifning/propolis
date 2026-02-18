@@ -2,6 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! This module concerns decoding and dispatching Transfer TRBs.
+//! (xHCI 1.2 sect 6.4.1)
+//!
 //! The [TransferRing] is a consumer ring that constructs [TransferDescriptor]s
 //! from continuous chains of consumed TRBs, which are in turn validated and
 //! converted into instances of the [TransferInfo] enum for proper handling.

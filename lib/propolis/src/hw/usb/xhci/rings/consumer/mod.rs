@@ -47,6 +47,8 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error("Tried to construct Command Descriptor from multiple TRBs")]
     CommandDescriptorSize,
+    #[error("Tried to construct Command Descriptor from empty Command Ring")]
+    EmptyCommandDescriptor,
     // XXX: the spec says this, but FreeBSD trips this error;
     // either my understanding or their xHCD may be slightly wrong
     // #[error("Guest defined a consumer TRB ring larger than 64K bytes")]

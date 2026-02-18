@@ -359,6 +359,7 @@ impl DeviceSlotTable {
     }
 
     /// xHCI 1.2 sect 4.6.5
+    // implementation following per outline on pg. 113
     pub fn address_device(
         &mut self,
         slot_id: SlotId,
@@ -723,7 +724,7 @@ impl DeviceSlotTable {
         })
     }
 
-    // xHCI 1.2 sect 4.6.8
+    /// xHCI 1.2 sect 4.6.8
     pub fn reset_endpoint(
         &mut self,
         slot_id: SlotId,
@@ -811,7 +812,7 @@ impl DeviceSlotTable {
         })
     }
 
-    // xHCI 1.2 sect 4.6.9
+    /// xHCI 1.2 sect 4.6.9
     pub fn stop_endpoint(
         &mut self,
         slot_id: SlotId,
@@ -927,7 +928,7 @@ impl DeviceSlotTable {
         })
     }
 
-    // xHCI 1.2 sect 4.6.10
+    /// xHCI 1.2 sect 4.6.10
     pub fn set_tr_dequeue_pointer(
         &mut self,
         new_tr_dequeue_ptr: GuestAddr,
@@ -1007,7 +1008,7 @@ impl DeviceSlotTable {
             })
     }
 
-    // xHCI 1.2 sect 4.6.11
+    /// xHCI 1.2 sect 4.6.11
     pub fn reset_device(
         &mut self,
         slot_id: SlotId,

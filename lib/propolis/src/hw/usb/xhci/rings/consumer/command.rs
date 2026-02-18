@@ -2,6 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//! This module implements the decoding and dispatching of Command TRBs.
+//! (xHCI 1.2 sect 6.4.3)
+//!
 //! The [CommandRing] is a consumer ring that constructs [CommandDescriptor]s
 //! from individual consumed TRBs, which are in turn validated and converted
 //! into instances of the [CommandInfo] enum for proper handling.
@@ -14,9 +17,7 @@
 use crate::common::GuestAddr;
 use crate::hw::usb::xhci::bits::ring_data::{Trb, TrbCompletionCode, TrbType};
 use crate::hw::usb::xhci::device_slots::{DeviceSlotTable, EndpointId, SlotId};
-use crate::hw::usb::xhci::interrupter::{
-    Error as InterrupterError, EventSender,
-};
+use crate::hw::usb::xhci::interrupter::EventSender;
 use crate::hw::usb::xhci::rings::producer::event::EventInfo;
 use crate::hw::usb::xhci::NUM_USB2_PORTS;
 use crate::vmm::MemCtx;
@@ -59,7 +60,7 @@ impl WorkItem for CommandDescriptor {
                 }
             }
         } else {
-            Err(Error::CommandDescriptorSize)
+            Err(Error::EmptyCommandDescriptor)
         }
     }
 }
@@ -207,64 +208,57 @@ pub enum CommandInfo {
     /// xHCI 1.2 sect 3.3.1, 4.6.2
     NoOp,
     /// xHCI 1.2 sect 3.3.1, 4.6.2
-    EnableSlot {
-        slot_type: u8,
-    },
+    EnableSlot { slot_type: u8 },
     /// xHCI 1.2 sect 3.3.3, 4.6.4
-    DisableSlot {
-        slot_id: SlotId,
-    },
+    DisableSlot { slot_id: SlotId },
     /// xHCI 1.2 sect 3.3.4, 4.6.5
     AddressDevice {
         input_context_ptr: GuestAddr,
         slot_id: SlotId,
         block_set_address_request: bool,
     },
-    /// xHCI 1.2 sect 3.3.5, 4.6.6
+    /// xHCI 1.2 sect 3.3.5, 4.3.5, 4.6.6
     ConfigureEndpoint {
         input_context_ptr: GuestAddr,
         slot_id: SlotId,
         deconfigure: bool,
     },
-    EvaluateContext {
-        input_context_ptr: GuestAddr,
-        slot_id: SlotId,
-    },
+    /// xHCI 1.2 sect 3.3.6, 4.6.7
+    EvaluateContext { input_context_ptr: GuestAddr, slot_id: SlotId },
+    /// xHCI 1.2 sect 3.3.7, 4.6.8
     ResetEndpoint {
         slot_id: SlotId,
         endpoint_id: EndpointId,
         transfer_state_preserve: bool,
     },
-    StopEndpoint {
-        slot_id: SlotId,
-        endpoint_id: EndpointId,
-        suspend: bool,
-    },
+    /// xHCI 1.2 sect 3.3.8, 4.6.9
+    StopEndpoint { slot_id: SlotId, endpoint_id: EndpointId, suspend: bool },
+    /// xHCI 1.2 sect 3.3.9, 4.6.10
     SetTRDequeuePointer {
         new_tr_dequeue_ptr: GuestAddr,
         dequeue_cycle_state: bool,
         slot_id: SlotId,
         endpoint_id: EndpointId,
     },
-    ResetDevice {
-        slot_id: SlotId,
-    },
+    /// xHCI 1.2 sect 3.3.10, 4.6.11
+    ResetDevice { slot_id: SlotId },
+    /// xHCI 1.2 sect 3.3.11, 4.6.12
     ForceEvent,
+    /// xHCI 1.2 sect 3.3.12, 4.6.13
     NegotiateBandwidth,
+    /// xHCI 1.2 sect 3.3.13, 4.6.14
     SetLatencyToleranceValue,
+    /// xHCI 1.2 sect 3.3.14, 4.6.15
     #[allow(unused)]
     GetPortBandwidth {
         port_bandwidth_ctx_ptr: GuestAddr,
         hub_slot_id: SlotId,
         dev_speed: u8,
     },
-    /// xHCI 1.2 section 4.6.16
+    /// xHCI 1.2 section 3.3.15, 4.6.16
     #[allow(unused)]
-    ForceHeader {
-        packet_type: u8,
-        header_info: u128,
-        root_hub_port_number: u8,
-    },
+    ForceHeader { packet_type: u8, header_info: u128, root_hub_port_number: u8 },
+    /// xHCI 1.2 sect 4.6.17
     #[allow(unused)]
     GetExtendedProperty {
         extended_property_ctx_ptr: GuestAddr,
@@ -273,6 +267,7 @@ pub enum CommandInfo {
         endpoint_id: EndpointId,
         slot_id: SlotId,
     },
+    /// xHCI 1.2 sect 4.6.18
     #[allow(unused)]
     SetExtendedProperty {
         extended_capability_id: u16,
@@ -284,22 +279,25 @@ pub enum CommandInfo {
 }
 
 impl CommandInfo {
-    /// Returns an Err if enqueuing the Command Completion Event TRB fails.
+    /// Dispatch a valid command that we implement to its DeviceSlotTable fn.
+    /// Returns the Command Completion Event, which the caller must enqueue in
+    /// the Event Ring. (For Stop Endpoint, this function may enqueue an Event
+    /// in the Event Ring before returning, per the specification, but this
+    /// function will always return an `EventInfo::CommandCompletion` that must
+    /// be enqueued.)
     pub fn run(
         self,
         cmd_trb_addr: GuestAddr,
         dev_slots: &mut DeviceSlotTable,
         memctx: &MemCtx,
         event_sender: &EventSender,
-    ) -> core::result::Result<(), InterrupterError> {
-        let evt = match self {
-            // xHCI 1.2 sect 3.3.1, 4.6.2
+    ) -> EventInfo {
+        match self {
             CommandInfo::NoOp => EventInfo::CommandCompletion {
                 completion_code: TrbCompletionCode::Success,
                 slot_id: SlotId::from(0), // 0 for no-op (table 6-42)
                 cmd_trb_addr,
             },
-            // xHCI 1.2 sect 3.3.2, 4.6.3
             CommandInfo::EnableSlot { slot_type } => {
                 match dev_slots.enable_slot(slot_type) {
                     Some(slot_id) => EventInfo::CommandCompletion {
@@ -315,7 +313,6 @@ impl CommandInfo {
                     },
                 }
             }
-            // xHCI 1.2 sect 3.3.3, 4.6.4
             CommandInfo::DisableSlot { slot_id } => {
                 EventInfo::CommandCompletion {
                     completion_code: dev_slots.disable_slot(slot_id, memctx),
@@ -323,13 +320,11 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-            // xHCI 1.2 sect 3.3.4, 4.6.5
             CommandInfo::AddressDevice {
                 input_context_ptr,
                 slot_id,
                 block_set_address_request,
             } => {
-                // xHCI 1.2 pg. 113
                 let completion_code = dev_slots
                     .address_device(
                         slot_id,
@@ -346,7 +341,6 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-            // xHCI 1.2 sect 3.3.5, 4.3.5, 4.6.6
             CommandInfo::ConfigureEndpoint {
                 input_context_ptr,
                 slot_id,
@@ -442,7 +436,6 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-            // xHCI 1.2 section 4.6.16
             CommandInfo::ForceHeader {
                 packet_type: _,
                 header_info: _,
@@ -482,7 +475,6 @@ impl CommandInfo {
                     cmd_trb_addr,
                 }
             }
-        };
-        event_sender.enqueue_event(evt, false)
+        }
     }
 }
