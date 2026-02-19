@@ -153,18 +153,13 @@ async fn usb_tablet_migration(ctx: &TestCtx) {
 
     vm1.migrate_from(&vm0, Uuid::new_v4(), MigrationTimeout::default()).await?;
 
+    let before = vm1.run_shell_command("wc -l < /tmp/hid.txt").await?;
     let mut vnc_client = vm1.vnc_client()?;
     retries = 0;
     while retries < 10 {
-        vnc_client.send_pointer_event(0x02u8, 234, 567).unwrap();
+        vnc_client.send_pointer_event(0x02u8, 234, 569).unwrap();
         vnc_client.send_pointer_event(0x02u8, 234, 568).unwrap();
-        if vm1
-            .run_shell_command("wc -l < /tmp/hid.txt")
-            .await?
-            .parse::<u32>()
-            .unwrap()
-            < 3
-        {
+        if vm1.run_shell_command("wc -l < /tmp/hid.txt").await? == before {
             info!(
                 "HID reports so far: {}",
                 vm1.run_shell_command("cat /tmp/hid.txt").await?
@@ -177,9 +172,6 @@ async fn usb_tablet_migration(ctx: &TestCtx) {
     }
     vnc_client.disconnect().unwrap();
     assert_ne!(retries, 10);
-
-    // kill hidraw0 read
-    // vm1.run_shell_command("pkill od").await?;
 
     // check contents of stdout file
     let output = vm1.run_shell_command("cat /tmp/hid.txt").await?;
