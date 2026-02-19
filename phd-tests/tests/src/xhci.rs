@@ -4,7 +4,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::Duration,
@@ -14,6 +14,7 @@ use phd_testcase::{phd_framework::test_vm::MigrationTimeout, *};
 use propolis_client::instance_spec::{
     PciPath, SpecKey, UsbDevice, UsbDeviceType, XhciController,
 };
+use tracing::info;
 use uuid::Uuid;
 
 #[phd_testcase]
@@ -132,29 +133,14 @@ async fn usb_tablet_migration(ctx: &TestCtx) {
     vm0.launch().await?;
     vm0.wait_to_boot().await?;
 
-    const VM0_HIDRAW_READ: u8 = 0;
-    const VM1_HIDRAW_READ: u8 = 1;
-    const DONE: u8 = 2;
-    let waiting_outer = Arc::new(AtomicU8::new(VM0_HIDRAW_READ));
-    let waiting_0 = waiting_outer.clone();
-    let waiting_1 = waiting_outer.clone();
-
-    let mut vnc_client = vm0.vnc_client()?;
-    std::thread::spawn(move || {
-        // continually generate HID reports until /dev/hidraw0 is opened and read
-        while waiting_0.load(Ordering::Relaxed) == VM0_HIDRAW_READ {
-            std::thread::sleep(Duration::from_secs(1));
-            vnc_client.send_pointer_event(0x01u8, 234, 567).unwrap();
-            vnc_client.send_pointer_event(0x01u8, 234, 568).unwrap();
-        }
-        vnc_client.disconnect().unwrap();
-    });
-
     // bg: keep hidraw0 open so USB endpoint stays active during migration
     vm0.run_shell_command("od -tx1 -w7 /dev/hidraw0 &> /tmp/hid.txt &").await?;
 
+    let mut vnc_client = vm0.vnc_client()?;
     let mut retries = 0;
     while retries < 10 {
+        vnc_client.send_pointer_event(0x01u8, 234, 567).unwrap();
+        vnc_client.send_pointer_event(0x01u8, 234, 568).unwrap();
         if vm0.run_shell_command("wc -l < /tmp/hid.txt").await? == "0" {
             std::thread::sleep(Duration::from_secs(1));
             retries += 1;
@@ -162,47 +148,40 @@ async fn usb_tablet_migration(ctx: &TestCtx) {
             break;
         }
     }
+    vnc_client.disconnect().unwrap();
     assert_ne!(retries, 10);
-
-    waiting_outer.store(VM1_HIDRAW_READ, Ordering::Relaxed);
 
     vm1.migrate_from(&vm0, Uuid::new_v4(), MigrationTimeout::default()).await?;
 
     let mut vnc_client = vm1.vnc_client()?;
-    std::thread::spawn(move || {
-        // send slightly different events to vm1 while hidraw0 is still open
-        // (different mouse button, so we can tell which events were sent
-        // before/after migration in the HID report dump)
-        while waiting_1.load(Ordering::Relaxed) == VM1_HIDRAW_READ {
+    retries = 0;
+    while retries < 10 {
+        vnc_client.send_pointer_event(0x02u8, 234, 567).unwrap();
+        vnc_client.send_pointer_event(0x02u8, 234, 568).unwrap();
+        if vm1
+            .run_shell_command("wc -l < /tmp/hid.txt")
+            .await?
+            .parse::<u32>()
+            .unwrap()
+            < 3
+        {
+            info!(
+                "HID reports so far: {}",
+                vm1.run_shell_command("cat /tmp/hid.txt").await?
+            );
             std::thread::sleep(Duration::from_secs(1));
-            vnc_client.send_pointer_event(0x02u8, 234, 567).unwrap();
-            vnc_client.send_pointer_event(0x02u8, 234, 568).unwrap();
+            retries += 1;
+        } else {
+            break;
         }
-        vnc_client.disconnect().unwrap();
-    });
-
-    // retries = 0;
-    // while retries < 10 {
-    //     if u32::from_str_radix(
-    //         &vm1.run_shell_command("wc -l < /tmp/hid.txt").await?,
-    //         10,
-    //     )
-    //     .unwrap()
-    //         < 3
-    //     {
-    std::thread::sleep(Duration::from_secs(5));
-    //         retries += 1;
-    //     } else {
-    //         break;
-    //     }
-    // }
-    // assert_ne!(retries, 10);
-    waiting_outer.store(DONE, Ordering::Relaxed);
+    }
+    vnc_client.disconnect().unwrap();
+    assert_ne!(retries, 10);
 
     // kill hidraw0 read
-    vm1.run_shell_command("pkill od").await?;
+    // vm1.run_shell_command("pkill od").await?;
 
     // check contents of stdout file
     let output = vm1.run_shell_command("cat /tmp/hid.txt").await?;
-    assert_eq!("", output); // TODO
+    assert_eq!("TODO", output); // TODO
 }
