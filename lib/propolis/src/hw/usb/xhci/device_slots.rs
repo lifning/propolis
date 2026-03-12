@@ -1137,6 +1137,8 @@ impl DeviceSlotTable {
                 ),
             ));
         }
+
+        // zip: port_devs is of fixed size
         for (port_index_raw, (dst, src)) in
             self.port_devs.iter_mut().zip(port_devs).enumerate()
         {
@@ -1162,11 +1164,12 @@ impl DeviceSlotTable {
                 }
             }
         }
-        for (dst, src) in self.slots.iter_mut().zip(slots) {
-            if src.is_none() {
-                *dst = None;
-            } else {
-                let src_slot = src.as_ref().unwrap();
+
+        // zip with separate iterator: incoming payload may have more slots,
+        // self.slots is dynamically sized
+        let mut payload_slots_iter = slots.into_iter();
+        for (dst, src) in self.slots.iter_mut().zip(&mut payload_slots_iter) {
+            if let Some(src_slot) = src {
                 if let Some(dst_slot) = dst {
                     dst_slot.import(src_slot)?;
                 } else {
@@ -1174,6 +1177,17 @@ impl DeviceSlotTable {
                     dst_slot.import(src_slot)?;
                     *dst = Some(dst_slot);
                 }
+            } else {
+                *dst = None;
+            }
+        }
+        for src in payload_slots_iter {
+            if let Some(src_slot) = src {
+                let mut dst_slot = DeviceSlot::new();
+                dst_slot.import(src_slot)?;
+                self.slots.push(Some(dst_slot));
+            } else {
+                self.slots.push(None);
             }
         }
         Ok(())
