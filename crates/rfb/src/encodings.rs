@@ -4,9 +4,27 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-use crate::proto::{Position, Resolution};
+use crate::proto::{PixelFormat, Position, Resolution};
 
 use strum::FromRepr;
+
+mod hextile;
+/// Section 7.7.1
+mod raw;
+mod rre;
+mod trle;
+mod zlib;
+
+pub use raw::{RawEncoding, RawEncodingRef};
+
+pub struct ConnectionContext {
+    pub zlib: flate2::Compress,
+}
+impl Default for ConnectionContext {
+    fn default() -> Self {
+        Self { zlib: flate2::Compress::new(flate2::Compression::fast(), false) }
+    }
+}
 
 #[derive(Debug, FromRepr, Ord, PartialOrd, Eq, PartialEq)]
 #[repr(i32)]
@@ -28,33 +46,23 @@ pub enum EncodingType {
     ContinuousUpdatesPseudo = -313,
 }
 
-pub trait Encoding: Send {
+pub trait Encoding: Send + Sync {
     fn get_type(&self) -> EncodingType;
 
-    /// Transform this encoding from its representation into a byte vector that
-    /// can be passed to the client.
-    fn encode(&self) -> &[u8];
-}
+    /// Return the width and height in pixels of the encoded screen region.
+    fn dimensions(&self) -> (u16, u16);
 
-/// Section 7.7.1
-pub struct RawEncoding {
-    pixels: Vec<u8>,
-}
+    /// Return the pixel format of this encoding's data.
+    fn pixel_format(&self) -> PixelFormat;
 
-impl RawEncoding {
-    pub fn new(pixels: Vec<u8>) -> Self {
-        Self { pixels }
-    }
-}
+    /// Transform this encoding from its representation into a byte sequence that can be passed to the client.
+    fn encode(
+        &self,
+        ctx: &mut ConnectionContext,
+    ) -> Box<dyn Iterator<Item = u8> + '_>;
 
-impl Encoding for RawEncoding {
-    fn get_type(&self) -> EncodingType {
-        EncodingType::Raw
-    }
-
-    fn encode(&self) -> &[u8] {
-        &self.pixels
-    }
+    /// Translates this encoding type from its current pixel format to the given format.
+    fn transform(&self, output: &PixelFormat) -> Box<dyn Encoding>;
 }
 
 #[allow(dead_code)]
@@ -63,7 +71,6 @@ struct RREncoding {
     sub_rectangles: Vec<RRESubrectangle>,
 }
 
-#[allow(dead_code)]
 struct Pixel {
     bytes: Vec<u8>,
 }
