@@ -15,7 +15,7 @@ use tokio_util::bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-use crate::encodings::{Encoding, EncodingType};
+use crate::encodings::{ConnectionContext, Encoding, EncodingType};
 use crate::keysym::KeySym;
 
 #[derive(Debug, Error)]
@@ -201,13 +201,14 @@ impl FramebufferUpdate {
     pub async fn write_to(
         self,
         stream: &mut (impl AsyncWrite + Unpin),
+        ctx: &mut ConnectionContext,
     ) -> Result<()> {
         let header = raw::FramebufferUpdateHeader::new(self.0.len() as u16);
         stream.write_all(header.as_bytes()).await?;
 
         // rectangles
         for r in self.0.into_iter() {
-            r.write_to(stream).await?;
+            r.write_to(stream, ctx).await?;
         }
 
         Ok(())
@@ -247,6 +248,7 @@ impl Rectangle {
     pub async fn write_to(
         self,
         stream: &mut (impl AsyncWrite + Unpin),
+        ctx: &mut ConnectionContext,
     ) -> Result<()> {
         stream.write_u16(self.position.x).await?;
         stream.write_u16(self.position.y).await?;
@@ -254,7 +256,7 @@ impl Rectangle {
         stream.write_u16(self.dimensions.height).await?;
         stream.write_i32(self.data.get_type() as i32).await?;
 
-        let data = self.data.encode();
+        let data = self.data.encode(ctx);
         stream.write_all(data).await?;
 
         Ok(())

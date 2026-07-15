@@ -1,13 +1,7 @@
 use std::iter::{from_fn, once};
-use std::sync::Arc;
-
-use futures::stream::{self, BoxStream};
-use futures::StreamExt;
 
 use crate::encodings::{ConnectionContext, Encoding, EncodingType};
 use crate::proto::PixelFormat;
-
-use super::RawEncodingRef;
 
 pub struct RLEncoding<const PX: usize> {
     tiles: Vec<Vec<TRLETile>>,
@@ -27,19 +21,11 @@ impl Encoding for ZRLEncoding {
         EncodingType::ZRLE
     }
 
-    fn dimensions(&self) -> (u16, u16) {
-        self.0.dimensions()
-    }
-
-    fn pixel_format(&self) -> &PixelFormat {
-        self.0.pixel_format()
-    }
-
     fn encode(
         &self,
         ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_> {
-        let in_buf = self.0.encode(ctx.to_owned()).collect::<Vec<u8>>();
+        let in_buf = self.0.encode(ctx).collect::<Vec<u8>>();
         let mut out_buf = Vec::with_capacity(in_buf.len());
         ctx.zlib
             .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
@@ -52,18 +38,17 @@ impl Encoding for ZRLEncoding {
         )
         // todo!("also disable re-use of palettes in zrle mode")
     }
-
-    fn transform(&self, output: &PixelFormat) -> Box<dyn Encoding> {
-        Box::new(Self(self.0.transform_inner(output)))
-    }
 }
 
-impl<'a> From<&RawEncodingRef<'a>> for ZRLEncoding {
-    fn from(raw: &RawEncodingRef) -> Self {
-        let (width, height) = raw.dimensions();
-        let tiles = from_rawenc_inner(raw, ZRLE_TILE_PX_SIZE, true);
-        let pixfmt = raw.pixel_format().to_owned();
-        Self(RLEncoding { tiles, width, height, pixfmt })
+impl From<&rgb_frame::Frame> for ZRLEncoding {
+    fn from(frame: &rgb_frame::Frame) -> Self {
+        let tiles = from_rawenc_inner(frame, ZRLE_TILE_PX_SIZE, true);
+        Self(RLEncoding {
+            tiles,
+            width: frame.spec().width.get() as u16,
+            height: frame.spec().height.get() as u16,
+            pixfmt: PixelFormat::from(frame.spec().fourcc),
+        })
     }
 }
 
@@ -130,27 +115,30 @@ impl<const PX: usize> RLEncoding<PX> {
     }
 }
 
-impl<'a, const PX: usize> From<&RawEncodingRef<'a>> for RLEncoding<PX> {
-    fn from(raw: &RawEncodingRef) -> Self {
-        let (width, height) = raw.dimensions();
-        let tiles = from_rawenc_inner(raw, Self::TILE_PIXEL_SIZE, true);
-        let pixfmt = raw.pixel_format().to_owned();
-        Self { tiles, width, height, pixfmt }
+impl<const PX: usize> From<&rgb_frame::Frame> for RLEncoding<PX> {
+    fn from(frame: &rgb_frame::Frame) -> Self {
+        let tiles = from_rawenc_inner(frame, Self::TILE_PIXEL_SIZE, true);
+        Self {
+            tiles,
+            width: frame.spec().width.get() as u16,
+            height: frame.spec().height.get() as u16,
+            pixfmt: PixelFormat::from(frame.spec().fourcc),
+        }
     }
 }
 
 fn from_rawenc_inner(
-    raw: &RawEncodingRef<'_>,
+    frame: &rgb_frame::Frame,
     tile_px_size: usize,
     allow_pal_reuse: bool,
 ) -> Vec<Vec<TRLETile>> {
-    let (w16, h16) = raw.dimensions();
-    let (width, height) = (w16 as usize, h16 as usize);
+    let width = frame.spec().width.get();
+    let height = frame.spec().height.get();
+    let pixfmt = PixelFormat::from(frame.spec().fourcc);
 
-    let pixfmt = raw.pixel_format();
     let bytes_per_px = (pixfmt.bits_per_pixel as usize + 7) / 8;
 
-    let buf = raw.raw_buffer();
+    let buf = frame.bytes();
 
     // if rect isn't a multiple of TILE_SIZE, we still encode the
     // last partial tile. but if it *is* a multiple of TILE_SIZE,
@@ -164,7 +152,7 @@ fn from_rawenc_inner(
             let y_end = height.min((tile_row_idx + 1) * tile_px_size);
             (0..=last_tile_col)
                 .into_iter()
-                .map(move |tile_col_idx| {
+                .map(|tile_col_idx| {
                     let x_start = tile_col_idx * tile_px_size;
                     let x_end = width.min((tile_col_idx + 1) * tile_px_size);
                     let tile_pixels =
@@ -178,7 +166,7 @@ fn from_rawenc_inner(
                     // TODO: other encodings
                     TRLETile::Raw {
                         pixels: tile_pixels
-                            .map(|px_bytes| CPixel::from_raw(px_bytes, pixfmt))
+                            .map(|px_bytes| CPixel::from_raw(px_bytes, &pixfmt))
                             .collect(),
                     }
                 })
@@ -385,17 +373,5 @@ impl<const PX: usize> Encoding for RLEncoding<PX> {
                 .iter()
                 .flat_map(|row| row.iter().flat_map(|tile| tile.encode())),
         )
-    }
-
-    fn transform(&self, output: &PixelFormat) -> Box<dyn Encoding> {
-        Box::new(self.transform_inner(output))
-    }
-
-    fn dimensions(&self) -> (u16, u16) {
-        (self.width, self.height)
-    }
-
-    fn pixel_format(&self) -> PixelFormat {
-        self.pixfmt.to_owned()
     }
 }

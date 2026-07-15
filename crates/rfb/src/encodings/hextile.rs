@@ -1,9 +1,7 @@
 use crate::{
-    encodings::{Encoding, EncodingType, Pixel},
-    rfb::{ConnectionContext, PixelFormat},
+    encodings::{ConnectionContext, Encoding, EncodingType, Pixel},
+    proto::PixelFormat,
 };
-
-use super::RawEncodingRef;
 
 #[allow(dead_code)]
 struct HextileEncoding {
@@ -13,15 +11,13 @@ struct HextileEncoding {
     pixfmt: PixelFormat,
 }
 
-impl From<&RawEncodingRef<'_>> for HextileEncoding {
-    fn from(raw: &RawEncodingRef) -> Self {
-        let pixfmt = raw.pixel_format().to_owned();
-        let (width, height) = raw.dimensions();
+impl From<&rgb_frame::Frame> for HextileEncoding {
+    fn from(frame: &rgb_frame::Frame) -> Self {
         Self {
             tiles: todo!("create subrects. need dimensions"),
-            width,
-            height,
-            pixfmt,
+            width: frame.spec().width.get() as u16,
+            height: frame.spec().height.get() as u16,
+            pixfmt: PixelFormat::from(frame.spec().fourcc),
         }
     }
 }
@@ -41,23 +37,14 @@ impl Encoding for HextileEncoding {
         EncodingType::Hextile
     }
 
-    fn encode(&self, _ctx: &mut ConnectionContext) -> Box<dyn Iterator<Item = u8> + '_> {
+    fn encode(
+        &self,
+        _ctx: &mut ConnectionContext,
+    ) -> Box<dyn Iterator<Item = u8> + '_> {
         Box::new(self.tiles.iter().flat_map(|tile| {
             let subencoding_mask = todo!();
             [todo!()].into_iter()
         }))
-    }
-
-    fn transform(&self, output: &PixelFormat) -> Box<dyn Encoding> {
-        todo!()
-    }
-
-    fn dimensions(&self) -> (u16, u16) {
-        (self.width, self.height)
-    }
-
-    fn pixel_format(&self) -> &PixelFormat {
-        &self.pixfmt
     }
 }
 

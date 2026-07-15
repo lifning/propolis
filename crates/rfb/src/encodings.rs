@@ -4,7 +4,7 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-use crate::proto::{PixelFormat, Position, Resolution};
+use crate::proto::{Position, Resolution};
 
 use strum::FromRepr;
 
@@ -15,7 +15,7 @@ mod rre;
 mod trle;
 mod zlib;
 
-pub use raw::{RawEncoding, RawEncodingRef};
+pub use raw::RawEncoding;
 
 pub struct ConnectionContext {
     pub zlib: flate2::Compress,
@@ -49,20 +49,11 @@ pub enum EncodingType {
 pub trait Encoding: Send + Sync {
     fn get_type(&self) -> EncodingType;
 
-    /// Return the width and height in pixels of the encoded screen region.
-    fn dimensions(&self) -> (u16, u16);
-
-    /// Return the pixel format of this encoding's data.
-    fn pixel_format(&self) -> PixelFormat;
-
     /// Transform this encoding from its representation into a byte sequence that can be passed to the client.
     fn encode(
         &self,
         ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_>;
-
-    /// Translates this encoding type from its current pixel format to the given format.
-    fn transform(&self, output: &PixelFormat) -> Box<dyn Encoding>;
 }
 
 #[allow(dead_code)]
