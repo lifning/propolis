@@ -4,7 +4,7 @@ use crate::encodings::{ConnectionContext, Encoding, EncodingType};
 use crate::proto::PixelFormat;
 
 pub struct RLEncoding<const PX: usize> {
-    tiles: Vec<Vec<TRLETile>>,
+    tiles: Vec<TRLETile<PX>>,
     width: u16,
     height: u16,
     pixfmt: PixelFormat,
@@ -42,7 +42,7 @@ impl Encoding for ZRLEncoding {
 
 impl From<&rgb_frame::Frame> for ZRLEncoding {
     fn from(frame: &rgb_frame::Frame) -> Self {
-        let tiles = from_rawenc_inner(frame, ZRLE_TILE_PX_SIZE, true);
+        let tiles = from_frame_inner::<ZRLE_TILE_PX_SIZE>(frame);
         Self(RLEncoding {
             tiles,
             width: frame.spec().width.get() as u16,
@@ -54,70 +54,11 @@ impl From<&rgb_frame::Frame> for ZRLEncoding {
 
 impl<const PX: usize> RLEncoding<PX> {
     const TILE_PIXEL_SIZE: usize = PX;
-
-    fn transform_inner(&self, output: &PixelFormat) -> RLEncoding<PX> {
-        let input = &self.pixfmt;
-        let tiles = self
-            .tiles
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|tile| match tile {
-                        TRLETile::Raw { pixels } => TRLETile::Raw {
-                            pixels: pixels
-                                .iter()
-                                .map(|cp| cp.transform(input, output))
-                                .collect(),
-                        },
-                        TRLETile::SolidColor { color } => {
-                            TRLETile::SolidColor {
-                                color: color.transform(input, output),
-                            }
-                        }
-                        TRLETile::PackedPalette { palette, packed_pixels } => {
-                            TRLETile::PackedPalette {
-                                palette: palette
-                                    .iter()
-                                    .map(|cp| cp.transform(input, output))
-                                    .collect(),
-                                packed_pixels: packed_pixels.clone(),
-                            }
-                        }
-                        TRLETile::PlainRLE { runs } => TRLETile::PlainRLE {
-                            runs: runs
-                                .iter()
-                                .map(|(cp, len)| {
-                                    (cp.transform(input, output), *len)
-                                })
-                                .collect(),
-                        },
-                        TRLETile::PaletteRLE { palette, runs } => {
-                            TRLETile::PaletteRLE {
-                                palette: palette
-                                    .iter()
-                                    .map(|cp| cp.transform(input, output))
-                                    .collect(),
-                                runs: runs.clone(),
-                            }
-                        }
-                        TRLETile::PackedPaletteReused { .. }
-                        | TRLETile::PaletteRLEReused { .. } => tile.clone(),
-                    })
-                    .collect()
-            })
-            .collect();
-        Self {
-            tiles,
-            width: self.width,
-            height: self.height,
-            pixfmt: output.to_owned(),
-        }
-    }
 }
 
 impl<const PX: usize> From<&rgb_frame::Frame> for RLEncoding<PX> {
     fn from(frame: &rgb_frame::Frame) -> Self {
-        let tiles = from_rawenc_inner(frame, Self::TILE_PIXEL_SIZE, true);
+        let tiles = from_frame_inner::<PX>(frame);
         Self {
             tiles,
             width: frame.spec().width.get() as u16,
@@ -127,11 +68,12 @@ impl<const PX: usize> From<&rgb_frame::Frame> for RLEncoding<PX> {
     }
 }
 
-fn from_rawenc_inner(
+fn from_frame_inner<const PX: usize>(
     frame: &rgb_frame::Frame,
-    tile_px_size: usize,
-    allow_pal_reuse: bool,
-) -> Vec<Vec<TRLETile>> {
+) -> Vec<TRLETile<PX>> {
+    // palette reuse not allowed by ZRLE
+    let allow_pal_reuse: bool = PX != ZRLE_TILE_PX_SIZE;
+
     let width = frame.spec().width.get();
     let height = frame.spec().height.get();
     let pixfmt = PixelFormat::from(frame.spec().fourcc);
@@ -143,34 +85,35 @@ fn from_rawenc_inner(
     // if rect isn't a multiple of TILE_SIZE, we still encode the
     // last partial tile. but if it *is* a multiple of TILE_SIZE,
     // we don't -- hence inclusive range, but minus one before divide
-    let last_tile_row = (height - 1) / tile_px_size;
-    let last_tile_col = (width - 1) / tile_px_size;
+    let last_tile_row = (height - 1) / PX;
+    let last_tile_col = (width - 1) / PX;
     (0..=last_tile_row)
         .into_iter()
-        .map(|tile_row_idx| {
-            let y_start = tile_row_idx * tile_px_size;
-            let y_end = height.min((tile_row_idx + 1) * tile_px_size);
-            (0..=last_tile_col)
-                .into_iter()
-                .map(|tile_col_idx| {
-                    let x_start = tile_col_idx * tile_px_size;
-                    let x_end = width.min((tile_col_idx + 1) * tile_px_size);
-                    let tile_pixels =
-                        (y_start..y_end).into_iter().flat_map(move |y| {
-                            (x_start..x_end).into_iter().map(move |x| {
-                                let px_start = (y * width + x) * bytes_per_px;
-                                let px_end = (y * width + x + 1) * bytes_per_px;
-                                &buf[px_start..px_end]
-                            })
-                        });
-                    // TODO: other encodings
-                    TRLETile::Raw {
-                        pixels: tile_pixels
-                            .map(|px_bytes| CPixel::from_raw(px_bytes, &pixfmt))
-                            .collect(),
+        .flat_map(move |tile_row_idx| {
+            let y_start = tile_row_idx * PX;
+            let y_end = height.min((tile_row_idx + 1) * PX);
+            (0..=last_tile_col).into_iter().map(move |tile_col_idx| {
+                let x_start = tile_col_idx * PX;
+                let x_end = width.min((tile_col_idx + 1) * PX);
+                let mut tile_pixels: [[CPixel; PX]; PX] =
+                    unsafe { core::mem::zeroed() };
+                for y in y_start..y_end {
+                    let px_row = y - y_start;
+                    for x in x_start..x_end {
+                        let px_col = x - x_start;
+                        let px_start = (y * width + x) * bytes_per_px;
+                        let px_end = (y * width + x + 1) * bytes_per_px;
+                        tile_pixels[px_row][px_col] =
+                            CPixel::from_raw(&buf[px_start..px_end], &pixfmt);
                     }
-                })
-                .collect()
+                }
+                TRLETile::Raw {
+                    pixels: tile_pixels,
+                    width: (x_end - x_start) as u16,
+                    height: (y_end - y_start) as u16,
+                }
+                // TODO: other encodings
+            })
         })
         .collect()
 }
@@ -211,9 +154,9 @@ impl PackedIndeces {
 
 // may be able to reuse this for ZRLE? (64px instead of 16px)
 #[derive(Clone)]
-enum TRLETile {
+enum TRLETile<const PX: usize> {
     /// 0
-    Raw { pixels: Vec<CPixel> },
+    Raw { pixels: [[CPixel; PX]; PX], width: u16, height: u16 },
     /// 1
     SolidColor { color: CPixel },
     /// 2-16
@@ -253,32 +196,33 @@ fn pal_rle(
     }
 }
 
-impl TRLETile {
+impl<const PX: usize> TRLETile<PX> {
     /// Subencoding of the tile according to RFB 6143 7.7.5.
     /// To the extent possible, this function is a translation of that
     /// section of the RFB RFC from English into chained iterators.
     fn encode(&self) -> Box<dyn Iterator<Item = u8> + Send + '_> {
         match self {
-            TRLETile::Raw { pixels } => Box::new(
-                once(0u8)
-                    .chain(pixels.iter().flat_map(|c| c.bytes.iter().copied())),
+            TRLETile::Raw { pixels, width, height } => Box::new(
+                once(0u8).chain(pixels[..*height as usize].iter().flat_map(
+                    |row| row[..*width as usize].iter().flat_map(|c| c.bytes()),
+                )),
             ),
             TRLETile::SolidColor { color } => {
-                Box::new(once(1u8).chain(color.bytes.iter().copied()))
+                Box::new(once(1u8).chain(color.bytes()))
             }
             TRLETile::PackedPalette { palette, packed_pixels } => Box::new(
                 once(palette.len() as u8)
-                    .chain(palette.iter().flat_map(|c| c.bytes.iter().copied()))
+                    .chain(palette.iter().flat_map(|c| c.bytes()))
                     .chain(packed_pixels.iter().map(|p| p.0)),
             ),
             TRLETile::PackedPaletteReused { packed_pixels } => {
                 Box::new(once(127u8).chain(packed_pixels.iter().map(|p| p.0)))
             }
-            TRLETile::PlainRLE { runs } => Box::new(once(128).chain(
-                runs.iter().flat_map(|(color, length)| {
-                    color.bytes.iter().copied().chain(rle(*length))
-                }),
-            )),
+            TRLETile::PlainRLE { runs } => {
+                Box::new(once(128).chain(runs.iter().flat_map(
+                    |(color, length)| color.bytes().chain(rle(*length)),
+                )))
+            }
             TRLETile::PaletteRLEReused { runs } => {
                 Box::new(once(129).chain(runs.iter().flat_map(pal_rle)))
             }
@@ -288,17 +232,28 @@ impl TRLETile {
                         .try_into()
                         .expect("TRLE tile palette too large!"),
                 )
-                .chain(palette.iter().flat_map(|c| c.bytes.iter().copied()))
+                .chain(palette.iter().flat_map(|c| c.bytes()))
                 .chain(runs.iter().flat_map(pal_rle)),
             ),
         }
     }
 }
 
+/// RFC 6143 7.7.5:
+/// > TRLE makes use of a new type CPIXEL (compressed pixel).  This is the
+/// > same as a PIXEL for the agreed pixel format, except as a special
+/// > case, it uses a more compact format if true-color-flag is non-zero,
+/// > bits-per-pixel is 32, depth is 24 or less, and all of the bits making
+/// > up the red, green, and blue intensities fit in either the least
+/// > significant 3 bytes or the most significant 3 bytes.  If all of these
+/// > are the case, a CPIXEL is only 3 bytes long, and contains the least
+/// > significant or the most significant 3 bytes as appropriate.
+/// > bytesPerCPixel is the number of bytes in a CPIXEL.
 // TODO: [u8; 4] so we can derive Copy and go fast
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct CPixel {
-    bytes: Vec<u8>,
+    buf: [u8; 4],
+    len: u8,
 }
 
 enum CPixelTransformType {
@@ -308,6 +263,9 @@ enum CPixelTransformType {
 }
 
 impl CPixel {
+    fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.buf[..self.len as usize].iter().copied()
+    }
     fn which_padding(pixfmt: &PixelFormat) -> CPixelTransformType {
         if pixfmt.depth <= 24 && pixfmt.bits_per_pixel == 32 {
             let mask =
@@ -329,33 +287,19 @@ impl CPixel {
         }
     }
 
-    fn transform(&self, input: &PixelFormat, output: &PixelFormat) -> Self {
-        let in_bytes = match Self::which_padding(input) {
-            CPixelTransformType::AsIs => &self.bytes,
-            CPixelTransformType::AppendZero => &self.bytes[0..=2],
-            CPixelTransformType::PrependZero => &self.bytes[1..=3],
-        };
-        let mut out_bytes = pixel_formats::transform(&in_bytes, input, output);
-        match Self::which_padding(output) {
-            CPixelTransformType::AsIs => (),
-            CPixelTransformType::AppendZero => out_bytes.push(0u8),
-            CPixelTransformType::PrependZero => out_bytes.insert(0, 0u8),
-        }
-        Self { bytes: out_bytes }
-    }
-
     fn from_raw<'a>(raw_bytes: &[u8], pixfmt: &PixelFormat) -> Self {
-        let mut bytes = raw_bytes.to_vec();
+        let mut start = 0;
+        let mut end = pixfmt.bits_per_pixel.div_ceil(8);
         match Self::which_padding(pixfmt) {
             CPixelTransformType::AsIs => (),
-            CPixelTransformType::AppendZero => {
-                bytes.pop();
-            }
-            CPixelTransformType::PrependZero => {
-                bytes.remove(0);
-            }
+            CPixelTransformType::AppendZero => end -= 1,
+            CPixelTransformType::PrependZero => start += 1,
         }
-        Self { bytes }
+        let mut buf = [0u8; 4];
+        for (inb, outb) in raw_bytes.iter().zip(buf.iter_mut()) {
+            *outb = *inb;
+        }
+        Self { buf, len: (end - start) as u8 }
     }
 }
 
@@ -368,10 +312,6 @@ impl<const PX: usize> Encoding for RLEncoding<PX> {
         &self,
         _ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(
-            self.tiles
-                .iter()
-                .flat_map(|row| row.iter().flat_map(|tile| tile.encode())),
-        )
+        Box::new(self.tiles.iter().flat_map(|tile| tile.encode()))
     }
 }

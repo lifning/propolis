@@ -264,7 +264,7 @@ impl Rectangle {
 }
 
 // Section 7.4
-#[derive(Debug, Clone, PartialEq, Immutable)]
+#[derive(Debug, Copy, Clone, PartialEq, Immutable)]
 pub struct PixelFormat {
     pub bits_per_pixel: u8, // TODO: must be 8, 16, or 32
     pub depth: u8,          // TODO: must be < bits_per_pixel
