@@ -85,6 +85,8 @@ async fn run_server(
         }
     }
 
+    let mut conn_ctx = ConnectionContext::default();
+
     let mut output_pf = input_pf.clone();
     let mut decoder = FramedRead::new(sock, ClientMessageDecoder::default());
     loop {
@@ -109,7 +111,7 @@ async fn run_server(
             ClientMessage::FramebufferUpdateRequest(_req) => {
                 let fbu = be.generate(WIDTH, HEIGHT, &output_pf).await;
 
-                if let Err(e) = fbu.write_to(sock).await {
+                if let Err(e) = fbu.write_to(sock, &mut conn_ctx).await {
                     slog::info!(log, "Error sending FrambufferUpdate: {:?}", e);
                     return;
                 }

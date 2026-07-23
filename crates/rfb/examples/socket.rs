@@ -13,9 +13,12 @@ use slog::info;
 use tokio::net::TcpListener;
 use tokio_util::codec::FramedRead;
 
-use rfb::proto::{
-    ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution, SecurityType,
-    SecurityTypes,
+use rfb::{
+    encodings::ConnectionContext,
+    proto::{
+        ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution,
+        SecurityType, SecurityTypes,
+    },
 };
 use rgb_frame::FourCC;
 
@@ -79,6 +82,8 @@ async fn main() -> Result<()> {
         info!(log, "New connection from {:?}", addr);
         let log_child = log.new(slog::o!("sock" => addr));
 
+        let mut conn_ctx = ConnectionContext::default();
+
         let init_res = rfb::server::initialize(
             &mut sock,
             rfb::server::InitParams {
@@ -138,7 +143,8 @@ async fn main() -> Result<()> {
                         let fbu =
                             be_clone.generate(WIDTH, HEIGHT, &output_pf).await;
 
-                        if let Err(e) = fbu.write_to(sock).await {
+                        if let Err(e) = fbu.write_to(sock, &mut conn_ctx).await
+                        {
                             slog::info!(
                                 log_child,
                                 "Error sending FrambufferUpdate: {:?}",

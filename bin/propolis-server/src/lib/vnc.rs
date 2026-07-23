@@ -13,7 +13,7 @@ use propolis::hw::qemu::ramfb::{FrameSnap, RamFb};
 use propolis::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
 
 use futures::StreamExt;
-use rfb::encodings::{EncodingType, RawEncoding};
+use rfb::encodings::{ConnectionContext, EncodingType, RawEncoding};
 use rfb::proto::{
     ClientMessage, FramebufferUpdate, FramebufferUpdateRequest, Position,
     ProtoVersion, ProtocolError, Rectangle, Resolution, SecurityType,
@@ -59,6 +59,7 @@ struct ClientState {
     fbu_req: Option<FramebufferUpdateRequest>,
     encodings: BTreeSet<EncodingType>,
     output_fourcc: FourCC,
+    connection_context: ConnectionContext,
 }
 impl Default for ClientState {
     fn default() -> Self {
@@ -67,6 +68,7 @@ impl Default for ClientState {
             fbu_req: None,
             encodings: BTreeSet::new(),
             output_fourcc: UNINIT_FOURCC,
+            connection_context: Default::default(),
         }
     }
 }
@@ -318,11 +320,11 @@ impl VncServer {
                     width: snap.frame.spec().width.get() as u16,
                     height: snap.frame.spec().height.get() as u16,
                 },
-                data: Box::new(RawEncoding::new(snap.frame.bytes().to_vec())),
+                data: Box::new(RawEncoding::new(&snap.frame)),
             };
             FramebufferUpdate(vec![r])
         };
-        fbu.write_to(conn).await?;
+        fbu.write_to(conn, &mut cstate.connection_context).await?;
         conn.flush().await?;
 
         // With the FBU sent, the existing request is fulfilled

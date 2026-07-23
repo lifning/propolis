@@ -7,6 +7,8 @@
 use std::mem::size_of;
 
 use bitflags::bitflags;
+use futures::StreamExt;
+use itertools::Itertools;
 use rgb_frame::FourCC;
 use strum::FromRepr;
 use thiserror::Error;
@@ -195,9 +197,9 @@ impl ServerInit {
     }
 }
 
-pub struct FramebufferUpdate(pub Vec<Rectangle>);
+pub struct FramebufferUpdate<'a>(pub Vec<Rectangle<'a>>);
 
-impl FramebufferUpdate {
+impl<'a> FramebufferUpdate<'a> {
     pub async fn write_to(
         self,
         stream: &mut (impl AsyncWrite + Unpin),
@@ -206,9 +208,8 @@ impl FramebufferUpdate {
         let header = raw::FramebufferUpdateHeader::new(self.0.len() as u16);
         stream.write_all(header.as_bytes()).await?;
 
-        // rectangles
-        for r in self.0.into_iter() {
-            r.write_to(stream, ctx).await?;
+        for rect in self.0.into_iter() {
+            stream.write_all(&rect.encode(ctx).collect_vec()).await?;
         }
 
         Ok(())
@@ -238,28 +239,26 @@ impl Resolution {
     }
 }
 
-pub struct Rectangle {
+pub struct Rectangle<'a> {
     pub position: Position,
     pub dimensions: Resolution,
-    pub data: Box<dyn Encoding>,
+    pub data: Box<dyn Encoding + 'a>,
 }
 
-impl Rectangle {
-    pub async fn write_to(
-        self,
-        stream: &mut (impl AsyncWrite + Unpin),
+impl<'a> Rectangle<'a> {
+    pub fn encode(
+        &self,
         ctx: &mut ConnectionContext,
-    ) -> Result<()> {
-        stream.write_u16(self.position.x).await?;
-        stream.write_u16(self.position.y).await?;
-        stream.write_u16(self.dimensions.width).await?;
-        stream.write_u16(self.dimensions.height).await?;
-        stream.write_i32(self.data.get_type() as i32).await?;
-
-        let data = self.data.encode(ctx);
-        stream.write_all(data).await?;
-
-        Ok(())
+    ) -> impl Iterator<Item = u8> + '_ {
+        self.position
+            .x
+            .to_be_bytes()
+            .into_iter()
+            .chain(self.position.y.to_be_bytes())
+            .chain(self.dimensions.width.to_be_bytes())
+            .chain(self.dimensions.height.to_be_bytes())
+            .chain((self.data.get_type() as i32).to_be_bytes())
+            .chain(self.data.encode(ctx))
     }
 }
 
@@ -280,6 +279,17 @@ impl PixelFormat {
         let raw: raw::PixelFormat = self.into();
         stream.write_all(raw.as_bytes()).await?;
         Ok(())
+    }
+
+    pub fn value_mask(&self) -> Option<u32> {
+        match self.color_spec {
+            ColorSpecification::ColorFormat(cf) => Some(
+                ((cf.red_max as u32) << cf.red_shift)
+                    | ((cf.green_max as u32) << cf.green_shift)
+                    | ((cf.blue_max as u32) << cf.blue_shift),
+            ),
+            // Indexed => None
+        }
     }
 }
 impl TryFrom<raw::PixelFormat> for PixelFormat {
@@ -390,13 +400,13 @@ impl TryInto<FourCC> for &PixelFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Immutable)]
+#[derive(Debug, Copy, Clone, PartialEq, Immutable)]
 pub enum ColorSpecification {
     ColorFormat(ColorFormat),
     // Not covered: colormap support
 }
 
-#[derive(Debug, Clone, PartialEq, Immutable)]
+#[derive(Debug, Copy, Clone, PartialEq, Immutable)]
 pub struct ColorFormat {
     // TODO: maxes must be 2^N - 1 for N bits per color
     pub red_max: u16,

@@ -7606,6 +7606,7 @@ dependencies = [
  "flate2",
  "futures",
  "image",
+ "itertools 0.13.0",
  "rgb_frame",
  "slog",
  "slog-envlogger",

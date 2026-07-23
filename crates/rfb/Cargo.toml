@@ -31,6 +31,7 @@ ascii = { version = "1.1", default-features = false }
 bitflags.workspace = true
 flate2.workspace = true
 futures.workspace = true
+itertools.workspace = true
 thiserror.workspace = true
 rgb_frame.workspace = true
 strum = { workspace = true, features = ["derive"] }
