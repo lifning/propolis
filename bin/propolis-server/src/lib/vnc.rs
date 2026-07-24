@@ -60,6 +60,7 @@ struct ClientState {
     encodings: BTreeSet<EncodingType>,
     output_fourcc: FourCC,
     connection_context: ConnectionContext,
+    serialize_buffer: Vec<u8>,
 }
 impl Default for ClientState {
     fn default() -> Self {
@@ -68,7 +69,8 @@ impl Default for ClientState {
             fbu_req: None,
             encodings: BTreeSet::new(),
             output_fourcc: UNINIT_FOURCC,
-            connection_context: Default::default(),
+            connection_context: ConnectionContext::default(),
+            serialize_buffer: Vec::new(),
         }
     }
 }
@@ -324,7 +326,12 @@ impl VncServer {
             };
             FramebufferUpdate(vec![r])
         };
-        fbu.write_to(conn, &mut cstate.connection_context).await?;
+        fbu.write_to(
+            conn,
+            &mut cstate.connection_context,
+            &mut cstate.serialize_buffer,
+        )
+        .await?;
         conn.flush().await?;
 
         // With the FBU sent, the existing request is fulfilled

@@ -4,6 +4,8 @@ use crate::encodings::{ConnectionContext, Encoding, EncodingType};
 use crate::proto::PixelFormat;
 
 pub struct RLEncoding<const PX: usize> {
+    // TODO: frame: &'a rgb_frame::Frame instead of storing tiles as Vec,
+    // just encode at .encode() time.
     tiles: Vec<TRLETile<PX>>,
     width: u16,
     height: u16,
@@ -42,7 +44,7 @@ impl Encoding for ZRLEncoding {
 
 impl From<&rgb_frame::Frame> for ZRLEncoding {
     fn from(frame: &rgb_frame::Frame) -> Self {
-        let tiles = from_frame_inner::<ZRLE_TILE_PX_SIZE>(frame);
+        let tiles = from_frame_inner::<ZRLE_TILE_PX_SIZE>(frame).collect();
         Self(RLEncoding {
             tiles,
             width: frame.spec().width.get() as u16,
@@ -52,13 +54,9 @@ impl From<&rgb_frame::Frame> for ZRLEncoding {
     }
 }
 
-impl<const PX: usize> RLEncoding<PX> {
-    const TILE_PIXEL_SIZE: usize = PX;
-}
-
 impl<const PX: usize> From<&rgb_frame::Frame> for RLEncoding<PX> {
     fn from(frame: &rgb_frame::Frame) -> Self {
-        let tiles = from_frame_inner::<PX>(frame);
+        let tiles = from_frame_inner::<PX>(frame).collect();
         Self {
             tiles,
             width: frame.spec().width.get() as u16,
@@ -70,7 +68,7 @@ impl<const PX: usize> From<&rgb_frame::Frame> for RLEncoding<PX> {
 
 fn from_frame_inner<const PX: usize>(
     frame: &rgb_frame::Frame,
-) -> Vec<TRLETile<PX>> {
+) -> impl Iterator<Item = TRLETile<PX>> + '_ {
     // palette reuse not allowed by ZRLE
     let allow_pal_reuse: bool = PX != ZRLE_TILE_PX_SIZE;
 
@@ -78,44 +76,38 @@ fn from_frame_inner<const PX: usize>(
     let height = frame.spec().height.get();
     let pixfmt = PixelFormat::from(frame.spec().fourcc);
 
-    let bytes_per_px = (pixfmt.bits_per_pixel as usize + 7) / 8;
-
-    let buf = frame.bytes();
+    // let bytes_per_px = (pixfmt.bits_per_pixel as usize + 7) / 8;
 
     // if rect isn't a multiple of TILE_SIZE, we still encode the
     // last partial tile. but if it *is* a multiple of TILE_SIZE,
     // we don't -- hence inclusive range, but minus one before divide
     let last_tile_row = (height - 1) / PX;
     let last_tile_col = (width - 1) / PX;
-    (0..=last_tile_row)
-        .into_iter()
-        .flat_map(move |tile_row_idx| {
-            let y_start = tile_row_idx * PX;
-            let y_end = height.min((tile_row_idx + 1) * PX);
-            (0..=last_tile_col).into_iter().map(move |tile_col_idx| {
-                let x_start = tile_col_idx * PX;
-                let x_end = width.min((tile_col_idx + 1) * PX);
-                let mut tile_pixels: [[CPixel; PX]; PX] =
-                    unsafe { core::mem::zeroed() };
-                for y in y_start..y_end {
-                    let px_row = y - y_start;
-                    for x in x_start..x_end {
-                        let px_col = x - x_start;
-                        let px_start = (y * width + x) * bytes_per_px;
-                        let px_end = (y * width + x + 1) * bytes_per_px;
-                        tile_pixels[px_row][px_col] =
-                            CPixel::from_raw(&buf[px_start..px_end], &pixfmt);
-                    }
+    (0..=last_tile_row).into_iter().flat_map(move |tile_row_idx| {
+        let y_start = tile_row_idx * PX;
+        let y_end = height.min((tile_row_idx + 1) * PX);
+        (0..=last_tile_col).into_iter().map(move |tile_col_idx| {
+            let x_start = tile_col_idx * PX;
+            let x_end = width.min((tile_col_idx + 1) * PX);
+            let mut tile_pixels: [[CPixel; PX]; PX] =
+                unsafe { core::mem::zeroed() };
+            for (px_row, row) in frame
+                .pixels_of_region(x_start, y_start, x_end, y_end)
+                .enumerate()
+            {
+                for (px_col, pixel) in row.enumerate() {
+                    tile_pixels[px_row][px_col] =
+                        CPixel::from_raw(pixel, &pixfmt);
                 }
-                TRLETile::Raw {
-                    pixels: tile_pixels,
-                    width: (x_end - x_start) as u16,
-                    height: (y_end - y_start) as u16,
-                }
-                // TODO: other encodings
-            })
+            }
+            TRLETile::Raw {
+                pixels: tile_pixels,
+                width: (x_end - x_start) as u16,
+                height: (y_end - y_start) as u16,
+            }
+            // TODO: other encodings
         })
-        .collect()
+    })
 }
 
 #[repr(transparent)]
@@ -249,7 +241,6 @@ impl<const PX: usize> TRLETile<PX> {
 /// > are the case, a CPIXEL is only 3 bytes long, and contains the least
 /// > significant or the most significant 3 bytes as appropriate.
 /// > bytesPerCPixel is the number of bytes in a CPIXEL.
-// TODO: [u8; 4] so we can derive Copy and go fast
 #[derive(Copy, Clone)]
 struct CPixel {
     buf: [u8; 4],

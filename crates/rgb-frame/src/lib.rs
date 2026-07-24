@@ -106,6 +106,34 @@ impl Frame {
         &mut self.data
     }
 
+    pub fn pixels(&self) -> impl Iterator<Item = &[u8]> {
+        self.pixels_of_region(
+            0,
+            0,
+            self.spec.width.get(),
+            self.spec.height.get(),
+        )
+        .flatten()
+    }
+
+    pub fn pixels_of_region(
+        &self,
+        x_start: usize,
+        y_start: usize,
+        x_end: usize,
+        y_end: usize,
+    ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
+        let bytes_per_px = self.spec.fourcc.bytes_per_pixel().get();
+        assert!(x_end * bytes_per_px < self.spec.stride.get());
+        let row_length = (x_end - x_start) * bytes_per_px;
+        let col_ofs = x_start * bytes_per_px;
+        (y_start..y_end).into_iter().map(move |y| {
+            let row_start = y * self.spec.stride.get() + col_ofs;
+            let row_end = row_start + row_length;
+            self.bytes()[row_start..row_end].chunks_exact(bytes_per_px)
+        })
+    }
+
     /// Convert between recognized 4-byte pixel formats
     pub fn convert(&mut self, target: FourCC) {
         let source = self.spec.fourcc;

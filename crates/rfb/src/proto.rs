@@ -204,12 +204,16 @@ impl<'a> FramebufferUpdate<'a> {
         self,
         stream: &mut (impl AsyncWrite + Unpin),
         ctx: &mut ConnectionContext,
+        // reused to avoid re-allocs
+        serialize_buffer: &mut Vec<u8>,
     ) -> Result<()> {
         let header = raw::FramebufferUpdateHeader::new(self.0.len() as u16);
         stream.write_all(header.as_bytes()).await?;
 
         for rect in self.0.into_iter() {
-            stream.write_all(&rect.encode(ctx).collect_vec()).await?;
+            serialize_buffer.clear();
+            serialize_buffer.extend(rect.encode(ctx));
+            stream.write_all(&serialize_buffer).await?;
         }
 
         Ok(())

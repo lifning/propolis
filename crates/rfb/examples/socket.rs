@@ -82,8 +82,6 @@ async fn main() -> Result<()> {
         info!(log, "New connection from {:?}", addr);
         let log_child = log.new(slog::o!("sock" => addr));
 
-        let mut conn_ctx = ConnectionContext::default();
-
         let init_res = rfb::server::initialize(
             &mut sock,
             rfb::server::InitParams {
@@ -116,6 +114,10 @@ async fn main() -> Result<()> {
             let mut output_pf = input_pf.clone();
             let mut decoder =
                 FramedRead::new(sock, ClientMessageDecoder::default());
+
+            let mut conn_ctx = ConnectionContext::default();
+            let mut serbuf = vec![];
+
             loop {
                 let msg = match decoder.next().await {
                     Some(Ok(m)) => m,
@@ -143,7 +145,8 @@ async fn main() -> Result<()> {
                         let fbu =
                             be_clone.generate(WIDTH, HEIGHT, &output_pf).await;
 
-                        if let Err(e) = fbu.write_to(sock, &mut conn_ctx).await
+                        if let Err(e) =
+                            fbu.write_to(sock, &mut conn_ctx, &mut serbuf).await
                         {
                             slog::info!(
                                 log_child,

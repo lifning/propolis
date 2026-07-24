@@ -13,10 +13,6 @@ impl<'a> RawEncoding<'a> {
     pub fn new(frame: &'a rgb_frame::Frame) -> Self {
         Self { frame }
     }
-
-    pub(crate) fn raw_buffer(&self) -> &[u8] {
-        self.frame.bytes()
-    }
 }
 
 impl<'a> Encoding for RawEncoding<'a> {
@@ -28,6 +24,6 @@ impl<'a> Encoding for RawEncoding<'a> {
         &self,
         _ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(self.raw_buffer().iter().copied())
+        Box::new(self.frame.pixels().flatten().copied())
     }
 }
