@@ -6,6 +6,7 @@
 
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
+use std::ops::Range;
 
 #[derive(Clone, Copy)]
 pub struct Spec {
@@ -108,25 +109,23 @@ impl Frame {
 
     pub fn pixels(&self) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         self.pixels_of_region(
-            0,
-            0,
-            self.spec.width.get(),
-            self.spec.height.get(),
+            &(0..self.spec.width.get()),
+            &(0..self.spec.height.get()),
         )
     }
 
     pub fn pixels_of_region(
         &self,
-        x_start: usize,
-        y_start: usize,
-        x_end: usize,
-        y_end: usize,
+        x_range: &Range<usize>,
+        y_range: &Range<usize>,
     ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         let bytes_per_px = self.spec.fourcc.bytes_per_pixel().get();
+        let x_start = x_range.start;
+        let x_end = x_range.end;
         assert!(x_end * bytes_per_px < self.spec.stride.get());
         let row_length = (x_end - x_start) * bytes_per_px;
         let col_ofs = x_start * bytes_per_px;
-        (y_start..y_end).into_iter().map(move |y| {
+        y_range.clone().map(move |y| {
             let row_start = y * self.spec.stride.get() + col_ofs;
             let row_end = row_start + row_length;
             self.bytes()[row_start..row_end].chunks_exact(bytes_per_px)
@@ -135,12 +134,16 @@ impl Frame {
 
     pub fn subframe<'a>(
         &'a self,
-        x_start: usize,
-        y_start: usize,
-        x_end: usize,
-        y_end: usize,
+        x_range: &Range<usize>,
+        y_range: &Range<usize>,
     ) -> SubFrame<'a> {
-        SubFrame { x_start, y_start, x_end, y_end, frame: self }
+        SubFrame {
+            x_start: x_range.start,
+            y_start: y_range.start,
+            x_end: x_range.end,
+            y_end: y_range.end,
+            frame: self,
+        }
     }
 
     /// Convert between recognized 4-byte pixel formats
@@ -203,20 +206,18 @@ impl<'a> SubFrame<'a> {
     // }
     pub fn pixels(&self) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         let Self { x_start, y_start, x_end, y_end, .. } = *self;
-        self.frame.pixels_of_region(x_start, y_start, x_end, y_end)
+        self.frame.pixels_of_region(&(x_start..x_end), &(y_start..y_end))
     }
     pub fn pixels_of_region(
         &self,
-        x_start: usize,
-        y_start: usize,
-        x_end: usize,
-        y_end: usize,
+        x_range: &Range<usize>,
+        y_range: &Range<usize>,
     ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         self.frame.pixels_of_region(
-            self.x_end.min(self.x_start + x_start),
-            self.y_end.min(self.y_start + y_start),
-            self.x_end.min(self.x_start + x_end),
-            self.y_end.min(self.y_start + y_end),
+            &(self.x_end.min(self.x_start + x_range.start)
+                ..self.x_end.min(self.x_start + x_range.end)),
+            &(self.y_end.min(self.y_start + y_range.start)
+                ..self.y_end.min(self.y_start + y_range.end)),
         )
     }
 }

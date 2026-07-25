@@ -322,10 +322,8 @@ impl VncServer {
                 height: snap.frame.spec().height.get() as u16,
             };
             let subframe = snap.frame.subframe(
-                position.x as usize,
-                position.y as usize,
-                dimensions.width as usize,
-                dimensions.height as usize,
+                &(position.x as usize..dimensions.width as usize),
+                &(position.y as usize..dimensions.height as usize),
             );
             let r = Rectangle {
                 position,
