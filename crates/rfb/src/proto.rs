@@ -7,8 +7,6 @@
 use std::mem::size_of;
 
 use bitflags::bitflags;
-use futures::StreamExt;
-use itertools::Itertools;
 use rgb_frame::FourCC;
 use strum::FromRepr;
 use thiserror::Error;

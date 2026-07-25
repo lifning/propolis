@@ -316,13 +316,21 @@ impl VncServer {
     ) -> Result<(), ProtocolError> {
         let fbu = {
             let (snap, _kind) = cstate.last_snap.as_ref().unwrap();
+            let position = Position { x: 0, y: 0 };
+            let dimensions = Resolution {
+                width: snap.frame.spec().width.get() as u16,
+                height: snap.frame.spec().height.get() as u16,
+            };
+            let subframe = snap.frame.subframe(
+                position.x as usize,
+                position.y as usize,
+                dimensions.width as usize,
+                dimensions.height as usize,
+            );
             let r = Rectangle {
-                position: Position { x: 0, y: 0 },
-                dimensions: Resolution {
-                    width: snap.frame.spec().width.get() as u16,
-                    height: snap.frame.spec().height.get() as u16,
-                },
-                data: Box::new(RawEncoding::new(&snap.frame)),
+                position,
+                dimensions,
+                data: Box::new(RawEncoding::new(subframe)),
             };
             FramebufferUpdate(vec![r])
         };

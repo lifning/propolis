@@ -106,14 +106,13 @@ impl Frame {
         &mut self.data
     }
 
-    pub fn pixels(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn pixels(&self) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         self.pixels_of_region(
             0,
             0,
             self.spec.width.get(),
             self.spec.height.get(),
         )
-        .flatten()
     }
 
     pub fn pixels_of_region(
@@ -132,6 +131,16 @@ impl Frame {
             let row_end = row_start + row_length;
             self.bytes()[row_start..row_end].chunks_exact(bytes_per_px)
         })
+    }
+
+    pub fn subframe<'a>(
+        &'a self,
+        x_start: usize,
+        y_start: usize,
+        x_end: usize,
+        y_end: usize,
+    ) -> SubFrame<'a> {
+        SubFrame { x_start, y_start, x_end, y_end, frame: self }
     }
 
     /// Convert between recognized 4-byte pixel formats
@@ -165,6 +174,50 @@ impl Frame {
             pixel[target_rgba.2] = blue;
             pixel[target_rgba.3] = alpha;
         }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct SubFrame<'a> {
+    x_start: usize,
+    y_start: usize,
+    x_end: usize,
+    y_end: usize,
+    frame: &'a Frame,
+}
+impl<'a> SubFrame<'a> {
+    pub fn width(&self) -> usize {
+        self.x_end - self.x_start
+    }
+    pub fn height(&self) -> usize {
+        self.y_end - self.y_start
+    }
+    pub fn frame(&self) -> &Frame {
+        self.frame
+    }
+    pub fn fourcc(&self) -> FourCC {
+        self.frame.spec.fourcc
+    }
+    // pub fn spec(&self) -> Spec {
+    //     self.frame.spec()
+    // }
+    pub fn pixels(&self) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
+        let Self { x_start, y_start, x_end, y_end, .. } = *self;
+        self.frame.pixels_of_region(x_start, y_start, x_end, y_end)
+    }
+    pub fn pixels_of_region(
+        &self,
+        x_start: usize,
+        y_start: usize,
+        x_end: usize,
+        y_end: usize,
+    ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
+        self.frame.pixels_of_region(
+            self.x_end.min(self.x_start + x_start),
+            self.y_end.min(self.y_start + y_start),
+            self.x_end.min(self.x_start + x_end),
+            self.y_end.min(self.y_start + y_end),
+        )
     }
 }
 

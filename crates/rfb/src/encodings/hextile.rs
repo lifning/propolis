@@ -4,21 +4,15 @@ use crate::{
 };
 
 #[allow(dead_code)]
-struct HextileEncoding {
-    tiles: Vec<Vec<HextileTile>>,
-    width: u16,
-    height: u16,
+struct HextileEncoding<'a> {
+    subframe: rgb_frame::SubFrame<'a>,
+    // tiles: Vec<Vec<HextileTile>>,
     pixfmt: PixelFormat,
 }
 
-impl From<&rgb_frame::Frame> for HextileEncoding {
-    fn from(frame: &rgb_frame::Frame) -> Self {
-        Self {
-            tiles: todo!("create subrects. need dimensions"),
-            width: frame.spec().width.get() as u16,
-            height: frame.spec().height.get() as u16,
-            pixfmt: PixelFormat::from(frame.spec().fourcc),
-        }
+impl<'a> From<rgb_frame::SubFrame<'a>> for HextileEncoding<'a> {
+    fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
+        Self { subframe, pixfmt: PixelFormat::from(subframe.fourcc()) }
     }
 }
 
@@ -32,7 +26,7 @@ bitflags::bitflags! {
     }
 }
 
-impl Encoding for HextileEncoding {
+impl<'a> Encoding for HextileEncoding<'a> {
     fn get_type(&self) -> EncodingType {
         EncodingType::Hextile
     }
@@ -41,10 +35,11 @@ impl Encoding for HextileEncoding {
         &self,
         _ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(self.tiles.iter().flat_map(|tile| {
-            let subencoding_mask = todo!();
-            [todo!()].into_iter()
-        }))
+        todo!()
+        // Box::new(self.tiles.iter().flat_map(|tile| {
+        //     let subencoding_mask = todo!();
+        //     [todo!()].into_iter()
+        // }))
     }
 }
 
