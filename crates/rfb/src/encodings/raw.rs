@@ -5,8 +5,8 @@ pub struct RawEncoding<'a> {
     frame: rgb_frame::SubFrame<'a>,
 }
 
-impl<'a> RawEncoding<'a> {
-    pub fn new(frame: rgb_frame::SubFrame<'a>) -> Self {
+impl<'a> From<rgb_frame::SubFrame<'a>> for RawEncoding<'a> {
+    fn from(frame: rgb_frame::SubFrame<'a>) -> Self {
         Self { frame }
     }
 }

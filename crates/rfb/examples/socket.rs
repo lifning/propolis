@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        let be_clone = backend.clone();
+        let mut be_clone = backend.clone();
         let input_pf = pf.clone();
         tokio::spawn(async move {
             let mut output_pf = input_pf.clone();

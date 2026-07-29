@@ -31,18 +31,23 @@ pub enum Image {
     White,
     Black,
 }
-#[derive(Clone)]
-pub struct ExampleBackend(Image);
+
+pub struct ExampleBackend(Image, Option<Frame>);
+impl Clone for ExampleBackend {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), None)
+    }
+}
 impl ExampleBackend {
     pub fn new(img: Image) -> Self {
-        Self(img)
+        Self(img, None)
     }
-    pub async fn generate(
-        &self,
+    pub async fn generate<'a>(
+        &'a mut self,
         width: usize,
         height: usize,
         format: &PixelFormat,
-    ) -> FramebufferUpdate {
+    ) -> FramebufferUpdate<'a> {
         let size = Size { width, height };
         let mut frame = generate_frame(size, self.0);
 
@@ -50,13 +55,17 @@ impl ExampleBackend {
             frame.convert(fourcc);
         }
 
+        self.1 = Some(frame);
+
         let r = Rectangle {
             position: Position { x: 0, y: 0 },
             dimensions: Resolution {
                 width: width as u16,
                 height: height as u16,
             },
-            data: Box::new(RawEncoding::new(frame.bytes().to_vec())),
+            data: Box::new(RawEncoding::from(
+                self.1.as_ref().unwrap().subframe(&(0..width), &(0..height)),
+            )),
         };
         FramebufferUpdate(vec![r])
     }

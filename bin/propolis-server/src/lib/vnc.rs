@@ -13,7 +13,7 @@ use propolis::hw::qemu::ramfb::{FrameSnap, RamFb};
 use propolis::hw::usb::usbdev::vnc_tablet::HIDTabletReport;
 
 use futures::StreamExt;
-use rfb::encodings::{ConnectionContext, EncodingType, RawEncoding};
+use rfb::encodings::{ConnectionContext, EncodingType};
 use rfb::proto::{
     ClientMessage, FramebufferUpdate, FramebufferUpdateRequest, Position,
     ProtoVersion, ProtocolError, Rectangle, Resolution, SecurityType,
@@ -72,6 +72,17 @@ impl Default for ClientState {
             connection_context: ConnectionContext::default(),
             serialize_buffer: Vec::new(),
         }
+    }
+}
+impl ClientState {
+    fn preferred_available_encoding(&self) -> EncodingType {
+        use EncodingType::*;
+        for enc in [TRLE, ZRLE, Zlib] {
+            if self.encodings.contains(&enc) {
+                return enc;
+            }
+        }
+        Raw
     }
 }
 
@@ -328,7 +339,7 @@ impl VncServer {
             let r = Rectangle {
                 position,
                 dimensions,
-                data: Box::new(RawEncoding::new(subframe)),
+                data: cstate.preferred_available_encoding().from(subframe),
             };
             FramebufferUpdate(vec![r])
         };

@@ -1,8 +1,11 @@
 use crate::{
-    encodings::{ConnectionContext, Encoding, EncodingType, Pixel},
+    encodings::{ConnectionContext, Encoding, EncodingType},
     proto::{PixelFormat, Position, Resolution},
 };
 
+type Pixel = Vec<u8>;
+
+#[allow(dead_code)]
 struct RREncoding {
     background_pixel: Pixel,
     sub_rectangles: Vec<RRESubrectangle>,
@@ -11,6 +14,7 @@ struct RREncoding {
     pixfmt: PixelFormat,
 }
 
+#[allow(dead_code)]
 struct RRESubrectangle {
     pixel: Pixel,
     position: Position,
@@ -30,10 +34,9 @@ impl Encoding for RREncoding {
             (self.sub_rectangles.len() as u32)
                 .to_be_bytes()
                 .into_iter()
-                .chain(self.background_pixel.bytes.iter().copied())
+                .chain(self.background_pixel.iter().copied())
                 .chain(self.sub_rectangles.iter().flat_map(|sr| {
                     sr.pixel
-                        .bytes
                         .iter()
                         .copied()
                         .chain(sr.position.x.to_be_bytes().into_iter())

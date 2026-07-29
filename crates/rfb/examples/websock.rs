@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_util::codec::FramedRead;
 
+use rfb::encodings::ConnectionContext;
 use rfb::proto::{
     ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution, SecurityType,
     SecurityTypes,
@@ -50,7 +51,7 @@ struct AppCtx {
 
 async fn run_server(
     mut sock: BinaryWs<impl AsyncRead + AsyncWrite + Unpin>,
-    be: ExampleBackend,
+    mut be: ExampleBackend,
     input_pf: PixelFormat,
     log: &slog::Logger,
 ) {

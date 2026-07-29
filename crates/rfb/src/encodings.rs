@@ -4,8 +4,6 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-use crate::proto::{Position, Resolution};
-
 use strum::FromRepr;
 
 mod hextile;
@@ -16,6 +14,8 @@ mod trle;
 mod zlib;
 
 pub use raw::RawEncoding;
+pub use trle::{TRLEncoding, ZRLEncoding};
+pub use zlib::ZlibEncoding;
 
 pub struct ConnectionContext {
     pub zlib: flate2::Compress,
@@ -45,6 +45,30 @@ pub enum EncodingType {
     CursorPseudo = -239,
     ContinuousUpdatesPseudo = -313,
 }
+impl EncodingType {
+    pub fn from<'a>(
+        &self,
+        subframe: rgb_frame::SubFrame<'a>,
+    ) -> Box<dyn Encoding + 'a> {
+        match self {
+            EncodingType::Raw => Box::new(RawEncoding::from(subframe)),
+            EncodingType::CopyRect => unimplemented!(),
+            EncodingType::RRE => unimplemented!(),
+            EncodingType::CoRRE => unimplemented!(),
+            EncodingType::Hextile => todo!(),
+            EncodingType::Zlib => Box::new(ZlibEncoding::from(subframe)),
+            EncodingType::TRLE => Box::new(TRLEncoding::from(subframe)),
+            EncodingType::ZRLE => Box::new(ZRLEncoding::from(subframe)),
+            EncodingType::JPEG => todo!(),
+            EncodingType::JRLE => todo!(),
+            EncodingType::ZRLE2 => todo!(),
+            EncodingType::DesktopSizePseudo => todo!(),
+            EncodingType::LastRectPseudo => todo!(),
+            EncodingType::CursorPseudo => todo!(),
+            EncodingType::ContinuousUpdatesPseudo => todo!(),
+        }
+    }
+}
 
 pub trait Encoding: Send + Sync {
     fn get_type(&self) -> EncodingType;
@@ -54,39 +78,4 @@ pub trait Encoding: Send + Sync {
         &self,
         ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_>;
-}
-
-#[allow(dead_code)]
-struct RREncoding {
-    background_pixel: Pixel,
-    sub_rectangles: Vec<RRESubrectangle>,
-}
-
-struct Pixel {
-    bytes: Vec<u8>,
-}
-
-#[allow(dead_code)]
-struct RRESubrectangle {
-    pixel: Pixel,
-    position: Position,
-    dimensions: Resolution,
-}
-
-#[allow(dead_code)]
-struct HextileEncoding {
-    tiles: Vec<Vec<HextileTile>>,
-}
-
-#[allow(dead_code)]
-enum HextileTile {
-    Raw(Vec<u8>),
-    Encoded(HextileTileEncoded),
-}
-
-#[allow(dead_code)]
-struct HextileTileEncoded {
-    background: Option<Pixel>,
-    foreground: Option<Pixel>,
-    // TODO: finish this
 }

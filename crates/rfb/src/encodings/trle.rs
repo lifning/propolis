@@ -1,15 +1,12 @@
 use std::iter::{from_fn, once};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 use crate::encodings::{ConnectionContext, Encoding, EncodingType};
 use crate::proto::PixelFormat;
 
 pub struct RLEncoding<'a, const PX: usize> {
-    // TODO: frame: &'a rgb_frame::Frame instead of storing tiles as Vec,
-    // just encode at .encode() time.
     subframe: rgb_frame::SubFrame<'a>,
-    // tiles: Vec<TRLETile<PX>>,
-    pixfmt: PixelFormat,
 }
 
 const TRLE_TILE_PX_SIZE: usize = 16;
@@ -38,29 +35,27 @@ impl<'a> Encoding for ZRLEncoding<'a> {
                 .into_iter()
                 .chain(out_buf.into_iter()),
         )
-        // todo!("also disable re-use of palettes in zrle mode")
     }
 }
 
 impl<'a> From<rgb_frame::SubFrame<'a>> for ZRLEncoding<'a> {
     fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
-        Self(RLEncoding {
-            subframe,
-            pixfmt: PixelFormat::from(subframe.fourcc()),
-        })
+        Self(RLEncoding::from(subframe))
     }
 }
 
 impl<'a, const PX: usize> From<rgb_frame::SubFrame<'a>> for RLEncoding<'a, PX> {
     fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
-        Self { subframe, pixfmt: PixelFormat::from(subframe.fourcc()) }
+        Self { subframe }
     }
 }
 
 fn tile_ranges<const PX: usize>(
-    width: usize,
-    height: usize,
+    width_: NonZeroUsize,
+    height_: NonZeroUsize,
 ) -> impl Iterator<Item = (Range<usize>, Range<usize>)> {
+    let width = width_.get();
+    let height = height_.get();
     // if rect isn't a multiple of TILE_SIZE, we still encode the
     // last partial tile. but if it *is* a multiple of TILE_SIZE,
     // we don't -- hence inclusive range, but minus one before divide
@@ -80,86 +75,101 @@ fn tile_ranges<const PX: usize>(
 
 impl<'a, const PX: usize> RLEncoding<'a, PX> {
     fn encode_tiles(&self) -> impl Iterator<Item = TRLETile<PX>> + '_ {
+        use itertools::Either;
+
         // palette reuse not allowed by ZRLE
         let allow_pal_reuse: bool = PX != ZRLE_TILE_PX_SIZE;
 
         let subframe = self.subframe;
 
-        let width = subframe.width();
-        let height = subframe.height();
+        let Ok(width) = NonZeroUsize::try_from(subframe.width()) else {
+            return Either::Left(std::iter::empty());
+        };
+        let Ok(height) = NonZeroUsize::try_from(subframe.height()) else {
+            return Either::Left(std::iter::empty());
+        };
         let pixfmt = PixelFormat::from(subframe.fourcc());
 
-        tile_ranges::<PX>(width, height).map(move |(x_range, y_range)| {
-            let mut tile_pixels: [[CPixel; PX]; PX] =
-                unsafe { core::mem::zeroed() };
+        Either::Right(tile_ranges::<PX>(width, height).map(
+            move |(x_range, y_range)| {
+                let mut tile_pixels: [[CPixel; PX]; PX] =
+                    unsafe { core::mem::zeroed() };
 
-            // re-pack later if palette size allows for 4bpp/2bpp/1bpp
-            let mut tile_indeces_opt: Option<Vec<u8>> =
-                Some(Vec::with_capacity(PX * PX));
-            let mut palette: Vec<CPixel> = Vec::with_capacity(128);
+                // re-pack later if palette size allows for 4bpp/2bpp/1bpp
+                let mut tile_indeces_opt: Option<Vec<u8>> =
+                    Some(Vec::with_capacity(PX * PX));
+                let mut palette: Vec<CPixel> = Vec::with_capacity(128);
 
-            for (px_row, row) in
-                subframe.pixels_of_region(&x_range, &y_range).enumerate()
-            {
-                for (px_col, pixel) in row.enumerate() {
-                    let cpixel = CPixel::from_raw(pixel, &pixfmt);
-                    tile_pixels[px_row][px_col] = cpixel;
-                    // keep updating indexed-mode tile as long as we
-                    // haven't overrun our max colors-per-palette (127)
-                    if tile_indeces_opt.is_some() {
-                        let index = if let Some(pos) =
-                            palette.iter().position(|cpx| *cpx == cpixel)
-                        {
-                            pos as u8
-                        } else if palette.len() < 127 {
-                            let pos = palette.len();
-                            palette.push(cpixel);
-                            pos as u8
-                        } else {
-                            tile_indeces_opt = None;
-                            0
-                        };
-                        if let Some(tile_indeces) = &mut tile_indeces_opt {
-                            tile_indeces.push(index);
+                for (px_row, row) in
+                    subframe.pixels_of_region(&x_range, &y_range).enumerate()
+                {
+                    for (px_col, pixel) in row.enumerate() {
+                        let cpixel = CPixel::from_raw(pixel, &pixfmt);
+                        tile_pixels[px_row][px_col] = cpixel;
+                        // keep updating indexed-mode tile as long as we
+                        // haven't overrun our max colors-per-palette (127)
+                        if tile_indeces_opt.is_some() {
+                            let index = if let Some(pos) =
+                                palette.iter().position(|cpx| *cpx == cpixel)
+                            {
+                                pos as u8
+                            } else if palette.len() < 127 {
+                                let pos = palette.len();
+                                palette.push(cpixel);
+                                pos as u8
+                            } else {
+                                tile_indeces_opt = None;
+                                0
+                            };
+                            if let Some(tile_indeces) = &mut tile_indeces_opt {
+                                tile_indeces.push(index);
+                            }
                         }
                     }
                 }
-            }
-            if palette.len() <= 1 {
-                TRLETile::SolidColor {
-                    color: palette.pop().unwrap_or(CPixel::from_raw(
-                        &[0; 4][..subframe.fourcc().bytes_per_pixel().get()],
-                        &pixfmt,
-                    )),
+                if let Some(tile_indeces) = tile_indeces_opt {
+                    let packed_pixels = match palette.len() {
+                        0 => unreachable!("at least one pixel must be visited"),
+                        1 => {
+                            // "0bpp", if you prefer. even works out that way
+                            // in the subencoding bytes -- we could set
+                            // packed_pixels to an empty vec and it would be
+                            // identical.. but let's stay clear to the spec :)
+                            return TRLETile::SolidColor {
+                                color: palette.pop().unwrap(),
+                            };
+                        }
+                        2 => tile_indeces
+                            .chunks(8)
+                            .map(|indeces| PackedIndeces::new_1bpp(indeces))
+                            .collect(),
+                        3..=4 => tile_indeces
+                            .chunks(4)
+                            .map(|indeces| PackedIndeces::new_2bpp(indeces))
+                            .collect(),
+                        5..=16 => tile_indeces
+                            .chunks(2)
+                            .map(|indeces| PackedIndeces::new_4bpp(indeces))
+                            .collect(),
+                        17..=127 => unsafe {
+                            // safety: PackedIndeces is repr(transparent) u8
+                            core::mem::transmute::<Vec<u8>, Vec<PackedIndeces>>(
+                                tile_indeces,
+                            )
+                        },
+                        128.. => unreachable!("tile_indeces_opt must be None"),
+                    };
+                    TRLETile::PackedPalette { palette, packed_pixels }
+                } else {
+                    // TODO: RLE encodings
+                    TRLETile::Raw {
+                        pixels: tile_pixels,
+                        width: x_range.count() as u16,
+                        height: y_range.count() as u16,
+                    }
                 }
-            } else if let Some(tile_indeces) = tile_indeces_opt {
-                let packed_pixels = match palette.len() {
-                    0..=1 => unreachable!(),
-                    2 => tile_indeces
-                        .chunks(8)
-                        .map(|indeces| PackedIndeces::new_1bpp(indeces))
-                        .collect(),
-                    3..=4 => tile_indeces
-                        .chunks(4)
-                        .map(|indeces| PackedIndeces::new_2bpp(indeces))
-                        .collect(),
-                    5..=16 => tile_indeces
-                        .chunks(2)
-                        .map(|indeces| PackedIndeces::new_4bpp(indeces))
-                        .collect(),
-                    // safety: PackedIndeces is repr(transparent) u8 newtype
-                    17.. => unsafe { core::mem::transmute(tile_indeces) },
-                };
-                TRLETile::PackedPalette { palette, packed_pixels }
-            } else {
-                // TODO: RLE encodings
-                TRLETile::Raw {
-                    pixels: tile_pixels,
-                    width: x_range.count() as u16,
-                    height: y_range.count() as u16,
-                }
-            }
-        })
+            },
+        ))
     }
 }
 
@@ -167,15 +177,7 @@ impl<'a, const PX: usize> RLEncoding<'a, PX> {
 #[derive(Copy, Clone)]
 struct PackedIndeces(u8);
 
-// impl From<&[u8; 2]> for PackedIndeces {
-//     fn from(&[left, right]: &[u8; 2]) -> Self {
-//         Self((left << 4) | (right & 0xF))
-//     }
-// }
 impl PackedIndeces {
-    // fn new<const N: usize>(indeces: &[u8; N]) -> Self {
-    //     const BPP: usize = 16 / size_of;
-    // }
     fn new_4bpp(indeces: &[u8]) -> Self {
         assert!(indeces.len() <= 2);
         let left = indeces.get(0).copied().unwrap_or(0);
@@ -234,13 +236,12 @@ fn rle(mut length: usize) -> impl Iterator<Item = u8> + Send {
     })
 }
 
-fn pal_rle(
-    (index, length): &(u8, usize),
-) -> Box<dyn Iterator<Item = u8> + Send> {
-    if *length == 1 {
-        Box::new(once(*index))
+fn pal_rle((index, length): (u8, usize)) -> impl Iterator<Item = u8> {
+    use itertools::Either::*;
+    if length == 1 {
+        Left(once(index))
     } else {
-        Box::new(once(*index | 0x80).chain(rle(*length)))
+        Right(once(index | 0x80).chain(rle(length)))
     }
 }
 
@@ -248,34 +249,42 @@ impl<const PX: usize> TRLETile<PX> {
     /// Subencoding of the tile according to RFB 6143 7.7.5.
     /// To the extent possible, this function is a translation of that
     /// section of the RFB RFC from English into chained iterators.
-    fn encode(&self) -> impl Iterator<Item = u8> + '_ {
+    fn encode(self) -> impl Iterator<Item = u8> {
         use itertools::Either::*;
         match self {
-            TRLETile::Raw { pixels, width, height } => Left(Left(Left(
-                once(0u8).chain(pixels[..*height as usize].iter().flat_map(
-                    |row| row[..*width as usize].iter().flat_map(|c| c.bytes()),
-                )),
-            ))),
+            TRLETile::Raw { pixels, width, height } => {
+                Left(Left(Left(once(0u8).chain(
+                    pixels.into_iter().take(height as usize).flat_map(
+                        move |row| {
+                            row.into_iter()
+                                .take(width as usize)
+                                .flat_map(|c| c.bytes())
+                        },
+                    ),
+                ))))
+            }
             TRLETile::SolidColor { color } => {
                 Left(Left(Right(once(1u8).chain(color.bytes()))))
             }
             TRLETile::PackedPalette { palette, packed_pixels } => {
                 Left(Right(Left(
                     once(palette.len() as u8)
-                        .chain(palette.iter().flat_map(|c| c.bytes()))
-                        .chain(packed_pixels.iter().map(|p| p.0)),
+                        .chain(palette.into_iter().flat_map(|c| c.bytes()))
+                        .chain(packed_pixels.into_iter().map(|p| p.0)),
                 )))
             }
-            TRLETile::PackedPaletteReused { packed_pixels } => Left(Right(
-                Right(once(127u8).chain(packed_pixels.iter().map(|p| p.0))),
-            )),
+            TRLETile::PackedPaletteReused { packed_pixels } => {
+                Left(Right(Right(
+                    once(127u8).chain(packed_pixels.into_iter().map(|p| p.0)),
+                )))
+            }
             TRLETile::PlainRLE { runs } => {
-                Right(Left(Left(once(128).chain(runs.iter().flat_map(
-                    |(color, length)| color.bytes().chain(rle(*length)),
+                Right(Left(Left(once(128).chain(runs.into_iter().flat_map(
+                    |(color, length)| color.bytes().chain(rle(length)),
                 )))))
             }
             TRLETile::PaletteRLEReused { runs } => Right(Left(Right(
-                once(129).chain(runs.iter().flat_map(pal_rle)),
+                once(129).chain(runs.into_iter().flat_map(pal_rle)),
             ))),
             TRLETile::PaletteRLE { palette, runs } => Right(Right(
                 once(
@@ -283,8 +292,8 @@ impl<const PX: usize> TRLETile<PX> {
                         .try_into()
                         .expect("TRLE tile palette too large!"),
                 )
-                .chain(palette.iter().flat_map(|c| c.bytes()))
-                .chain(runs.iter().flat_map(pal_rle)),
+                .chain(palette.into_iter().flat_map(|c| c.bytes()))
+                .chain(runs.into_iter().flat_map(pal_rle)),
             )),
         }
     }
@@ -313,8 +322,8 @@ enum CPixelTransformType {
 }
 
 impl CPixel {
-    fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.buf[..self.len as usize].iter().copied()
+    fn bytes(self) -> impl Iterator<Item = u8> {
+        self.buf.into_iter().take(self.len as usize)
     }
     fn which_padding(pixfmt: &PixelFormat) -> CPixelTransformType {
         if pixfmt.depth <= 24 && pixfmt.bits_per_pixel == 32 {

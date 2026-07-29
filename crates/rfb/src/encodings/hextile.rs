@@ -1,5 +1,5 @@
 use crate::{
-    encodings::{ConnectionContext, Encoding, EncodingType, Pixel},
+    encodings::{ConnectionContext, Encoding, EncodingType},
     proto::PixelFormat,
 };
 
@@ -48,6 +48,8 @@ enum HextileTile {
     Raw(Vec<u8>),
     Encoded(HextileTileEncoded),
 }
+
+type Pixel = Vec<u8>;
 
 #[allow(dead_code)]
 struct HextileTileEncoded {
