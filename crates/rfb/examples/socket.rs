@@ -16,8 +16,8 @@ use tokio_util::codec::FramedRead;
 use rfb::{
     encodings::{ConnectionContext, EncodingType},
     proto::{
-        ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution,
-        SecurityType, SecurityTypes,
+        ClientMessageDecoder, PixelFormat, Position, ProtoVersion, Rectangle,
+        Resolution, SecurityType, SecurityTypes,
     },
 };
 use rgb_frame::FourCC;
@@ -122,6 +122,35 @@ async fn main() -> Result<()> {
             let mut conn_ctx = ConnectionContext::default();
             let mut serbuf = vec![];
 
+            let mut pointer_pos = Position { x: 0, y: 0 };
+            let pointer_size = Resolution { width: 16, height: 24 };
+            let pointer_img = rgb_frame::Frame::new_uninit(
+                rgb_frame::Spec::new(
+                    pointer_size.width as usize,
+                    pointer_size.height as usize,
+                    FourCC::AB24,
+                ),
+                |data, stride| {
+                    for y in 0..pointer_size.height {
+                        for x in 0..pointer_size.width {
+                            let idx =
+                                y as usize * stride.get() + x as usize * 4;
+                            for i in idx..=idx + 3 {
+                                data[i].write(
+                                    if x * pointer_size.height
+                                        < y * pointer_size.width
+                                    {
+                                        0xff
+                                    } else {
+                                        0
+                                    },
+                                );
+                            }
+                        }
+                    }
+                },
+            );
+
             loop {
                 let msg = match decoder.next().await {
                     Some(Ok(m)) => m,
@@ -146,9 +175,18 @@ async fn main() -> Result<()> {
                         output_pf = out_pf;
                     }
                     ClientMessage::FramebufferUpdateRequest(_req) => {
-                        let fbu = be_clone
+                        let mut fbu = be_clone
                             .generate(WIDTH, HEIGHT, &output_pf, args.encoding)
                             .await;
+
+                        fbu.0.push(Rectangle {
+                            position: pointer_pos,
+                            dimensions: pointer_size,
+                            data: args.encoding.from(pointer_img.subframe(
+                                &(0..pointer_size.width as usize),
+                                &(0..pointer_size.height as usize),
+                            )),
+                        });
 
                         if let Err(e) =
                             fbu.write_to(sock, &mut conn_ctx, &mut serbuf).await
@@ -174,6 +212,9 @@ async fn main() -> Result<()> {
                                 _ => continue,
                             }
                         }
+                    }
+                    ClientMessage::PointerEvent(pev) => {
+                        pointer_pos = pev.position;
                     }
                     _ => {
                         slog::debug!(log_child, "RX: Client msg {:?}", msg);

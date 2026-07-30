@@ -26,9 +26,8 @@ impl<'a> Encoding for ZRLEncoding<'a> {
     ) -> Box<dyn Iterator<Item = u8> + '_> {
         let in_buf = self.0.encode(ctx).collect::<Vec<u8>>();
         let mut out_buf = Vec::with_capacity(in_buf.len());
-        // let mut zlib = flate2::Compress::new(flate2::Compression::fast(), true);
         ctx.zlib
-            .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Full)
+            .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
             .expect("zlib error");
         Box::new(
             (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),

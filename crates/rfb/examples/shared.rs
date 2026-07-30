@@ -116,7 +116,7 @@ fn generate_image(size: Size, img_bytes: &[u8]) -> Frame {
 
 fn generate_solid(size: Size, rgb_pixel: [u8; 3]) -> Frame {
     Frame::new_uninit(
-        Spec::new(size.width, size.height, FourCC::BA24),
+        Spec::new(size.width, size.height, FourCC::AB24),
         |data, stride| {
             for y in 0..size.height {
                 for x in 0..size.width {
