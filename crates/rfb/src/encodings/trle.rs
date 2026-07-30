@@ -26,14 +26,12 @@ impl<'a> Encoding for ZRLEncoding<'a> {
     ) -> Box<dyn Iterator<Item = u8> + '_> {
         let in_buf = self.0.encode(ctx).collect::<Vec<u8>>();
         let mut out_buf = Vec::with_capacity(in_buf.len());
+        // let mut zlib = flate2::Compress::new(flate2::Compression::fast(), true);
         ctx.zlib
-            .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
+            .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Full)
             .expect("zlib error");
         Box::new(
-            (out_buf.len() as u32)
-                .to_be_bytes()
-                .into_iter()
-                .chain(out_buf.into_iter()),
+            (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),
         )
     }
 }
@@ -267,8 +265,18 @@ impl<const PX: usize> TRLETile<PX> {
                 Left(Left(Right(once(1u8).chain(color.bytes()))))
             }
             TRLETile::PackedPalette { palette, packed_pixels } => {
+                let mut subenc = palette.len() as u8;
+                // "17 to 126:  Unused.  (Packed palettes of these sizes
+                // would offer no advantage over palette RLE)."
+                // HACK: in PaletteRLE, a run-length of one is encoded
+                // as the unmodified byte value of the palette index,
+                // so we can encode it *as though* it were PackedPalette
+                // with an altered subencoding byte.
+                if (17..=126).contains(&subenc) {
+                    subenc += 128;
+                }
                 Left(Right(Left(
-                    once(palette.len() as u8)
+                    once(subenc)
                         .chain(palette.into_iter().flat_map(|c| c.bytes()))
                         .chain(packed_pixels.into_iter().map(|p| p.0)),
                 )))

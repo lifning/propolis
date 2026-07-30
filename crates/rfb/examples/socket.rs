@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio_util::codec::FramedRead;
 
 use rfb::{
-    encodings::ConnectionContext,
+    encodings::{ConnectionContext, EncodingType},
     proto::{
         ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution,
         SecurityType, SecurityTypes,
@@ -53,6 +53,10 @@ struct Args {
     /// FourCC for pixel format
     #[clap(long, default_value_t = FourCC::XB24)]
     fourcc: FourCC,
+
+    /// RFB image encoding to use
+    #[clap(long, default_value_t = EncodingType::Raw)]
+    encoding: EncodingType,
 }
 
 #[tokio::main]
@@ -142,8 +146,9 @@ async fn main() -> Result<()> {
                         output_pf = out_pf;
                     }
                     ClientMessage::FramebufferUpdateRequest(_req) => {
-                        let fbu =
-                            be_clone.generate(WIDTH, HEIGHT, &output_pf).await;
+                        let fbu = be_clone
+                            .generate(WIDTH, HEIGHT, &output_pf, args.encoding)
+                            .await;
 
                         if let Err(e) =
                             fbu.write_to(sock, &mut conn_ctx, &mut serbuf).await
@@ -154,6 +159,20 @@ async fn main() -> Result<()> {
                                 e
                             );
                             return;
+                        }
+                    }
+                    ClientMessage::KeyEvent(kev) if kev.is_pressed => {
+                        if let rfb::keysym::KeySym::Ascii(ch) = kev.keysym {
+                            be_clone.0 = match ch as u8 {
+                                b'0' | b'o' | b'x' => Image::Oxide,
+                                b'1' | b'c' | b's' => Image::ColorBars,
+                                b'2' | b'r' => Image::Red,
+                                b'3' | b'g' => Image::Green,
+                                b'4' | b'b' => Image::Blue,
+                                b'5' | b'w' => Image::White,
+                                b'6' | b'k' => Image::Black,
+                                _ => continue,
+                            }
                         }
                     }
                     _ => {

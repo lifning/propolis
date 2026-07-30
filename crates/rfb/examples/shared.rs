@@ -13,7 +13,7 @@ use image::io::Reader as ImageReader;
 use rgb_frame::*;
 use slog::Drain;
 
-use rfb::encodings::RawEncoding;
+use rfb::encodings::EncodingType;
 use rfb::proto::{
     FramebufferUpdate, PixelFormat, Position, Rectangle, Resolution,
 };
@@ -32,7 +32,7 @@ pub enum Image {
     Black,
 }
 
-pub struct ExampleBackend(Image, Option<Frame>);
+pub struct ExampleBackend(pub Image, Option<Frame>);
 impl Clone for ExampleBackend {
     fn clone(&self) -> Self {
         Self(self.0.clone(), None)
@@ -47,6 +47,7 @@ impl ExampleBackend {
         width: usize,
         height: usize,
         format: &PixelFormat,
+        encoding: EncodingType,
     ) -> FramebufferUpdate<'a> {
         let size = Size { width, height };
         let mut frame = generate_frame(size, self.0);
@@ -63,9 +64,9 @@ impl ExampleBackend {
                 width: width as u16,
                 height: height as u16,
             },
-            data: Box::new(RawEncoding::from(
+            data: encoding.from(
                 self.1.as_ref().unwrap().subframe(&(0..width), &(0..height)),
-            )),
+            ),
         };
         FramebufferUpdate(vec![r])
     }

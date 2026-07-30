@@ -122,11 +122,15 @@ impl Frame {
         let bytes_per_px = self.spec.fourcc.bytes_per_pixel().get();
         let x_start = x_range.start;
         let x_end = x_range.end;
-        assert!(x_end * bytes_per_px < self.spec.stride.get());
+        let stride = self.spec.stride.get();
+        assert!(
+            x_end * bytes_per_px <= stride,
+            "{x_end} * {bytes_per_px} > {stride}"
+        );
         let row_length = (x_end - x_start) * bytes_per_px;
         let col_ofs = x_start * bytes_per_px;
         y_range.clone().map(move |y| {
-            let row_start = y * self.spec.stride.get() + col_ofs;
+            let row_start = y * stride + col_ofs;
             let row_end = row_start + row_length;
             self.bytes()[row_start..row_end].chunks_exact(bytes_per_px)
         })

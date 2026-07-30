@@ -4,8 +4,6 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-use strum::FromRepr;
-
 mod hextile;
 /// Section 7.7.1
 mod raw;
@@ -22,11 +20,23 @@ pub struct ConnectionContext {
 }
 impl Default for ConnectionContext {
     fn default() -> Self {
-        Self { zlib: flate2::Compress::new(flate2::Compression::fast(), false) }
+        Self { zlib: flate2::Compress::new(flate2::Compression::fast(), true) }
     }
 }
 
-#[derive(Debug, FromRepr, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Ord,
+    PartialOrd,
+    Eq,
+    PartialEq,
+    strum::FromRepr,
+    strum::EnumString,
+    strum::Display,
+    strum::VariantNames,
+)]
 #[repr(i32)]
 pub enum EncodingType {
     Raw = 0,

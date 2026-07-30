@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_util::codec::FramedRead;
 
-use rfb::encodings::ConnectionContext;
+use rfb::encodings::{ConnectionContext, EncodingType};
 use rfb::proto::{
     ClientMessageDecoder, PixelFormat, ProtoVersion, Resolution, SecurityType,
     SecurityTypes,
@@ -42,17 +42,23 @@ struct Args {
     /// FourCC for pixel format
     #[clap(long, default_value_t = FourCC::XB24)]
     fourcc: FourCC,
+
+    /// RFB image encoding to use
+    #[clap(long, default_value_t = EncodingType::Raw)]
+    encoding: EncodingType,
 }
 
 struct AppCtx {
     be: ExampleBackend,
     pf: PixelFormat,
+    encoding: EncodingType,
 }
 
 async fn run_server(
     mut sock: BinaryWs<impl AsyncRead + AsyncWrite + Unpin>,
     mut be: ExampleBackend,
     input_pf: PixelFormat,
+    encoding: EncodingType,
     log: &slog::Logger,
 ) {
     let init_res = rfb::server::initialize(
@@ -111,7 +117,8 @@ async fn run_server(
                 output_pf = out_pf;
             }
             ClientMessage::FramebufferUpdateRequest(_req) => {
-                let fbu = be.generate(WIDTH, HEIGHT, &output_pf).await;
+                let fbu =
+                    be.generate(WIDTH, HEIGHT, &output_pf, encoding).await;
 
                 if let Err(e) =
                     fbu.write_to(sock, &mut conn_ctx, &mut serbuf).await
@@ -143,7 +150,7 @@ async fn main() -> Result<(), String> {
 
     let pf = args.fourcc.into();
     let backend = ExampleBackend::new(args.image);
-    let app = AppCtx { be: backend, pf };
+    let app = AppCtx { be: backend, pf, encoding: args.encoding };
 
     // Build a description of the API.
     let mut api = ApiDescription::new();
@@ -185,7 +192,8 @@ async fn ws_websockify(
     info!(rqctx.log, "New connection from {}", rqctx.request.remote_addr());
     let be = rqctx.server.private.be.clone();
     let pf = rqctx.server.private.pf.clone();
-    run_server(BinaryWs::new(ws), be, pf, &rqctx.log).await;
+    run_server(BinaryWs::new(ws), be, pf, rqctx.context().encoding, &rqctx.log)
+        .await;
 
     Ok(())
 }
