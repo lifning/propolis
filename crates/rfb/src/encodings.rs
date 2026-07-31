@@ -4,12 +4,13 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-mod hextile;
 /// Section 7.7.1
 mod raw;
-mod rre;
 mod trle;
 mod zlib;
+
+// mod hextile;
+// mod rre;
 
 pub use raw::RawEncoding;
 pub use trle::{TRLEncoding, ZRLEncoding};
@@ -55,6 +56,7 @@ pub enum EncodingType {
     CursorPseudo = -239,
     ContinuousUpdatesPseudo = -313,
 }
+
 impl EncodingType {
     pub fn from<'a>(
         &self,
@@ -65,17 +67,17 @@ impl EncodingType {
             EncodingType::CopyRect => unimplemented!(),
             EncodingType::RRE => unimplemented!(),
             EncodingType::CoRRE => unimplemented!(),
-            EncodingType::Hextile => todo!(),
+            EncodingType::Hextile => unimplemented!(),
             EncodingType::Zlib => Box::new(ZlibEncoding::from(subframe)),
             EncodingType::TRLE => Box::new(TRLEncoding::from(subframe)),
             EncodingType::ZRLE => Box::new(ZRLEncoding::from(subframe)),
-            EncodingType::JPEG => todo!(),
-            EncodingType::JRLE => todo!(),
-            EncodingType::ZRLE2 => todo!(),
-            EncodingType::DesktopSizePseudo => todo!(),
-            EncodingType::LastRectPseudo => todo!(),
-            EncodingType::CursorPseudo => todo!(),
-            EncodingType::ContinuousUpdatesPseudo => todo!(),
+            EncodingType::JPEG => unimplemented!(),
+            EncodingType::JRLE => unimplemented!(),
+            EncodingType::ZRLE2 => unimplemented!(),
+            EncodingType::DesktopSizePseudo => unimplemented!(),
+            EncodingType::LastRectPseudo => unimplemented!(),
+            EncodingType::CursorPseudo => unimplemented!(),
+            EncodingType::ContinuousUpdatesPseudo => unimplemented!(),
         }
     }
 }

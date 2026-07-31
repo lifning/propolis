@@ -211,7 +211,7 @@ impl<'a> FramebufferUpdate<'a> {
         for rect in self.0.into_iter() {
             serialize_buffer.clear();
             serialize_buffer.extend(rect.encode(ctx));
-            stream.write_all(&serialize_buffer).await?;
+            stream.write_all(serialize_buffer).await?;
         }
 
         Ok(())

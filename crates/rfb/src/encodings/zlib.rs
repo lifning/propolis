@@ -20,18 +20,20 @@ impl<'a> Encoding for ZlibEncoding<'a> {
         &self,
         ctx: &mut ConnectionContext,
     ) -> Box<dyn Iterator<Item = u8> + '_> {
-        let in_buf: Vec<u8> =
-            self.frame.pixels().flatten().flatten().copied().collect();
+        let in_buf: Vec<u8> = self
+            .frame
+            .pixels() // conceptually: [[[u8; Bpp]; Width]; Height]
+            .flatten() // flatten iterator of rows: [[u8; Bpp]; Width*Height]
+            .flatten() // flatten pixels into bytes: [u8; Bpp*Width*Height]
+            .copied()
+            .collect();
         let mut out_buf = Vec::with_capacity(in_buf.len());
 
         ctx.zlib
             .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
             .expect("zlib error");
         Box::new(
-            (out_buf.len() as u32)
-                .to_be_bytes()
-                .into_iter()
-                .chain(out_buf.into_iter()),
+            (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),
         )
     }
 }
