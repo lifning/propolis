@@ -4,17 +4,21 @@
 //
 // Copyright 2022 Oxide Computer Company
 
-/// Section 7.7.1
+//! RFC 6143 section 7.7
 mod raw;
 mod trle;
 mod zlib;
 
-// mod hextile;
-// mod rre;
+use raw::RawEncoding;
+use trle::{TRLEncoding, ZRLEncoding};
+use zlib::ZlibEncoding;
 
-pub use raw::RawEncoding;
-pub use trle::{TRLEncoding, ZRLEncoding};
-pub use zlib::ZlibEncoding;
+// non-rfc encodings
+mod jpeg;
+mod tightpng;
+
+use jpeg::JPEGEncoding;
+use tightpng::TightPNGEncoding;
 
 pub struct ConnectionContext {
     pub zlib: flate2::Compress,
@@ -25,6 +29,7 @@ impl Default for ConnectionContext {
     }
 }
 
+/// https://www.iana.org/assignments/rfb/rfb.xhtml
 #[derive(
     Copy,
     Clone,
@@ -46,14 +51,21 @@ pub enum EncodingType {
     CoRRE = 4,
     Hextile = 5,
     Zlib = 6,
+    Tight = 7,
+    ZlibHex = 8,
     TRLE = 15,
     ZRLE = 16,
+    ZYWRLE = 17,
+    H264 = 20,
     JPEG = 21,
     JRLE = 22,
+    VaH264 = 23,
     ZRLE2 = 24,
+    OpenH264 = 50,
     DesktopSizePseudo = -223,
     LastRectPseudo = -224,
     CursorPseudo = -239,
+    TightPNG = -260,
     ContinuousUpdatesPseudo = -313,
 }
 
@@ -69,14 +81,23 @@ impl EncodingType {
             EncodingType::CoRRE => unimplemented!(),
             EncodingType::Hextile => unimplemented!(),
             EncodingType::Zlib => Box::new(ZlibEncoding::from(subframe)),
+            EncodingType::Tight => unimplemented!(),
+            EncodingType::ZlibHex => unimplemented!(),
             EncodingType::TRLE => Box::new(TRLEncoding::from(subframe)),
             EncodingType::ZRLE => Box::new(ZRLEncoding::from(subframe)),
-            EncodingType::JPEG => unimplemented!(),
+            EncodingType::JPEG => Box::new(JPEGEncoding::from(subframe)),
+            EncodingType::ZYWRLE => unimplemented!(),
+            EncodingType::H264 => unimplemented!(),
             EncodingType::JRLE => unimplemented!(),
+            EncodingType::VaH264 => unimplemented!(),
             EncodingType::ZRLE2 => unimplemented!(),
+            EncodingType::OpenH264 => unimplemented!(),
             EncodingType::DesktopSizePseudo => unimplemented!(),
             EncodingType::LastRectPseudo => unimplemented!(),
             EncodingType::CursorPseudo => unimplemented!(),
+            EncodingType::TightPNG => {
+                Box::new(TightPNGEncoding::from(subframe))
+            }
             EncodingType::ContinuousUpdatesPseudo => unimplemented!(),
         }
     }

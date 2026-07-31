@@ -1,6 +1,7 @@
 use super::{Encoding, EncodingType};
 use crate::encodings::ConnectionContext;
 
+/// https://vncdotool.readthedocs.io/en/0.8.0/rfbproto.html#zlib-encoding
 pub struct ZlibEncoding<'a> {
     frame: rgb_frame::SubFrame<'a>,
 }

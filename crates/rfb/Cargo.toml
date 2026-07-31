@@ -31,6 +31,7 @@ ascii = { version = "1.1", default-features = false }
 bitflags.workspace = true
 flate2.workspace = true
 futures.workspace = true
+image.workspace = true
 itertools.workspace = true
 thiserror.workspace = true
 rgb_frame.workspace = true
@@ -43,7 +44,6 @@ zerocopy = { workspace = true, features = ["derive"] }
 [dev-dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
-image = { version = "0.25.1", default-features = false, features = ["png"] }
 dropshot.workspace = true
 slog.workspace = true
 slog-envlogger = "2.2.0"

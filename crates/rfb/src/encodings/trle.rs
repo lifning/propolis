@@ -48,6 +48,10 @@ impl<'a> Encoding for ZRLEncoding<'a> {
     ) -> Box<dyn Iterator<Item = u8> + '_> {
         let in_buf = self.0.encode(ctx).collect::<Vec<u8>>();
         let mut out_buf = Vec::with_capacity(in_buf.len());
+        // RFC 6143 section 7.7.6:
+        // > The server flushes the zlib stream to a byte boundary at the end of
+        // > each ZRLE-encoded rectangle.  It need not flush the stream between
+        // > tiles within a rectangle.
         ctx.zlib
             .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
             .expect("zlib error");
@@ -83,7 +87,7 @@ enum TRLETile<const PX: usize> {
     PackedPaletteReused {
         packed_pixels: StackVec<PackedIndeces, { ZRLE_PX * ZRLE_PX }>,
     },
-    // NOTE: punting on actually implementing the run-length encoding parts,
+    // NOTE: punting on actually utilizing the run-length encoding parts,
     // since if we only use ZRLE we've got Zlib deflating such patterns for us
     #[allow(dead_code)]
     /// 128

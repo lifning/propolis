@@ -77,7 +77,7 @@ impl Default for ClientState {
 impl ClientState {
     fn preferred_available_encoding(&self) -> EncodingType {
         use EncodingType::*;
-        for enc in [TRLE, ZRLE, Zlib] {
+        for enc in [ZRLE, JPEG, Zlib, TRLE] {
             if self.encodings.contains(&enc) {
                 return enc;
             }

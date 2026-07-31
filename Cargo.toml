@@ -139,6 +139,8 @@ http = "1.1.0"
 hyper = "1.0"
 linkme = "0.3.33"
 iddqd = "0.3"
+# used in rfb (vnc) crate for encodings and examples
+image = { version = "0.25.1", default-features = false, features = ["png", "jpeg"] }
 itertools = "0.13.0"
 kstat-rs = "0.2.4"
 lazy_static = "1.4"

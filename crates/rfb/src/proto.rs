@@ -252,10 +252,7 @@ impl<'a> Rectangle<'a> {
         &self,
         ctx: &mut ConnectionContext,
     ) -> impl Iterator<Item = u8> + '_ {
-        self.position
-            .x
-            .to_be_bytes()
-            .into_iter()
+        (self.position.x.to_be_bytes().into_iter())
             .chain(self.position.y.to_be_bytes())
             .chain(self.dimensions.width.to_be_bytes())
             .chain(self.dimensions.height.to_be_bytes())
