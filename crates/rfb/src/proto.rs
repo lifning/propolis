@@ -43,6 +43,9 @@ pub enum ProtocolError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("encoding error: {0}")]
+    EncodingError(String),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
@@ -210,7 +213,7 @@ impl<'a> FramebufferUpdate<'a> {
 
         for rect in self.0.into_iter() {
             serialize_buffer.clear();
-            serialize_buffer.extend(rect.encode(ctx));
+            serialize_buffer.extend(rect.encode(ctx)?);
             stream.write_all(serialize_buffer).await?;
         }
 
@@ -251,13 +254,13 @@ impl<'a> Rectangle<'a> {
     pub fn encode(
         &self,
         ctx: &mut ConnectionContext,
-    ) -> impl Iterator<Item = u8> + '_ {
-        (self.position.x.to_be_bytes().into_iter())
+    ) -> Result<impl Iterator<Item = u8> + '_> {
+        Ok((self.position.x.to_be_bytes().into_iter())
             .chain(self.position.y.to_be_bytes())
             .chain(self.dimensions.width.to_be_bytes())
             .chain(self.dimensions.height.to_be_bytes())
             .chain((self.data.get_type() as i32).to_be_bytes())
-            .chain(self.data.encode(ctx))
+            .chain(self.data.encode(ctx)?))
     }
 }
 
@@ -528,12 +531,12 @@ impl Decoder for ClientMessageDecoder {
         // message, consume the type byte, and pass the rest on to the decoding
         // logic.
         src.advance(1);
-        match message_type {
+        let msg = match message_type {
             ClientMessageType::SetPixelFormat => {
                 // 3 bytes padding
                 src.advance(3);
                 let raw = read_data::<raw::PixelFormat>(src).unwrap();
-                Ok(Some(ClientMessage::SetPixelFormat(raw.try_into()?)))
+                ClientMessage::SetPixelFormat(raw.try_into()?)
             }
             ClientMessageType::SetEncodings => {
                 // 1 byte padding
@@ -549,21 +552,21 @@ impl Decoder for ClientMessageDecoder {
                         None => unknown.push(raw),
                     }
                 }
-                Ok(Some(ClientMessage::SetEncodings { encodings, unknown }))
+                ClientMessage::SetEncodings { encodings, unknown }
             }
             ClientMessageType::FramebufferUpdateRequest => {
                 let raw =
                     read_data::<raw::FramebufferUpdateRequest>(src).unwrap();
-                Ok(Some(ClientMessage::FramebufferUpdateRequest(raw.into())))
+                ClientMessage::FramebufferUpdateRequest(raw.into())
             }
             ClientMessageType::KeyEvent => {
                 let raw = read_data::<raw::KeyEvent>(src).unwrap();
                 let converted: KeyEvent = raw.try_into()?;
-                Ok(Some(ClientMessage::KeyEvent(converted)))
+                ClientMessage::KeyEvent(converted)
             }
             ClientMessageType::PointerEvent => {
                 let raw = read_data::<raw::PointerEvent>(src).unwrap();
-                Ok(Some(ClientMessage::PointerEvent(raw.into())))
+                ClientMessage::PointerEvent(raw.into())
             }
             ClientMessageType::ClientCutText => {
                 // 3 bytes padding
@@ -571,20 +574,26 @@ impl Decoder for ClientMessageDecoder {
 
                 let len = src.get_u32() as usize;
                 let buf = src[..len].to_vec();
+                src.advance(len);
 
                 // TODO: The encoding RFB uses is ISO 8859-1 (Latin-1), which is
                 // a subset of utf-8. Determine if this is the right approach.
                 let text = String::from_utf8(buf)
                     .map_err(|_| ProtocolError::InvalidTextEncoding)?;
 
-                Ok(Some(ClientMessage::ClientCutText(text)))
+                ClientMessage::ClientCutText(text)
             }
-        }
+        };
+        Ok(Some(msg))
     }
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct FramebufferUpdateRequest {
+    /// When false, the server cannot assume the client has a valid picture
+    /// of the specified region (and thus should send the whole area).
+    /// When true, the server may send any rectangles of what's changed since
+    /// the last image data sent to the specified region.
     pub incremental: bool,
     pub position: Position,
     pub resolution: Resolution,

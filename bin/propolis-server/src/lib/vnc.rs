@@ -34,7 +34,8 @@ const UNINIT_RES: Resolution = Resolution { width: 800, height: 600 };
 const UNINIT_FOURCC: FourCC = FourCC::XR24;
 const SERVER_NAME: &str = "propolis-vnc";
 /// Frame interval (in us) for 10fps
-const FRAME_US_10FPS: usize = 1000000 / 10;
+// const FRAME_US_10FPS: usize = 1000000 / 10;
+const FRAME_US_30FPS: Duration = Duration::from_micros(1000000 / 30);
 
 struct Devices {
     keyboard: Arc<PS2Ctrl>,
@@ -56,6 +57,7 @@ struct State {
 
 struct ClientState {
     last_snap: Option<(FrameSnap, FrameKind)>,
+    last_snap_client: Option<(FrameSnap, FrameKind)>,
     fbu_req: Option<FramebufferUpdateRequest>,
     encodings: BTreeSet<EncodingType>,
     output_fourcc: FourCC,
@@ -66,6 +68,7 @@ impl Default for ClientState {
     fn default() -> Self {
         Self {
             last_snap: None,
+            last_snap_client: None,
             fbu_req: None,
             encodings: BTreeSet::new(),
             output_fourcc: UNINIT_FOURCC,
@@ -77,7 +80,11 @@ impl Default for ClientState {
 impl ClientState {
     fn preferred_available_encoding(&self) -> EncodingType {
         use EncodingType::*;
-        for enc in [TightPNG, JPEG, ZRLE, Zlib, TRLE] {
+        // TightPNG, Tight(JPEG), and JPEG are preferred when available
+        // because browser-based clients (i.e. noVNC) can utilize native-code
+        // image/png and image/jpeg decoders for better performance than
+        // JS implementations of the standard RFC6143-defined encodings.
+        for enc in [TightPNG, Tight, JPEG, ZRLE, Zlib, TRLE] {
             if self.encodings.contains(&enc) {
                 return enc;
             }
@@ -96,8 +103,8 @@ pub struct VncServer {
     state: Mutex<State>,
     client: Mutex<Client>,
     notify: Notify,
-    /// Minimum frame interval (in us)
-    frame_int_us: usize,
+    /// Minimum frame interval
+    frame_interval: Duration,
     log: Logger,
 }
 
@@ -127,7 +134,7 @@ impl VncServer {
             state: Mutex::new(State::default()),
             client: Mutex::new(Client::default()),
             notify: Notify::new(),
-            frame_int_us: FRAME_US_10FPS,
+            frame_interval: FRAME_US_30FPS,
             log,
         })
     }
@@ -298,6 +305,11 @@ impl VncServer {
                     if let Some((snap, _kind)) = cstate.last_snap.as_mut() {
                         snap.frame.convert(fourcc);
                     }
+                    if let Some((snap, _kind)) =
+                        cstate.last_snap_client.as_mut()
+                    {
+                        snap.frame.convert(fourcc);
+                    }
                 }
                 Err(e) => {
                     slog::warn!(
@@ -320,29 +332,137 @@ impl VncServer {
             }
         }
     }
+
     async fn send_fbu(
         &self,
         conn: &mut impl Connection,
         cstate: &mut ClientState,
     ) -> Result<(), ProtocolError> {
-        let fbu = {
-            let (snap, _kind) = cstate.last_snap.as_ref().unwrap();
-            let position = Position { x: 0, y: 0 };
-            let dimensions = Resolution {
-                width: snap.frame.spec().width.get() as u16,
-                height: snap.frame.spec().height.get() as u16,
-            };
-            let subframe = snap.frame.subframe(
-                &(position.x as usize..dimensions.width as usize),
-                &(position.y as usize..dimensions.height as usize),
+        let (serv_snap, _kind) = cstate.last_snap.as_ref().unwrap();
+        let FramebufferUpdateRequest { incremental, position: pos, resolution } =
+            *cstate.fbu_req.as_ref().unwrap_or(&FramebufferUpdateRequest {
+                incremental: false,
+                position: Position { x: 0, y: 0 },
+                resolution: Resolution {
+                    width: serv_snap.frame.spec().width.get() as u16,
+                    height: serv_snap.frame.spec().height.get() as u16,
+                },
+            });
+        let Resolution { width, height } = resolution;
+        let fbu = if !incremental || cstate.last_snap_client.is_none() {
+            let subframe = serv_snap.frame.subframe(
+                &(pos.x as usize..width as usize),
+                &(pos.y as usize..height as usize),
             );
-            let r = Rectangle {
-                position,
-                dimensions,
+            FramebufferUpdate(vec![Rectangle {
+                position: pos,
+                dimensions: Resolution { width, height },
                 data: cstate.preferred_available_encoding().from(subframe),
-            };
-            FramebufferUpdate(vec![r])
+            }])
+        } else {
+            // unwrap: !is_none
+            let (client_snap, _kind) =
+                cstate.last_snap_client.as_ref().unwrap();
+            const STEP: usize = 128;
+            let mut rectangles = vec![];
+            for sub_y in (pos.y..pos.y + height).step_by(STEP) {
+                let sub_y = sub_y as usize;
+                for sub_x in (pos.x..pos.x + width).step_by(STEP) {
+                    let sub_x = sub_x as usize;
+                    let x_range = sub_x..sub_x + STEP;
+                    let y_range = sub_y..sub_y + STEP;
+
+                    // find first different row
+                    let client_rows =
+                        client_snap.frame.pixels_of_region(&x_range, &y_range);
+                    let serv_rows =
+                        serv_snap.frame.pixels_of_region(&x_range, &y_range);
+
+                    let Some(top) = client_rows.zip(serv_rows).position(
+                        |(c_row, s_row)| {
+                            c_row.zip(s_row).any(|(c_px, s_px)| c_px != s_px)
+                        },
+                    ) else {
+                        continue; // no difference in this subregion
+                    };
+
+                    // again, but in reverse (rposition) to get last row
+                    let client_rows =
+                        client_snap.frame.pixels_of_region(&x_range, &y_range);
+                    let serv_rows =
+                        serv_snap.frame.pixels_of_region(&x_range, &y_range);
+                    let bottom = client_rows
+                        .zip(serv_rows)
+                        .rposition(|(c_row, s_row)| {
+                            c_row.zip(s_row).any(|(c_px, s_px)| c_px != s_px)
+                        })
+                        // unwrap: we know there's a difference
+                        // because we didn't continue; above
+                        .unwrap();
+
+                    // (+1 rather than RangeInclusive, because different types)
+                    let diff_y_range = sub_y + top..sub_y + bottom + 1;
+
+                    // now get first different column between those
+                    let client_rows = client_snap
+                        .frame
+                        .pixels_of_region(&x_range, &diff_y_range);
+                    let serv_rows = serv_snap
+                        .frame
+                        .pixels_of_region(&x_range, &diff_y_range);
+                    let left = client_rows
+                        .zip(serv_rows)
+                        .filter_map(|(c_row, s_row)| {
+                            c_row
+                                .zip(s_row)
+                                .position(|(c_px, s_px)| c_px != s_px)
+                        })
+                        .min()
+                        // unwrap: as above
+                        .unwrap();
+
+                    // and last different column, max(rposition)
+                    let client_rows = client_snap
+                        .frame
+                        .pixels_of_region(&x_range, &diff_y_range);
+                    let serv_rows = serv_snap
+                        .frame
+                        .pixels_of_region(&x_range, &diff_y_range);
+                    let right = client_rows
+                        .zip(serv_rows)
+                        .filter_map(|(c_row, s_row)| {
+                            c_row
+                                .zip(s_row)
+                                .rposition(|(c_px, s_px)| c_px != s_px)
+                        })
+                        .max()
+                        // unwrap: as above
+                        .unwrap();
+
+                    let diff_x_range = sub_x + left..sub_x + right + 1;
+
+                    let subframe =
+                        serv_snap.frame.subframe(&diff_x_range, &diff_y_range);
+
+                    rectangles.push(Rectangle {
+                        position: Position {
+                            x: diff_x_range.start as u16,
+                            y: diff_y_range.start as u16,
+                        },
+                        dimensions: Resolution {
+                            width: subframe.width() as u16,
+                            height: subframe.height() as u16,
+                        },
+                        // TODO: below a certain subframe.raw_size(), just Raw?
+                        data: cstate
+                            .preferred_available_encoding()
+                            .from(subframe),
+                    });
+                }
+            }
+            FramebufferUpdate(rectangles)
         };
+
         fbu.write_to(
             conn,
             &mut cstate.connection_context,
@@ -353,6 +473,9 @@ impl VncServer {
 
         // With the FBU sent, the existing request is fulfilled
         cstate.fbu_req = None;
+        // and we now know what the client's screen looks like,
+        // for the next frame to diff from as necessary
+        cstate.last_snap_client = cstate.last_snap.take();
 
         Ok(())
     }
@@ -392,9 +515,8 @@ impl VncServer {
         }
 
         loop {
-            let wait_len_us = match cstate
-                .last_snap
-                .as_ref()
+            let wait_len = match (cstate.last_snap.as_ref())
+                .or(cstate.last_snap_client.as_ref())
                 .map(|(frame, kind)| (kind, frame.when.elapsed()))
             {
                 None | Some((FrameKind::Generated, _)) => {
@@ -405,18 +527,20 @@ impl VncServer {
                     }
                     // If the update resulted in no change, wait the default
                     // interval to check again
-                    self.frame_int_us as u64
+                    self.frame_interval
                 }
                 Some((FrameKind::Valid, age)) => {
-                    let since_last = age.as_micros() as usize;
-                    if since_last >= self.frame_int_us {
+                    let since_last = age;
+                    if since_last >= self.frame_interval {
                         self.update_frame(cstate);
                         return;
                     }
-                    (self.frame_int_us - since_last) as u64
+                    self.frame_interval
+                        .checked_sub(since_last)
+                        .unwrap_or_default()
                 }
             };
-            sleep(Duration::from_micros(wait_len_us)).await
+            sleep(wait_len).await
         }
     }
 

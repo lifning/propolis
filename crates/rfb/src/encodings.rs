@@ -13,15 +13,17 @@ use raw::RawEncoding;
 use trle::{TRLEncoding, ZRLEncoding};
 use zlib::ZlibEncoding;
 
-// non-rfc encodings
+// non-RFC6143 encodings
 mod jpeg;
-mod tightpng;
+mod tight;
 
 use jpeg::JPEGEncoding;
-use tightpng::TightPNGEncoding;
+use tight::TightEncoding;
+use tight::TightPNGEncoding;
 
 pub struct ConnectionContext {
     pub zlib: flate2::Compress,
+    // TODO: client-configured jpeg/png effort params?
 }
 impl Default for ConnectionContext {
     fn default() -> Self {
@@ -29,7 +31,6 @@ impl Default for ConnectionContext {
     }
 }
 
-/// https://www.iana.org/assignments/rfb/rfb.xhtml
 #[derive(
     Copy,
     Clone,
@@ -44,6 +45,7 @@ impl Default for ConnectionContext {
     strum::VariantNames,
 )]
 #[repr(i32)]
+/// https://www.iana.org/assignments/rfb/rfb.xhtml
 pub enum EncodingType {
     Raw = 0,
     CopyRect = 1,
@@ -75,29 +77,42 @@ impl EncodingType {
         subframe: rgb_frame::SubFrame<'a>,
     ) -> Box<dyn Encoding + 'a> {
         match self {
+            // sends the entire subframe's pixels over the wire uncompressed.
             EncodingType::Raw => Box::new(RawEncoding::from(subframe)),
-            EncodingType::CopyRect => unimplemented!(),
-            EncodingType::RRE => unimplemented!(),
-            EncodingType::CoRRE => unimplemented!(),
-            EncodingType::Hextile => unimplemented!(),
+            // same as Raw, but Zlib-deflated.
             EncodingType::Zlib => Box::new(ZlibEncoding::from(subframe)),
-            EncodingType::Tight => unimplemented!(),
-            EncodingType::ZlibHex => unimplemented!(),
             EncodingType::TRLE => Box::new(TRLEncoding::from(subframe)),
             EncodingType::ZRLE => Box::new(ZRLEncoding::from(subframe)),
-            EncodingType::JPEG => Box::new(JPEGEncoding::from(subframe)),
-            EncodingType::ZYWRLE => unimplemented!(),
-            EncodingType::H264 => unimplemented!(),
-            EncodingType::JRLE => unimplemented!(),
-            EncodingType::VaH264 => unimplemented!(),
-            EncodingType::ZRLE2 => unimplemented!(),
-            EncodingType::OpenH264 => unimplemented!(),
-            EncodingType::DesktopSizePseudo => unimplemented!(),
-            EncodingType::LastRectPseudo => unimplemented!(),
-            EncodingType::CursorPseudo => unimplemented!(),
+            // non-RFC encodings originating from TightVNC, with our impl
+            // only producing the simpler JPEG/Fill/PNG special-cases.
+            EncodingType::Tight => Box::new(TightEncoding::from(subframe)),
             EncodingType::TightPNG => {
                 Box::new(TightPNGEncoding::from(subframe))
             }
+            // a non-RFC encoding whose message data is just a JPEG
+            EncodingType::JPEG => Box::new(JPEGEncoding::from(subframe)),
+            // not reasonable for us to implement, as we don't have the
+            // information a window-manager or GPU would about what regions
+            // are being duplicated (without brute-force searching)
+            EncodingType::CopyRect => unimplemented!(),
+            // RRE, CoRRE, and Hextile are deemed "obsolescent" by the RFC
+            EncodingType::RRE => unimplemented!(),
+            EncodingType::CoRRE => unimplemented!(),
+            EncodingType::Hextile => unimplemented!(),
+            EncodingType::ZlibHex => unimplemented!(),
+            // a proprietary, lossy, zlib-wavelet-RLE encoding by Hitachi
+            EncodingType::ZYWRLE => unimplemented!(),
+            // MPEG license-encumbered and generally not worth it for VNC
+            EncodingType::H264 => unimplemented!(),
+            EncodingType::VaH264 => unimplemented!(),
+            EncodingType::OpenH264 => unimplemented!(),
+            // ???
+            EncodingType::JRLE => unimplemented!(),
+            EncodingType::ZRLE2 => unimplemented!(),
+            // not a thing you'd meaningfully encode a subframe with
+            EncodingType::DesktopSizePseudo => unimplemented!(),
+            EncodingType::LastRectPseudo => unimplemented!(),
+            EncodingType::CursorPseudo => unimplemented!(),
             EncodingType::ContinuousUpdatesPseudo => unimplemented!(),
         }
     }
@@ -110,5 +125,29 @@ pub trait Encoding: Send + Sync {
     fn encode(
         &self,
         ctx: &mut ConnectionContext,
-    ) -> Box<dyn Iterator<Item = u8> + '_>;
+    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>>;
+}
+
+fn subframe_to_image(
+    enc: impl image::ImageEncoder,
+    subframe: &rgb_frame::SubFrame<'_>,
+) -> crate::proto::Result<()> {
+    let capacity = subframe.raw_size();
+    let mut raw_rgb_buf: Vec<u8> =
+        Vec::with_capacity((capacity * 3).div_ceil(4));
+
+    // none of the Bgr orders are supported in image crate's PngEncoder,
+    // and only Rgb8 (no alpha) is supported in its JpegEncoder.
+    let (ri, gi, bi, _) = subframe.fourcc().le_idx_rgba();
+    raw_rgb_buf.extend(
+        subframe.pixels().flatten().flat_map(|px| [px[ri], px[gi], px[bi]]),
+    );
+
+    enc.write_image(
+        &raw_rgb_buf,
+        subframe.width() as u32,
+        subframe.height() as u32,
+        image::ExtendedColorType::Rgb8,
+    )
+    .map_err(|e| crate::proto::ProtocolError::EncodingError(e.to_string()))
 }

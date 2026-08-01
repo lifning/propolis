@@ -19,13 +19,13 @@ impl<'a> Encoding for RawEncoding<'a> {
     fn encode(
         &self,
         _ctx: &mut ConnectionContext,
-    ) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(
+    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
+        Ok(Box::new(
             self.subframe
                 .pixels() // conceptually: [[[u8; Bpp]; Width]; Height]
                 .flatten() // flatten iterator of rows: [[u8; Bpp]; Width*Height]
                 .flatten() // flatten pixels into bytes: [u8; Bpp*Width*Height]
                 .copied(),
-        )
+        ))
     }
 }

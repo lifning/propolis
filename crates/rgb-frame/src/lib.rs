@@ -118,10 +118,12 @@ impl Frame {
         &self,
         x_range: &Range<usize>,
         y_range: &Range<usize>,
-    ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
+    ) -> impl DoubleEndedIterator<
+        Item = impl DoubleEndedIterator<Item = &[u8]> + ExactSizeIterator,
+    > + ExactSizeIterator {
         let bytes_per_px = self.spec.fourcc.bytes_per_pixel().get();
         let x_start = x_range.start;
-        let x_end = x_range.end;
+        let x_end = x_range.end.min(self.spec.width.get());
         let stride = self.spec.stride.get();
         assert!(
             x_end * bytes_per_px <= stride,
@@ -129,7 +131,9 @@ impl Frame {
         );
         let row_length = (x_end - x_start) * bytes_per_px;
         let col_ofs = x_start * bytes_per_px;
-        y_range.clone().map(move |y| {
+        let y_start = y_range.start;
+        let y_end = y_range.end.min(self.spec.height.get());
+        (y_start..y_end).map(move |y| {
             let row_start = y * stride + col_ofs;
             let row_end = row_start + row_length;
             self.bytes()[row_start..row_end].chunks_exact(bytes_per_px)
@@ -144,8 +148,8 @@ impl Frame {
         SubFrame {
             x_start: x_range.start,
             y_start: y_range.start,
-            x_end: x_range.end,
-            y_end: y_range.end,
+            x_end: x_range.end.min(self.spec.width.get()),
+            y_end: y_range.end.min(self.spec.height.get()),
             frame: self,
         }
     }
@@ -216,13 +220,18 @@ impl<'a> SubFrame<'a> {
         &self,
         x_range: &Range<usize>,
         y_range: &Range<usize>,
-    ) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
+    ) -> impl DoubleEndedIterator<
+        Item = impl DoubleEndedIterator<Item = &[u8]> + ExactSizeIterator,
+    > + ExactSizeIterator {
         self.frame.pixels_of_region(
             &(self.x_end.min(self.x_start + x_range.start)
                 ..self.x_end.min(self.x_start + x_range.end)),
             &(self.y_end.min(self.y_start + y_range.start)
                 ..self.y_end.min(self.y_start + y_range.end)),
         )
+    }
+    pub fn raw_size(&self) -> usize {
+        self.width() * self.height() * self.fourcc().bytes_per_pixel().get()
     }
 }
 

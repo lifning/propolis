@@ -1,5 +1,6 @@
 use super::{Encoding, EncodingType};
 use crate::encodings::ConnectionContext;
+use crate::proto::ProtocolError;
 
 /// https://vncdotool.readthedocs.io/en/0.8.0/rfbproto.html#zlib-encoding
 pub struct ZlibEncoding<'a> {
@@ -20,7 +21,7 @@ impl<'a> Encoding for ZlibEncoding<'a> {
     fn encode(
         &self,
         ctx: &mut ConnectionContext,
-    ) -> Box<dyn Iterator<Item = u8> + '_> {
+    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
         let in_buf: Vec<u8> = self
             .frame
             .pixels() // conceptually: [[[u8; Bpp]; Width]; Height]
@@ -28,13 +29,21 @@ impl<'a> Encoding for ZlibEncoding<'a> {
             .flatten() // flatten pixels into bytes: [u8; Bpp*Width*Height]
             .copied()
             .collect();
-        let mut out_buf = Vec::with_capacity(in_buf.len());
+
+        // `compress_vec` *requires* target vec to have enough reserved space.
+        // https://zlib.net/zlib_tech.html "The worst case choice of parameters
+        // can result in an expansion of at most 13.5%, plus eleven bytes."
+        let mut out_buf = Vec::with_capacity((in_buf.len() * 135 / 100) + 11);
 
         ctx.zlib
             .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
-            .expect("zlib error");
-        Box::new(
+            .map_err(|_| {
+                ProtocolError::EncodingError(
+                    "zlib compression failed".to_string(),
+                )
+            })?;
+        Ok(Box::new(
             (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),
-        )
+        ))
     }
 }

@@ -3,11 +3,11 @@ use core::num::NonZeroUsize;
 use core::ops::Range;
 
 use crate::encodings::{ConnectionContext, Encoding, EncodingType};
-use crate::proto::PixelFormat;
+use crate::proto::{PixelFormat, ProtocolError};
 
 const TRLE_PX: usize = 16;
 const ZRLE_PX: usize = 64;
-const PAL_SIZE: usize = 128;
+const PAL_SIZE: usize = 127;
 
 pub struct RLEncoding<'a, const PX: usize> {
     subframe: rgb_frame::SubFrame<'a>,
@@ -32,8 +32,8 @@ impl<'a, const PX: usize> Encoding for RLEncoding<'a, PX> {
     fn encode(
         &self,
         _ctx: &mut ConnectionContext,
-    ) -> Box<dyn Iterator<Item = u8> + '_> {
-        Box::new(self.encode_tiles().flat_map(|tile| tile.encode()))
+    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
+        Ok(Box::new(self.encode_tiles().flat_map(|tile| tile.encode())))
     }
 }
 
@@ -45,19 +45,29 @@ impl<'a> Encoding for ZRLEncoding<'a> {
     fn encode(
         &self,
         ctx: &mut ConnectionContext,
-    ) -> Box<dyn Iterator<Item = u8> + '_> {
-        let in_buf = self.0.encode(ctx).collect::<Vec<u8>>();
-        let mut out_buf = Vec::with_capacity(in_buf.len());
+    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
+        let mut in_buf = Vec::with_capacity(self.0.subframe.raw_size());
+        in_buf.extend(self.0.encode(ctx)?);
+
+        // `compress_vec` *requires* target vec to have enough reserved space.
+        // https://zlib.net/zlib_tech.html "The worst case choice of parameters
+        // can result in an expansion of at most 13.5%, plus eleven bytes."
+        let mut out_buf = Vec::with_capacity((in_buf.len() * 135 / 100) + 11);
+
         // RFC 6143 section 7.7.6:
         // > The server flushes the zlib stream to a byte boundary at the end of
         // > each ZRLE-encoded rectangle.  It need not flush the stream between
         // > tiles within a rectangle.
         ctx.zlib
             .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
-            .expect("zlib error");
-        Box::new(
+            .map_err(|_| {
+                ProtocolError::EncodingError(
+                    "zlib compression failed".to_string(),
+                )
+            })?;
+        Ok(Box::new(
             (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),
-        )
+        ))
     }
 }
 
@@ -97,7 +107,7 @@ enum TRLETile<const PX: usize> {
     PaletteRLEReused { runs: Vec<(u8, usize)> },
     #[allow(dead_code)]
     /// 130-255
-    PaletteRLE { palette: StackVec<CPixel, 128>, runs: Vec<(u8, usize)> },
+    PaletteRLE { palette: StackVec<CPixel, PAL_SIZE>, runs: Vec<(u8, usize)> },
 }
 
 impl<const PX: usize> TRLETile<PX> {
@@ -218,7 +228,7 @@ impl<'a, const PX: usize> RLEncoding<'a, PX> {
                 // Rust restrictiveness discussed in comment of the
                 // TRLETile::PackedPalette enum variant
                 const { assert!(PX <= ZRLE_PX) };
-                // max palette size is 128, per spec
+                // max palette size is 127, per spec
                 let mut palette: StackVec<CPixel, PAL_SIZE> =
                     StackVec::default();
 
@@ -258,6 +268,7 @@ impl<'a, const PX: usize> RLEncoding<'a, PX> {
                             // packed_pixels to an empty vec and it would be
                             // identical.. but let's stay clear to the spec :)
                             return TRLETile::SolidColor {
+                                // unwrap: palette.len is 1.
                                 color: palette.pop().unwrap(),
                             };
                         }
@@ -434,7 +445,7 @@ fn pal_rle((index, length): (u8, usize)) -> impl Iterator<Item = u8> {
     }
 }
 
-// just a quick heapless subset-of-Vec to avoid alloc spam / stick to cache
+// just a quick trivial heapless Vec-subset to avoid alloc spam / stick to cache
 struct StackVec<T, const CAP: usize>([T; CAP], usize);
 impl<T: Copy + Default, const CAP: usize> Default for StackVec<T, CAP> {
     fn default() -> Self {
@@ -445,6 +456,10 @@ impl<T: Default, const CAP: usize> StackVec<T, CAP> {
     fn push(&mut self, val: T) -> Result<usize, ()> {
         let Self(arr, len) = self;
         let pos = *len;
+        // // XXX: why is this not covered by get_mut?
+        // if pos == CAP {
+        //     return Err(());
+        // }
         let cell = arr.get_mut(pos).ok_or(())?;
         *cell = val;
         *len += 1;
@@ -453,9 +468,7 @@ impl<T: Default, const CAP: usize> StackVec<T, CAP> {
     fn pop(&mut self) -> Option<T> {
         let Self(arr, len) = self;
         *len = len.checked_sub(1)?;
-        let mut moved = T::default();
-        core::mem::swap(&mut moved, &mut arr[*len]);
-        Some(moved)
+        Some(core::mem::take(&mut arr[*len]))
     }
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.0[..self.1].iter()
