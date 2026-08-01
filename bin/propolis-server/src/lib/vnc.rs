@@ -33,9 +33,8 @@ const MAX_RES: Resolution = Resolution { width: 1920, height: 1200 };
 const UNINIT_RES: Resolution = Resolution { width: 800, height: 600 };
 const UNINIT_FOURCC: FourCC = FourCC::XR24;
 const SERVER_NAME: &str = "propolis-vnc";
-/// Frame interval (in us) for 10fps
-// const FRAME_US_10FPS: usize = 1000000 / 10;
-const FRAME_US_30FPS: Duration = Duration::from_micros(1000000 / 30);
+/// Frame interval for 30 frames per second limit
+const FRAME_US_30FPS: Duration = Duration::from_micros(1_000_000 / 30);
 
 struct Devices {
     keyboard: Arc<PS2Ctrl>,

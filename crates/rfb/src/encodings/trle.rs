@@ -139,7 +139,7 @@ impl<const PX: usize> TRLETile<PX> {
                 // as the unmodified byte value of the palette index,
                 // so we can encode it *as though* it were PackedPalette
                 // with an altered subencoding byte.
-                if (17..=126).contains(&subenc) {
+                if (17..=127).contains(&subenc) {
                     subenc += 128;
                 }
                 Left(Right(Left(
@@ -274,18 +274,29 @@ impl<'a, const PX: usize> RLEncoding<'a, PX> {
                         }
                         // these collect() calls pass through an unwrap in
                         // StackVec::from_iter, but are safe because these
-                        // iterators will never have more than PAL_SIZE items
+                        // iterators will never have more than PAL_SIZE items.
+                        //
+                        // .chunks(x_range.len()) is because, per the spec:
+                        // > For tiles not a multiple of 8, 4, or 2 pixels wide
+                        // > (as appropriate), padding bits are used to
+                        // > align each *row* to an exact number of bytes.
                         2 => tile_indeces
-                            .chunks(8)
-                            .map(PackedIndeces::new_1bpp)
+                            .chunks(x_range.len())
+                            .flat_map(|row| {
+                                row.chunks(8).map(PackedIndeces::new_1bpp)
+                            })
                             .collect(),
                         3..=4 => tile_indeces
-                            .chunks(4)
-                            .map(PackedIndeces::new_2bpp)
+                            .chunks(x_range.len())
+                            .flat_map(|row| {
+                                row.chunks(4).map(PackedIndeces::new_2bpp)
+                            })
                             .collect(),
                         5..=16 => tile_indeces
-                            .chunks(2)
-                            .map(PackedIndeces::new_4bpp)
+                            .chunks(x_range.len())
+                            .flat_map(|row| {
+                                row.chunks(2).map(PackedIndeces::new_4bpp)
+                            })
                             .collect(),
                         17..=127 => unsafe {
                             // safety: PackedIndeces is repr(transparent) u8
@@ -456,10 +467,6 @@ impl<T: Default, const CAP: usize> StackVec<T, CAP> {
     fn push(&mut self, val: T) -> Result<usize, ()> {
         let Self(arr, len) = self;
         let pos = *len;
-        // // XXX: why is this not covered by get_mut?
-        // if pos == CAP {
-        //     return Err(());
-        // }
         let cell = arr.get_mut(pos).ok_or(())?;
         *cell = val;
         *len += 1;

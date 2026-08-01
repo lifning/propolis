@@ -209,9 +209,6 @@ impl<'a> SubFrame<'a> {
     pub fn fourcc(&self) -> FourCC {
         self.frame.spec.fourcc
     }
-    // pub fn spec(&self) -> Spec {
-    //     self.frame.spec()
-    // }
     pub fn pixels(&self) -> impl Iterator<Item = impl Iterator<Item = &[u8]>> {
         let Self { x_start, y_start, x_end, y_end, .. } = *self;
         self.frame.pixels_of_region(&(x_start..x_end), &(y_start..y_end))
