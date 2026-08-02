@@ -9,6 +9,8 @@ mod raw;
 mod trle;
 mod zlib;
 
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
 use raw::RawEncoding;
 use trle::{TRLEncoding, ZRLEncoding};
 use zlib::ZlibEncoding;
@@ -23,11 +25,94 @@ use tight::TightPNGEncoding;
 
 pub struct ConnectionContext {
     pub zlib: flate2::Compress,
-    // TODO: client-configured jpeg/png effort params?
+    /// 10..=100
+    jpeg_quality: Option<u8>,
+    /// 0..=9
+    compression_level: Option<u8>,
 }
 impl Default for ConnectionContext {
     fn default() -> Self {
-        Self { zlib: flate2::Compress::new(flate2::Compression::fast(), true) }
+        Self {
+            zlib: flate2::Compress::new(flate2::Compression::fast(), true),
+            jpeg_quality: None,
+            compression_level: None,
+        }
+    }
+}
+impl ConnectionContext {
+    pub fn set_compression_params(&mut self, encodings: &[EncodingType]) {
+        use EncodingType::*;
+        self.jpeg_quality = None;
+        self.compression_level = None;
+        for enc in encodings {
+            match enc {
+                JpegQualityPseudo9 | JpegQualityPseudo8
+                | JpegQualityPseudo7 | JpegQualityPseudo6
+                | JpegQualityPseudo5 | JpegQualityPseudo4
+                | JpegQualityPseudo3 | JpegQualityPseudo2
+                | JpegQualityPseudo1 | JpegQualityPseudo0 => {
+                    // numerically, mapping this 0..=9 to 1..=100 could be
+                    // appropriate, but a 1%-quality JPEG is not very
+                    // useful for VNC, so we'll just settle for 10..=100.
+                    const JPEG_LOWEST: i32 =
+                        EncodingType::JpegQualityPseudo0 as i32;
+                    let int_0_9 = ((*enc as i32) - JPEG_LOWEST) as u8;
+                    self.jpeg_quality = Some((int_0_9 + 1) * 10);
+                }
+                CompressLevelPseudo9 | CompressLevelPseudo8
+                | CompressLevelPseudo7 | CompressLevelPseudo6
+                | CompressLevelPseudo5 | CompressLevelPseudo4
+                | CompressLevelPseudo3 | CompressLevelPseudo2
+                | CompressLevelPseudo1 | CompressLevelPseudo0 => {
+                    const LEVEL_LOWEST: i32 =
+                        EncodingType::CompressLevelPseudo0 as i32;
+                    let int_0_9 = ((*enc as i32) - LEVEL_LOWEST) as u8;
+                    // 0 is likely to actually *inflate* size slightly.
+                    // let's assume that's not the user's intent when they
+                    // move the slider all the way down hoping for efficiency.
+                    self.compression_level = Some(1.max(int_0_9));
+                    self.zlib = flate2::Compress::new(
+                        flate2::Compression::new(int_0_9 as u32),
+                        true,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    pub fn jpeg_quality(&self) -> Option<u8> {
+        self.jpeg_quality
+    }
+    fn jpeg_encoder<'a>(
+        &self,
+        enc_buf: &'a mut Vec<u8>,
+    ) -> JpegEncoder<&'a mut Vec<u8>> {
+        if let Some(qual) = self.jpeg_quality {
+            JpegEncoder::new_with_quality(enc_buf, qual)
+        } else {
+            JpegEncoder::new(enc_buf)
+        }
+    }
+    fn png_encoder<'a>(
+        &self,
+        enc_buf: &'a mut Vec<u8>,
+    ) -> PngEncoder<&'a mut Vec<u8>> {
+        use image::codecs::png::{CompressionType, FilterType};
+        if let Some(level) = self.compression_level {
+            PngEncoder::new_with_quality(
+                enc_buf,
+                // frustratingly, these enum variants eventually map to
+                // flate2 levels in the 1..9 range... such is life
+                match level {
+                    0..=4 => CompressionType::Fast,
+                    5..=7 => CompressionType::Default,
+                    8.. => CompressionType::Best,
+                },
+                FilterType::Adaptive,
+            )
+        } else {
+            PngEncoder::new(enc_buf)
+        }
     }
 }
 
@@ -64,9 +149,29 @@ pub enum EncodingType {
     VaH264 = 23,
     ZRLE2 = 24,
     OpenH264 = 50,
+    JpegQualityPseudo9 = -23,
+    JpegQualityPseudo8 = -24,
+    JpegQualityPseudo7 = -25,
+    JpegQualityPseudo6 = -26,
+    JpegQualityPseudo5 = -27,
+    JpegQualityPseudo4 = -28,
+    JpegQualityPseudo3 = -29,
+    JpegQualityPseudo2 = -30,
+    JpegQualityPseudo1 = -31,
+    JpegQualityPseudo0 = -32,
     DesktopSizePseudo = -223,
     LastRectPseudo = -224,
     CursorPseudo = -239,
+    CompressLevelPseudo9 = -247,
+    CompressLevelPseudo8 = -248,
+    CompressLevelPseudo7 = -249,
+    CompressLevelPseudo6 = -250,
+    CompressLevelPseudo5 = -251,
+    CompressLevelPseudo4 = -252,
+    CompressLevelPseudo3 = -253,
+    CompressLevelPseudo2 = -254,
+    CompressLevelPseudo1 = -255,
+    CompressLevelPseudo0 = -256,
     TightPNG = -260,
     ContinuousUpdatesPseudo = -313,
 }
@@ -76,44 +181,47 @@ impl EncodingType {
         &self,
         subframe: rgb_frame::SubFrame<'a>,
     ) -> Box<dyn Encoding + 'a> {
+        use EncodingType::*;
         match self {
             // sends the entire subframe's pixels over the wire uncompressed.
-            EncodingType::Raw => Box::new(RawEncoding::from(subframe)),
+            Raw => Box::new(RawEncoding::from(subframe)),
             // same as Raw, but Zlib-deflated.
-            EncodingType::Zlib => Box::new(ZlibEncoding::from(subframe)),
-            EncodingType::TRLE => Box::new(TRLEncoding::from(subframe)),
-            EncodingType::ZRLE => Box::new(ZRLEncoding::from(subframe)),
+            Zlib => Box::new(ZlibEncoding::from(subframe)),
+            TRLE => Box::new(TRLEncoding::from(subframe)),
+            ZRLE => Box::new(ZRLEncoding::from(subframe)),
             // non-RFC encodings originating from TightVNC, with our impl
             // only producing the simpler JPEG/Fill/PNG special-cases.
-            EncodingType::Tight => Box::new(TightEncoding::from(subframe)),
-            EncodingType::TightPNG => {
-                Box::new(TightPNGEncoding::from(subframe))
-            }
+            Tight => Box::new(TightEncoding::from(subframe)),
+            TightPNG => Box::new(TightPNGEncoding::from(subframe)),
             // a non-RFC encoding whose message data is just a JPEG
-            EncodingType::JPEG => Box::new(JPEGEncoding::from(subframe)),
+            JPEG => Box::new(JPEGEncoding::from(subframe)),
             // not reasonable for us to implement, as we don't have the
             // information a window-manager or GPU would about what regions
             // are being duplicated (without brute-force searching)
-            EncodingType::CopyRect => unimplemented!(),
+            CopyRect => unimplemented!(),
             // RRE, CoRRE, and Hextile are deemed "obsolescent" by the RFC
-            EncodingType::RRE => unimplemented!(),
-            EncodingType::CoRRE => unimplemented!(),
-            EncodingType::Hextile => unimplemented!(),
-            EncodingType::ZlibHex => unimplemented!(),
+            RRE | CoRRE => unimplemented!(),
+            Hextile | ZlibHex => unimplemented!(),
             // a proprietary, lossy, zlib-wavelet-RLE encoding by Hitachi
-            EncodingType::ZYWRLE => unimplemented!(),
+            ZYWRLE => unimplemented!(),
             // MPEG license-encumbered and generally not worth it for VNC
-            EncodingType::H264 => unimplemented!(),
-            EncodingType::VaH264 => unimplemented!(),
-            EncodingType::OpenH264 => unimplemented!(),
+            H264 | VaH264 | OpenH264 => unimplemented!(),
             // ???
-            EncodingType::JRLE => unimplemented!(),
-            EncodingType::ZRLE2 => unimplemented!(),
+            JRLE | ZRLE2 => unimplemented!(),
             // not a thing you'd meaningfully encode a subframe with
-            EncodingType::DesktopSizePseudo => unimplemented!(),
-            EncodingType::LastRectPseudo => unimplemented!(),
-            EncodingType::CursorPseudo => unimplemented!(),
-            EncodingType::ContinuousUpdatesPseudo => unimplemented!(),
+            DesktopSizePseudo
+            | LastRectPseudo
+            | CursorPseudo
+            | ContinuousUpdatesPseudo => unimplemented!(),
+            JpegQualityPseudo9 | JpegQualityPseudo8 | JpegQualityPseudo7
+            | JpegQualityPseudo6 | JpegQualityPseudo5 | JpegQualityPseudo4
+            | JpegQualityPseudo3 | JpegQualityPseudo2 | JpegQualityPseudo1
+            | JpegQualityPseudo0 => unimplemented!(),
+            CompressLevelPseudo9 | CompressLevelPseudo8
+            | CompressLevelPseudo7 | CompressLevelPseudo6
+            | CompressLevelPseudo5 | CompressLevelPseudo4
+            | CompressLevelPseudo3 | CompressLevelPseudo2
+            | CompressLevelPseudo1 | CompressLevelPseudo0 => unimplemented!(),
         }
     }
 }

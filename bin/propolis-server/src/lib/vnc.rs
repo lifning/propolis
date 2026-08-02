@@ -2,7 +2,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -58,7 +57,8 @@ struct ClientState {
     last_snap: Option<(FrameSnap, FrameKind)>,
     last_snap_client: Option<(FrameSnap, FrameKind)>,
     fbu_req: Option<FramebufferUpdateRequest>,
-    encodings: BTreeSet<EncodingType>,
+    encodings: Vec<EncodingType>,
+    active_encoding: EncodingType,
     output_fourcc: FourCC,
     connection_context: ConnectionContext,
     serialize_buffer: Vec<u8>,
@@ -69,7 +69,8 @@ impl Default for ClientState {
             last_snap: None,
             last_snap_client: None,
             fbu_req: None,
-            encodings: BTreeSet::new(),
+            encodings: Vec::new(),
+            active_encoding: EncodingType::Raw,
             output_fourcc: UNINIT_FOURCC,
             connection_context: ConnectionContext::default(),
             serialize_buffer: Vec::new(),
@@ -79,13 +80,22 @@ impl Default for ClientState {
 impl ClientState {
     fn preferred_available_encoding(&self) -> EncodingType {
         use EncodingType::*;
-        // TightPNG, Tight(JPEG), and JPEG are preferred when available
-        // because browser-based clients (i.e. noVNC) can utilize native-code
-        // image/png and image/jpeg decoders for better performance than
-        // JS implementations of the standard RFC6143-defined encodings.
-        for enc in [TightPNG, Tight, JPEG, ZRLE, Zlib, TRLE] {
-            if self.encodings.contains(&enc) {
-                return enc;
+        // TightPNG is preferred when available because browser-based clients
+        // (i.e. noVNC) can utilize native-code image/png decoders for better
+        // performance than JS impls of standard RFC6143-defined encodings.
+        if self.encodings.contains(&TightPNG) {
+            return TightPNG;
+        }
+        for enc in &self.encodings {
+            match enc {
+                Zlib | TRLE | ZRLE | JPEG => return *enc,
+                // our impl of "Tight" encoding is only the JPEG subencoding,
+                // for which the client indicates support by sending at least
+                // one JpegQualityPseudo[0..9]
+                Tight if self.connection_context.jpeg_quality().is_some() => {
+                    return *enc
+                }
+                _ => (),
             }
         }
         Raw
@@ -319,7 +329,9 @@ impl VncServer {
                 }
             },
             ClientMessage::SetEncodings { encodings, unknown } => {
-                cstate.encodings = encodings.into_iter().collect();
+                cstate.connection_context.set_compression_params(&encodings);
+                cstate.encodings = encodings;
+                cstate.active_encoding = cstate.preferred_available_encoding();
                 slog::trace!(self.log, "SetEncodings({:?})", cstate.encodings);
                 if !unknown.is_empty() {
                     slog::debug!(
@@ -356,7 +368,7 @@ impl VncServer {
             FramebufferUpdate(vec![Rectangle {
                 position: pos,
                 dimensions: Resolution { width, height },
-                data: cstate.preferred_available_encoding().from(subframe),
+                data: cstate.active_encoding.from(subframe),
             }])
         } else {
             // unwrap: !is_none
@@ -453,9 +465,7 @@ impl VncServer {
                             height: subframe.height() as u16,
                         },
                         // TODO: below a certain subframe.raw_size(), just Raw?
-                        data: cstate
-                            .preferred_available_encoding()
-                            .from(subframe),
+                        data: cstate.active_encoding.from(subframe),
                     });
                 }
             }

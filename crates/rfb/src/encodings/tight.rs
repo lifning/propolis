@@ -10,8 +10,6 @@ use crate::encodings::{
     subframe_to_image, ConnectionContext, Encoding, EncodingType,
 };
 use crate::proto::ProtocolError;
-use image::codecs::jpeg::JpegEncoder;
-use image::codecs::png::PngEncoder;
 use itertools::Itertools;
 
 pub struct TightEncoding<'a> {
@@ -31,7 +29,7 @@ impl<'a> Encoding for TightEncoding<'a> {
 
     fn encode(
         &self,
-        _ctx: &mut ConnectionContext,
+        ctx: &mut ConnectionContext,
     ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
         // https://libvnc.github.io/doc/html/rfbproto_8h_source.html#l00860
         // > -- NOTE 1. If the color depth is 24, and all three color components
@@ -49,7 +47,7 @@ impl<'a> Encoding for TightEncoding<'a> {
         } else {
             let mut enc_buf: Vec<u8> =
                 Vec::with_capacity(self.subframe.raw_size());
-            let enc = JpegEncoder::new(&mut enc_buf);
+            let enc = ctx.jpeg_encoder(&mut enc_buf);
             subframe_to_image(enc, &self.subframe)?;
 
             // https://libvnc.github.io/doc/html/rfbproto_8h_source.html#l00784
@@ -81,10 +79,10 @@ impl<'a> Encoding for TightPNGEncoding<'a> {
 
     fn encode(
         &self,
-        _ctx: &mut ConnectionContext,
+        ctx: &mut ConnectionContext,
     ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
         let mut enc_buf: Vec<u8> = Vec::with_capacity(self.subframe.raw_size());
-        let enc = PngEncoder::new(&mut enc_buf);
+        let enc = ctx.png_encoder(&mut enc_buf);
         subframe_to_image(enc, &self.subframe)?;
 
         // https://libvnc.github.io/doc/html/rfbproto_8h_source.html#l00784

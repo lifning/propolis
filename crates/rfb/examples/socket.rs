@@ -214,7 +214,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     ClientMessage::PointerEvent(pev) => {
-                        pointer_pos = pev.position;
+                        if pev.position.x < WIDTH as u16 - pointer_size.width
+                            && pev.position.y
+                                < HEIGHT as u16 - pointer_size.height
+                        {
+                            pointer_pos = pev.position;
+                        }
                     }
                     _ => {
                         slog::debug!(log_child, "RX: Client msg {:?}", msg);

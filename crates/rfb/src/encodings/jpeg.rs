@@ -4,7 +4,6 @@
 use crate::encodings::{
     subframe_to_image, ConnectionContext, Encoding, EncodingType,
 };
-use image::codecs::jpeg::JpegEncoder;
 
 pub struct JPEGEncoding<'a> {
     subframe: rgb_frame::SubFrame<'a>,
@@ -23,11 +22,10 @@ impl<'a> Encoding for JPEGEncoding<'a> {
 
     fn encode(
         &self,
-        _ctx: &mut ConnectionContext,
+        ctx: &mut ConnectionContext,
     ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
         let mut enc_buf: Vec<u8> = Vec::with_capacity(self.subframe.raw_size());
-        let enc = JpegEncoder::new(&mut enc_buf);
-
+        let enc = ctx.jpeg_encoder(&mut enc_buf);
         subframe_to_image(enc, &self.subframe)?;
 
         Ok(Box::new(enc_buf.into_iter()))

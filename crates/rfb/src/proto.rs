@@ -483,6 +483,14 @@ impl Decoder for ClientMessageDecoder {
         let message_type = ClientMessageType::from_repr(type_byte)
             .ok_or(ProtocolError::UnknownMessageType(type_byte))?;
 
+        // these sizes are explicitly given in the RFC and relevant here:
+        const {
+            assert!(size_of::<raw::PixelFormat>() == 16);
+            assert!(size_of::<EncodingType>() == 4);
+            assert!(size_of::<raw::FramebufferUpdateRequest>() == 9);
+            assert!(size_of::<raw::KeyEvent>() == 7);
+            assert!(size_of::<raw::PointerEvent>() == 5);
+        }
         let msg_sz_reqd = match message_type {
             ClientMessageType::SetPixelFormat => {
                 // 3 bytes padding + message
@@ -498,7 +506,7 @@ impl Decoder for ClientMessageDecoder {
                 let num_encoding =
                     u16::from_be_bytes(src[2..4].try_into().unwrap());
                 1 + size_of::<u16>()
-                    + (num_encoding as usize * size_of::<u32>())
+                    + (num_encoding as usize * size_of::<EncodingType>())
             }
 
             ClientMessageType::FramebufferUpdateRequest => {
@@ -513,7 +521,7 @@ impl Decoder for ClientMessageDecoder {
                 // 3 bytes of padding + i32 len + string
                 let data_len =
                     u32::from_be_bytes(src[4..8].try_into().unwrap());
-                1 + size_of::<i32>() + data_len as usize
+                3 + size_of::<i32>() + data_len as usize
             }
         };
         let total_sz_reqd = 1 + msg_sz_reqd;

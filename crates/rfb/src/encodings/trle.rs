@@ -2,8 +2,9 @@ use core::iter::once;
 use core::num::NonZeroUsize;
 use core::ops::Range;
 
+use crate::encodings::zlib::ZlibWrappedEncoding;
 use crate::encodings::{ConnectionContext, Encoding, EncodingType};
-use crate::proto::{PixelFormat, ProtocolError};
+use crate::proto::PixelFormat;
 
 const TRLE_PX: usize = 16;
 const ZRLE_PX: usize = 64;
@@ -16,7 +17,16 @@ pub struct RLEncoding<'a, const PX: usize> {
 /// RFC 6143, section 7.7.5
 pub type TRLEncoding<'a> = RLEncoding<'a, TRLE_PX>;
 /// RFC 6143, section 7.7.6
-pub struct ZRLEncoding<'a>(RLEncoding<'a, ZRLE_PX>);
+// pub struct ZRLEncoding<'a>(RLEncoding<'a, ZRLE_PX>);
+
+pub type ZRLEncoding<'a> =
+    ZlibWrappedEncoding<RLEncoding<'a, ZRLE_PX>, { EncodingType::ZRLE as i32 }>;
+
+impl<'a> From<rgb_frame::SubFrame<'a>> for ZRLEncoding<'a> {
+    fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
+        Self { unc_enc: RLEncoding::from(subframe) }
+    }
+}
 
 impl<'a, const PX: usize> From<rgb_frame::SubFrame<'a>> for RLEncoding<'a, PX> {
     fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
@@ -34,46 +44,6 @@ impl<'a, const PX: usize> Encoding for RLEncoding<'a, PX> {
         _ctx: &mut ConnectionContext,
     ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
         Ok(Box::new(self.encode_tiles().flat_map(|tile| tile.encode())))
-    }
-}
-
-impl<'a> Encoding for ZRLEncoding<'a> {
-    fn get_type(&self) -> EncodingType {
-        EncodingType::ZRLE
-    }
-
-    fn encode(
-        &self,
-        ctx: &mut ConnectionContext,
-    ) -> crate::proto::Result<Box<dyn Iterator<Item = u8> + '_>> {
-        let mut in_buf = Vec::with_capacity(self.0.subframe.raw_size());
-        in_buf.extend(self.0.encode(ctx)?);
-
-        // `compress_vec` *requires* target vec to have enough reserved space.
-        // https://zlib.net/zlib_tech.html "The worst case choice of parameters
-        // can result in an expansion of at most 13.5%, plus eleven bytes."
-        let mut out_buf = Vec::with_capacity((in_buf.len() * 135 / 100) + 11);
-
-        // RFC 6143 section 7.7.6:
-        // > The server flushes the zlib stream to a byte boundary at the end of
-        // > each ZRLE-encoded rectangle.  It need not flush the stream between
-        // > tiles within a rectangle.
-        ctx.zlib
-            .compress_vec(&in_buf, &mut out_buf, flate2::FlushCompress::Sync)
-            .map_err(|_| {
-                ProtocolError::EncodingError(
-                    "zlib compression failed".to_string(),
-                )
-            })?;
-        Ok(Box::new(
-            (out_buf.len() as u32).to_be_bytes().into_iter().chain(out_buf),
-        ))
-    }
-}
-
-impl<'a> From<rgb_frame::SubFrame<'a>> for ZRLEncoding<'a> {
-    fn from(subframe: rgb_frame::SubFrame<'a>) -> Self {
-        Self(RLEncoding::from(subframe))
     }
 }
 
