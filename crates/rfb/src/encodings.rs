@@ -52,12 +52,12 @@ impl ConnectionContext {
                 | JpegQualityPseudo3 | JpegQualityPseudo2
                 | JpegQualityPseudo1 | JpegQualityPseudo0 => {
                     // numerically, mapping this 0..=9 to 1..=100 could be
-                    // appropriate, but a 1%-quality JPEG is not very
-                    // useful for VNC, so we'll just settle for 10..=100.
+                    // appropriate, but below 20%-quality JPEG is not very
+                    // useful for VNC, so we'll just settle for 25..=97.
                     const JPEG_LOWEST: i32 =
                         EncodingType::JpegQualityPseudo0 as i32;
                     let int_0_9 = ((*enc as i32) - JPEG_LOWEST) as u8;
-                    self.jpeg_quality = Some((int_0_9 + 1) * 10);
+                    self.jpeg_quality = Some(int_0_9 * 8 + 25);
                 }
                 CompressLevelPseudo9 | CompressLevelPseudo8
                 | CompressLevelPseudo7 | CompressLevelPseudo6

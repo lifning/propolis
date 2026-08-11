@@ -207,17 +207,21 @@ impl<'a> FramebufferUpdate<'a> {
         ctx: &mut ConnectionContext,
         // reused to avoid re-allocs
         serialize_buffer: &mut Vec<u8>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let mut size = 0;
         let header = raw::FramebufferUpdateHeader::new(self.0.len() as u16);
-        stream.write_all(header.as_bytes()).await?;
+        let header_bytes = header.as_bytes();
+        size += header_bytes.len();
+        stream.write_all(header_bytes).await?;
 
         for rect in self.0.into_iter() {
             serialize_buffer.clear();
             serialize_buffer.extend(rect.encode(ctx)?);
+            size += serialize_buffer.len();
             stream.write_all(serialize_buffer).await?;
         }
 
-        Ok(())
+        Ok(size)
     }
 }
 

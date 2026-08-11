@@ -17,8 +17,6 @@ pub struct RLEncoding<'a, const PX: usize> {
 /// RFC 6143, section 7.7.5
 pub type TRLEncoding<'a> = RLEncoding<'a, TRLE_PX>;
 /// RFC 6143, section 7.7.6
-// pub struct ZRLEncoding<'a>(RLEncoding<'a, ZRLE_PX>);
-
 pub type ZRLEncoding<'a> =
     ZlibWrappedEncoding<RLEncoding<'a, ZRLE_PX>, { EncodingType::ZRLE as i32 }>;
 

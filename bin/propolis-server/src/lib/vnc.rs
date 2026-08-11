@@ -27,6 +27,11 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::codec::FramedRead;
 
+#[usdt::provider(provider = "propolis")]
+mod probes {
+    fn rfb_framebuffer_update(bytes: u64, interval_ms: u64) {}
+}
+
 /// Arbitrary maximum valid resolution
 const MAX_RES: Resolution = Resolution { width: 1920, height: 1200 };
 const UNINIT_RES: Resolution = Resolution { width: 800, height: 600 };
@@ -59,6 +64,8 @@ struct ClientState {
     fbu_req: Option<FramebufferUpdateRequest>,
     encodings: Vec<EncodingType>,
     active_encoding: EncodingType,
+    fbu_transfer_rate: f64,
+    sent_lossy: bool,
     output_fourcc: FourCC,
     connection_context: ConnectionContext,
     serialize_buffer: Vec<u8>,
@@ -71,6 +78,8 @@ impl Default for ClientState {
             fbu_req: None,
             encodings: Vec::new(),
             active_encoding: EncodingType::Raw,
+            fbu_transfer_rate: 0.0,
+            sent_lossy: false,
             output_fourcc: UNINIT_FOURCC,
             connection_context: ConnectionContext::default(),
             serialize_buffer: Vec::new(),
@@ -80,15 +89,18 @@ impl Default for ClientState {
 impl ClientState {
     fn preferred_available_encoding(&self) -> EncodingType {
         use EncodingType::*;
-        // TightPNG is preferred when available because browser-based clients
-        // (i.e. noVNC) can utilize native-code image/png decoders for better
-        // performance than JS impls of standard RFC6143-defined encodings.
-        if self.encodings.contains(&TightPNG) {
-            return TightPNG;
-        }
+        // XXX: reworking logic to pick encodings based on bandwidth use
+        // (JPEG enjoyes similar benefits)
+        //
+        // // TightPNG is preferred when available because browser-based clients
+        // // (i.e. noVNC) can utilize native-code image/png decoders for better
+        // // performance than JS impls of standard RFC6143-defined encodings.
+        // if self.encodings.contains(&TightPNG) {
+        //     return TightPNG;
+        // }
         for enc in &self.encodings {
             match enc {
-                Zlib | TRLE | ZRLE | JPEG => return *enc,
+                Zlib | TRLE | ZRLE | JPEG | TightPNG => return *enc,
                 // our impl of "Tight" encoding is only the JPEG subencoding,
                 // for which the client indicates support by sending at least
                 // one JpegQualityPseudo[0..9]
@@ -99,6 +111,30 @@ impl ClientState {
             }
         }
         Raw
+    }
+    fn lossless_encoding(&self) -> EncodingType {
+        use EncodingType::*;
+        for enc in &self.encodings {
+            match enc {
+                Zlib | TRLE | ZRLE | TightPNG => return *enc,
+                _ => (),
+            }
+        }
+        Raw
+    }
+    fn lossy_encoding(&self) -> Option<EncodingType> {
+        use EncodingType::*;
+        for enc in &self.encodings {
+            match enc {
+                JPEG | Tight => return Some(*enc),
+                _ => (),
+            }
+        }
+        None
+    }
+    fn active_encoding_is_lossy(&self) -> bool {
+        use EncodingType::*;
+        matches!(self.active_encoding, JPEG | Tight)
     }
 }
 
@@ -350,30 +386,45 @@ impl VncServer {
         cstate: &mut ClientState,
     ) -> Result<(), ProtocolError> {
         let (serv_snap, _kind) = cstate.last_snap.as_ref().unwrap();
-        let FramebufferUpdateRequest { incremental, position: pos, resolution } =
-            *cstate.fbu_req.as_ref().unwrap_or(&FramebufferUpdateRequest {
-                incremental: false,
-                position: Position { x: 0, y: 0 },
-                resolution: Resolution {
-                    width: serv_snap.frame.spec().width.get() as u16,
-                    height: serv_snap.frame.spec().height.get() as u16,
-                },
-            });
+        let FramebufferUpdateRequest {
+            mut incremental,
+            position: pos,
+            resolution,
+        } = *cstate.fbu_req.as_ref().unwrap_or(&FramebufferUpdateRequest {
+            incremental: false,
+            position: Position { x: 0, y: 0 },
+            resolution: Resolution {
+                width: serv_snap.frame.spec().width.get() as u16,
+                height: serv_snap.frame.spec().height.get() as u16,
+            },
+        });
         let Resolution { width, height } = resolution;
+
+        // TODO: arbitrarily chose 7KB/sec, tune better
+        if cstate.sent_lossy && cstate.fbu_transfer_rate < 7000.0 {
+            incremental = false;
+        }
+
         let fbu = if !incremental || cstate.last_snap_client.is_none() {
             let subframe = serv_snap.frame.subframe(
                 &(pos.x as usize..width as usize),
                 &(pos.y as usize..height as usize),
             );
+            cstate.sent_lossy = false;
             FramebufferUpdate(vec![Rectangle {
                 position: pos,
                 dimensions: Resolution { width, height },
-                data: cstate.active_encoding.from(subframe),
+                data: cstate.lossless_encoding().from(subframe),
             }])
         } else {
             // unwrap: !is_none
             let (client_snap, _kind) =
                 cstate.last_snap_client.as_ref().unwrap();
+            // split the frame into a grid of 128x128 (chosen arbitrarily)
+            // sub-rectangles, such that when the difference between frames
+            // is disconnected or concave (e.g. when an OS tries to save
+            // pixel bandwidth by only drawing the outline of a window as it
+            // is being moved), we can eke some encoding and bandwidth savings
             const STEP: usize = 128;
             let mut rectangles = vec![];
             for sub_y in (pos.y..pos.y + height).step_by(STEP) {
@@ -464,21 +515,53 @@ impl VncServer {
                             width: subframe.width() as u16,
                             height: subframe.height() as u16,
                         },
-                        // TODO: below a certain subframe.raw_size(), just Raw?
                         data: cstate.active_encoding.from(subframe),
                     });
                 }
             }
+            if !rectangles.is_empty() && cstate.active_encoding_is_lossy() {
+                cstate.sent_lossy = true;
+            }
             FramebufferUpdate(rectangles)
         };
 
-        fbu.write_to(
-            conn,
-            &mut cstate.connection_context,
-            &mut cstate.serialize_buffer,
-        )
-        .await?;
+        let bytes = fbu
+            .write_to(
+                conn,
+                &mut cstate.connection_context,
+                &mut cstate.serialize_buffer,
+            )
+            .await?;
         conn.flush().await?;
+
+        // TODO: decisions about temporarily ducking lossy quality
+        // if frame time is too bad (below 12 FPS is where the brain stops
+        // wanting to believe an animation is motion, so we should treat
+        // ~100ms frame time as a potential signal that we should, at least
+        // temporarily, attempt to improve bandwidth by reducing JPEG quality
+        // on the assumption that transfer time of frame updates is the cause)
+        if let Some(delta_t) =
+            cstate.last_snap_client.as_ref().and_then(|(csnap, _kind)| {
+                serv_snap.when.checked_duration_since(csnap.when)
+            })
+        {
+            probes::rfb_framebuffer_update!(|| (
+                bytes as u64,
+                delta_t.as_millis() as u64
+            ));
+            let bytes_per_sec = bytes as f64 / delta_t.as_secs_f64();
+            if bytes_per_sec.is_finite() {
+                // continuous weighted average biased toward more recent samples
+                // i.e.: next_average = (current_sample + 3*prev_average) / 4
+                const SKEW: f64 = 4.0;
+                let was_zero = cstate.fbu_transfer_rate == 0.0;
+                cstate.fbu_transfer_rate *= SKEW - 1.0;
+                cstate.fbu_transfer_rate += bytes_per_sec;
+                if !was_zero {
+                    cstate.fbu_transfer_rate /= SKEW;
+                }
+            }
+        }
 
         // With the FBU sent, the existing request is fulfilled
         cstate.fbu_req = None;
